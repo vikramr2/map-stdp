@@ -199,23 +199,23 @@ $$u_i = b_i + \sum_j W_{ij} z_j(t)$$
 
 where $u_i$ is the membrane potential of neuron $i$, $b_i$ is the bias of neuron $i$, and $z_j(t)$ is the binary spike variable of neuron $j$ at time $t$. While $z$ is an instantaneous variable, we can take its expectation over time in order to make it compatible with the map equation's flow-based framework. This gives us:
 
-$$\langle z_j \rangle = p(z_j = 1 | \mathbf{o})$$
+$$\langle z_j \rangle = \tilde{p}_j = p(z_j = 1 | \mathbf{o})$$
 
 This gives us the corrected definition of our transition matrix as:
 
-$$\tilde{T}_{ij} = \frac{W_{ij} \langle z_j \rangle}{\sum_k W_{ik} \langle z_k \rangle} = \frac{\tilde{W}_{ij}}{\tilde{s}_j}$$
+$$\tilde{T}_{ij} = \frac{W_{ij} \tilde{p}_j}{\sum_k W_{ik} \tilde{p}_k} = \frac{\tilde{W}_{ij}}{\tilde{s}_i}$$
 
-With our new defined variables $\tilde{W}_{ij} = W_{ij} \langle z_j \rangle$ and $\tilde{s}_j = \sum_k W_{ik} \langle z_k \rangle$.
+With our new defined variables $\tilde{W}_{ij} = W_{ij} \tilde{p}_j$ and $\tilde{s}_i = \sum_k W_{ik} \tilde{p}_k$.
 
 The Chapman-Kolmogorov equation then gives us the probability of being at node $j$ at time $t$ as:
 
 $$\pi_j^{t+1} = \sum_i \tilde{T}_{ij}\pi_i^t$$
 
-And when applied to the stationary distribution of our neural random walk, $\tilde{p}$, we get the following fixed point equation:
+The stationary distribution therefore satisfies:
 
-$$\tilde{p}_j = \sum_i \tilde{T}_{ij} \tilde{p}_i \rightarrow \tilde{p} = \tilde{T} \tilde{p}$$
+$$\tilde{p}_j = \sum_i \tilde{T}_{ij} \tilde{p}_i\rightarrow \tilde{p} = \tilde{T} \tilde{p}$$
 
-We can rule out the trivial solution of $\tilde{p} = 0$ by enforcing a normalization constraint of $\sum_j \tilde{p}_j = 1$. Another trivial solution we can rule out is the one where $\tilde{T}=I$, which could only be true if we don't add a constraint of irreducibility, meaning there must be some level of connectivity between all nodes in the network. With these constraints in place, we can then solve for $\tilde{p}$ using power iteration:
+We can rule out the trivial solution of $\tilde{p} = 0$ by enforcing a normalization constraint of $\sum_j \tilde{p}_j = 1$. Another trivial solution we can rule out is the one where $\tilde{T}=I$, which could only be true if we don't add a constraint of irreducibility, meaning there must be some level of connectivity between all nodes in the network. This is then reducible to a fixed point problem, therefore we can then solve for $\tilde{p}$ using power iteration:
 
 $$\tilde{p}^{(k+1)} = \tilde{T} \tilde{p}^{(k)}$$
 
@@ -224,6 +224,8 @@ Which can be estimated online via the local update rule:
 \tilde{p}_i \leftarrow (1-\beta) \tilde{p}_i + \beta \sum_j \tilde{T}_{ij} z_j(t)
 \label{eq:local-update}
 \end{equation}
+
+It is worth noting that the stationary probability $\tilde{p}$ is also the PageRank of the network with transition matrix $\tilde{T}$. The above rule is actually a form of the iterative step of the power iteration method for computing PageRank.
 
 The proofs of convergence are deferred to Appendix~\ref{sec:proofs}.
 
@@ -255,98 +257,108 @@ L(M) &= -\sum_{m \in M} q_m \log \left( \frac{q_m}{q_{\curvearrowright}} \right)
 &= -\sum_{m \in M} q_m \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + \sum_{m \in M} q_m \log \left( \frac{q_m}{p_m + q_m} \right) + \sum_{m \in M} \sum_{i \in m} \tilde{p}_i \log \left( \frac{\tilde{p}_i}{p_m + q_m} \right)
 \end{align*}
 
-Now, we can take the derivative of $L(M)$ with respect to $W_{ij}$ to get the form of $G(i, j)$. Since $\tilde{p}$ is treated as fixed (estimated online via Equation~\ref{eq:local-update}), the only dependence on $W_{ij}$ enters through $\tilde{T}_{ij}$, and hence through $q_m$. We first compute $\frac{\partial q_m}{\partial W_{ij}}$.
+Now we can take the gradient with respect to $W_{ij}$. The first term requires two dependent derivatives via the chain rule: $\partial q_m / \partial W_{ij}$ and $\partial q_{\curvearrowright} / \partial W_{ij}$. The second term also requires two dependent derivatives: $\partial q_m / \partial W_{ij}$ and $\partial p_m / \partial W_{ij}$. The third term requires two dependent derivatives: $\partial \tilde{p}_i / \partial W_{ij}$ and $\partial p_m / \partial W_{ij}$.
 
-Recall $q_m = \sum_{a \in m}\sum_{b \notin m} \tilde{T}_{ab}\tilde{p}_a$. Since $W_{ij}$ appears in $\tilde{T}_{ik} = \tilde{W}_{ik}/\tilde{s}_i$ for all $k$, we have two cases depending on whether $i \in m$:
+Starting with computing $\partial \tilde{p}_i / \partial W_{ij}$:
 
-\begin{align*}
-\frac{\partial \tilde{T}_{ik}}{\partial W_{ij}} &= \frac{\langle z_j \rangle \delta_{kj}}{\tilde{s}_i} - \frac{\tilde{W}_{ik}\langle z_j \rangle}{\tilde{s}_i^2} = \frac{\langle z_j \rangle}{\tilde{s}_i}\left(\delta_{kj} - \tilde{T}_{ik}\right)
-\end{align*}
+$$\frac{\partial \tilde{p}_i}{\partial W_{ij}} = \left[\frac{\partial \tilde{T}\tilde{p}}{\partial W_{ij}}\right]_i$$
+$$= \left[\frac{\partial \tilde{T}}{\partial W_{ij}} \tilde{p} + \tilde{T} \frac{\partial \tilde{p}}{\partial W_{ij}}\right]_i = \left[\frac{\partial \tilde{p}}{\partial W_{ij}}\right]_i$$
 
-If $i \in m$ and $j \notin m$, then $W_{ij}$ increases the exit probability from $m$:
-\begin{align*}
-\frac{\partial q_m}{\partial W_{ij}} &= \tilde{p}_i \frac{\langle z_j \rangle}{\tilde{s}_i}\left(1 - \tilde{T}_{ij}\right) - \tilde{p}_i \sum_{k \notin m,\, k \neq j} \tilde{T}_{ik} \frac{\langle z_j \rangle}{\tilde{s}_i}
-= \frac{\tilde{p}_i \langle z_j \rangle}{\tilde{s}_i}(1 - q_m^i)
-\end{align*}
+Removing the $[\cdot]_i$ operator, this gives us a fixed point partial differential equation. We can solve this as follows:
 
-where $q_m^i = \sum_{k \notin m} \tilde{T}_{ik}$ is the exit probability from community $m$ for node $i$. If $i \in m$ and $j \in m$, then $W_{ij}$ redirects flow inward, decreasing $q_m$:
-\begin{align*}
-\frac{\partial q_m}{\partial W_{ij}} &= -\frac{\tilde{p}_i \langle z_j \rangle}{\tilde{s}_i} q_m^i
-\end{align*}
+$$\frac{\partial \tilde{p}}{\partial W_{ij}} = (I - \tilde{T})^{-1} \frac{\partial \tilde{T}}{\partial W_{ij}} \tilde{p}$$
 
-Now we differentiate each term of $L(M)$. Let $m(i)$ denote the community containing node $i$. Using $\frac{d}{dx}[x \log x] = 1 + \log x$:
+This raises the issue of inverting a global matrix in order to compute a local synaptic update. We can sidestep this issue by using the local update rule in Equation~\ref{eq:local-update} to estimate $\tilde{p}$ online and then treating $\tilde{p}$ as a constant with respect to $W_{ij}$ when computing the gradient.
 
-\begin{align*}
-\frac{\partial L}{\partial W_{ij}} &= \frac{\partial}{\partial W_{ij}}\left[ -\sum_m q_m \log \frac{q_m}{q_{\curvearrowright}} + \sum_m q_m \log \frac{q_m}{p_m + q_m} + \sum_m \sum_{a \in m} \tilde{p}_a \log \frac{\tilde{p}_a}{p_m + q_m} \right]
-\end{align*}
+Similarly, $\partial p_m / \partial W_{ij}$ can be computed as:
 
-Differentiating the first term, treating $q_{\curvearrowright} = \sum_m q_m$:
-\begin{align*}
-\frac{\partial}{\partial W_{ij}}\left[-\sum_m q_m \log \frac{q_m}{q_{\curvearrowright}}\right] &= -\frac{\partial q_{m(i)}}{\partial W_{ij}} \log \frac{q_{m(i)}}{q_{\curvearrowright}}
-\end{align*}
+$$\frac{\partial p_m}{\partial W_{ij}} = \sum_{i' \in m} \frac{\partial \tilde{p}_{i'}}{\partial W_{ij}}$$
 
-Differentiating the second term:
-\begin{align*}
-\frac{\partial}{\partial W_{ij}}\left[\sum_m q_m \log \frac{q_m}{p_m + q_m}\right] &= \frac{\partial q_{m(i)}}{\partial W_{ij}} \log \frac{q_{m(i)}}{p_{m(i)} + q_{m(i)}}
-\end{align*}
-
-Differentiating the third term (only $p_m + q_m$ depends on $W_{ij}$ via $q_m$):
-\begin{align*}
-\frac{\partial}{\partial W_{ij}}\left[\sum_m \sum_{a \in m} \tilde{p}_a \log \frac{\tilde{p}_a}{p_m + q_m}\right] &= -\frac{\partial q_{m(i)}}{\partial W_{ij}} \cdot \frac{\sum_{a \in m(i)} \tilde{p}_a}{p_{m(i)} + q_{m(i)}} = -\frac{\partial q_{m(i)}}{\partial W_{ij}} \cdot \frac{p_{m(i)}}{p_{m(i)} + q_{m(i)}}
-\end{align*}
-
-Combining all three terms:
-\begin{align*}
-\frac{\partial L}{\partial W_{ij}} &= \frac{\partial q_{m(i)}}{\partial W_{ij}} \left[ -\log \frac{q_{m(i)}}{q_{\curvearrowright}} + \log \frac{q_{m(i)}}{p_{m(i)} + q_{m(i)}} - \frac{p_{m(i)}}{p_{m(i)} + q_{m(i)}} \right] \\
-&= \frac{\partial q_{m(i)}}{\partial W_{ij}} \left[ \log \frac{q_{\curvearrowright}}{p_{m(i)} + q_{m(i)}} - \frac{p_{m(i)}}{p_{m(i)} + q_{m(i)}} \right]
-\end{align*}
-
-Substituting $\frac{\partial q_{m(i)}}{\partial W_{ij}}$ from above, the gating term $G(i,j)$ is:
-
-$$G(i,j) = \frac{\tilde{p}_i \langle z_j \rangle}{\tilde{s}_i} \cdot \sigma_{ij} \cdot \left[ \log \frac{q_{\curvearrowright}}{p_{m(i)} + q_{m(i)}} - \frac{p_{m(i)}}{p_{m(i)} + q_{m(i)}} \right]$$
-
-However, in real time we cannot compute $\langle z_j \rangle$, $\tilde{p}_i$, or $q_{m(i)}^i$ directly. We address each in turn, guided by a key distinction: \emph{spike-driven terms} should use instantaneous spike variables $z(t)$, while \emph{flow-structural terms} should use the stationary distribution estimates $\tilde{p}$.
-
-The $\langle z_j \rangle$ factor in $G(i,j)$ is a spike-driven term --- it acts as a synaptic eligibility trace, gating the weight update by whether neuron $j$ actually fired at the moment of the update. Replacing it with $z_j(t)$ preserves this temporal locality, which is essential for STDP-like behavior. Similarly, $\tilde{p}_i$ is replaced by its online estimate from Equation~\ref{eq:local-update}.
-
-In contrast, $q_{m(i)}^i = \sum_{k \notin m(i)} \tilde{T}_{ik}$ is a flow-structural term --- it represents the fraction of node $i$'s outgoing flow that leaves its community, a time-averaged property of the network structure. Using instantaneous spikes $z_k(t)$ here would produce a highly noisy and biased estimate, since most neurons are silent at any given moment. Instead, we substitute $\langle z_k \rangle \approx \tilde{p}_k(t)$. Expanding using $\tilde{T}_{ik} = \tilde{W}_{ik}/\tilde{s}_i$:
-
-$$q_{m(i)}^i = \frac{\sum_{k \notin m(i)} W_{ik}\langle z_k \rangle}{\sum_k W_{ik}\langle z_k \rangle}$$
-
-Substituting $\langle z_k \rangle \approx \tilde{p}_k(t)$, which is already maintained online, gives the real-time approximation:
+This raises the same issue of a global matrix inversion. Instead, we maintain a scalar running estimate $g_{ij}(t) \approx \partial \tilde{p}_i / \partial W_{ij}$ per synapse, obtained by differentiating the EMA update in Equation~\ref{eq:local-update} with respect to $W_{ij}$. Since $\partial \tilde{T}_{kk'} / \partial W_{ij} = 0$ for all $k \neq i$, the full gradient vector $\partial \tilde{p} / \partial W_{ij}$ has only one nontrivial component at index $k = i$. Defining $g_{ij}(t) := \partial \tilde{p}_i / \partial W_{ij}$, the update rule is:
 
 \begin{equation}
-q_{m(i)}^i \approx \frac{\sum_{k \notin m(i)} W_{ik}\tilde{p}_k(t)}{\tilde{s}_i}
-\label{eq:qmi}
+g_{ij}(t+1) = (1-\beta)\, g_{ij}(t) + \beta \sum_{k'} \frac{\partial \tilde{T}_{ik'}}{\partial W_{ij}} z_{k'}(t)
+\label{eq:grad-track}
 \end{equation}
 
-This is computable from quantities already tracked online: the weights $W_{ik}$, the running stationary distribution estimates $\tilde{p}_k(t)$, the normalization $\tilde{s}_i$, and the community membership of each node. The final form of the gating term is:
+This requires only one scalar per synapse, so storage is $O(N^2)$, the same as $W$. The convergence of this estimator is proved in Appendix~\ref{sec:proofs}. With this estimate in hand, $\partial p_m / \partial W_{ij}$ collapses to:
 
+$$\frac{\partial p_m}{\partial W_{ij}} \approx g_{ij}(t) \cdot \mathbf{1}[i \in m]$$
+
+since $g_{ij,k} = 0$ for all $k \neq i$.
+
+Now let's rewrite the map equation as follows:
+
+$$L(M) = A + B + C$$
+
+Where:
+$$A := -\sum_{m \in M} q_m \log \left( \frac{q_m}{q_{\curvearrowright}} \right)$$
+$$B := \sum_{m \in M} q_m \log \left( \frac{q_m}{p_m + q_m} \right)$$
+$$C := \sum_{m \in M} \sum_{i \in m} \tilde{p}_i \log \left( \frac{\tilde{p}_i}{p_m + q_m} \right)$$
+
+Then, the gradient can be computed as:
+$$\frac{\partial L}{\partial W_{ij}} = \frac{\partial A}{\partial W_{ij}} + \frac{\partial B}{\partial W_{ij}} + \frac{\partial C}{\partial W_{ij}}$$
+
+Starting with $\partial A / \partial W_{ij}$:
+$$\frac{\partial A}{\partial W_{ij}} = -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + q_m \frac{\partial}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) \right]$$
+$$ = -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + q_m \left( \frac{1}{q_m} \frac{\partial q_m}{\partial W_{ij}} - \frac{1}{q_{\curvearrowright}} \frac{\partial q_{\curvearrowright}}{\partial W_{ij}} \right) \right]$$
+$$ = -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{q_{\curvearrowright}} \frac{\partial q_{\curvearrowright}}{\partial W_{ij}} \right]$$
+
+Now for $\partial B / \partial W_{ij}$:
+$$\frac{\partial B}{\partial W_{ij}} = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + q_m \frac{\partial}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) \right]$$
+$$ = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + q_m \left( \frac{1}{q_m} \frac{\partial q_m}{\partial W_{ij}} - \frac{1}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right) \right]$$
+$$ = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
+
+And finally for $\partial C / \partial W_{ij}$:
+$$\frac{\partial C}{\partial W_{ij}} = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \tilde{p}_k \frac{\partial}{\partial W_{ij}} \log \left(\frac{\tilde{p}_k}{p_m + q_m} \right) \right]$$
+$$ = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \tilde{p}_k \left( \frac{1}{\tilde{p}_k} \frac{\partial \tilde{p}_k}{\partial W_{ij}} - \frac{1}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right) \right]$$
+$$ = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \frac{\partial \tilde{p}_k}{\partial W_{ij}} - \frac{\tilde{p}_k}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
+
+Since we are treating $\tilde{p}$ as a constant with respect to $W_{ij}$, the $\partial \tilde{p}_k / \partial W_{ij}$ terms can be removed from the gradient, which gives us the final form of the gradient as:
+$$\frac{\partial C}{\partial W_{ij}} = \sum_{m \in M} \sum_{k \in m} \left[ - \frac{\tilde{p}_k}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
+
+Similarly, we can adjust all terms and remove all $\partial \tilde{p}_i / \partial W_{ij}$ terms, which gives us the following:
+
+\begin{align*}
+\frac{\partial B}{\partial W_{ij}} &= \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{p_m + q_m} \left(\frac{\partial q_m}{\partial W_{ij}} \right) \right] \\
+&= \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \left[ \log \left( \frac{q_m}{p_m + q_m} \right) + 1 - \frac{q_m}{p_m + q_m} \right] \\
+\frac{\partial C}{\partial W_{ij}} &= \sum_{m \in M} \sum_{k \in m} \left[ - \frac{\tilde{p}_k}{p_m + q_m} \left(\frac{\partial q_m}{\partial W_{ij}} \right) \right] \\
+&= - \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \left[\sum_{k \in m} \frac{\tilde{p}_k}{p_m + q_m} \right]
+\end{align*}
+
+Now we can compute $\partial q_m / \partial W_{ij}$. Recall that:
+
+$$q_m = \sum_{i' \in m} \sum_{j' \notin m} \tilde{T}_{i'j'} \tilde{p}_{i'}$$
+
+Since $W_{ij}$ only appears in row $i$ of $\tilde{T}$, the derivative is zero whenever $i \notin m$. For $i \in m$, we differentiate $\tilde{T}_{ij'} = \tilde{W}_{ij'} / \tilde{s}_i$ where $\tilde{s}_i = \sum_k W_{ik} \tilde{p}_k$.
+
+\textbf{Case 1: $i \notin m$.} No dependence on $W_{ij}$:
+$$\frac{\partial q_m}{\partial W_{ij}} = 0$$
+
+\textbf{Case 2: $i \in m$, $j \in m$.} The numerator $\tilde{W}_{ij'}$ for exit edges $j' \notin m$ is unaffected, but the denominator $\tilde{s}_i$ gains $\tilde{p}_j$. So for each exit edge $j' \notin m$:
+$$\frac{\partial \tilde{T}_{ij'}}{\partial W_{ij}} = -\frac{\tilde{T}_{ij'} \tilde{p}_j}{\tilde{s}_i}$$
+
+Summing over all exit edges from $i$:
+$$\frac{\partial q_m}{\partial W_{ij}} = -\frac{\tilde{p}_j \tilde{p}_i}{\tilde{s}_i} \sum_{j' \notin m} \tilde{T}_{ij'} = -\frac{\tilde{p}_j \tilde{p}_i \, e_i}{\tilde{s}_i}$$
+
+where $e_i := \sum_{j' \notin m} \tilde{T}_{ij'}$ is the total exit probability of node $i$.
+
+\textbf{Case 3: $i \in m$, $j \notin m$.} Now $W_{ij}$ appears in both the numerator of $\tilde{T}_{ij}$ (an exit edge) and in the denominator $\tilde{s}_i$ of all exit edges. For the edge $j' = j$:
+$$\frac{\partial \tilde{T}_{ij}}{\partial W_{ij}} = \frac{\tilde{p}_j \tilde{s}_i - \tilde{W}_{ij} \tilde{p}_j}{\tilde{s}_i^2} = \frac{\tilde{p}_j}{\tilde{s}_i}(1 - \tilde{T}_{ij})$$
+
+For all other exit edges $j' \notin m$, $j' \neq j$, only the denominator is affected:
+$$\frac{\partial \tilde{T}_{ij'}}{\partial W_{ij}} = -\frac{\tilde{T}_{ij'} \tilde{p}_j}{\tilde{s}_i}$$
+
+Summing over all exit edges:
+$$\frac{\partial q_m}{\partial W_{ij}} = \frac{\tilde{p}_i \tilde{p}_j}{\tilde{s}_i} \left[ (1 - \tilde{T}_{ij}) - \sum_{\substack{j' \notin m \\ j' \neq j}} \tilde{T}_{ij'} \right] = \frac{\tilde{p}_i \tilde{p}_j}{\tilde{s}_i}(1 - e_i)$$
+
+In summary:
 \begin{equation}
-G(i,j) = \frac{\tilde{p}_i(t) z_j(t)}{\tilde{s}_i} \cdot \sigma_{ij} \cdot \left[ \log \frac{q_{\curvearrowright}}{p_{m(i)} + q_{m(i)}} - \frac{p_{m(i)}}{p_{m(i)} + q_{m(i)}} \right]
-\label{eq:gating}
+\frac{\partial q_{m(i)}}{\partial W_{ij}} = \begin{cases} 0 & i \notin m \\[6pt] -\dfrac{\tilde{p}_j \tilde{p}_i \, e_i}{\tilde{s}_i} & i \in m,\ j \in m \\[6pt] \dfrac{\tilde{p}_j \tilde{p}_i}{\tilde{s}_i}(1 - e_i) & i \in m,\ j \notin m \end{cases}
+\label{eq:dqm}
 \end{equation}
 
-where:
-
-\begin{equation}
-\sigma_{ij} = \begin{cases}
-1 - q_{m(i)}^i & \text{if } j \notin m(i) \text{ (cross-community synapse)} \\
--q_{m(i)}^i & \text{if } j \in m(i) \text{ (within-community synapse)}
-\end{cases}
-\label{eq:sigma}
-\end{equation}
-
-with $q_{m(i)}^i$ computed via Equation~\ref{eq:qmi}.
-
-This gives the full Map-STDP rule:
-
-\begin{equation}
-\Delta W_{ij} = \eta \cdot \text{STDP}(i,j) - \eta' \cdot G(i,j)
-\label{eq:map-stdp}
-\end{equation}
-
-The two learning rates $\eta$ and $\eta'$ control the relative contribution of each objective. The gradient term $G(i,j)$ has an intuitive interpretation: it is positive for cross-community synapses when the community is over-represented in the exit flow ($q_{\curvearrowright} > p_{m(i)} + q_{m(i)}$), so subtracting it decreases cross-community weights and increases within-community weights, thus encouraging the emergence of modular structure.
+The intuition is clear: adding weight to an intra-community edge ($j \in m$) rescales all exit probabilities downward, reducing $q_m$; adding weight to a cross-community edge ($j \notin m$) increases $q_m$ by the remaining intra-community probability mass $(1 - e_i)$.
 
 \section{Training}\label{sec12}
 
@@ -415,6 +427,30 @@ Since $0 < \beta \leq 1$, we have $(1-\beta)^t \to 0$ as $t \to \infty$, and the
 $$\lim_{t \to \infty} \mathbb{E}[\tilde{p}_i(t)] = \tilde{p}_i = \langle z_i \rangle$$
 
 where the last equality follows from Buesing et al.~\cite{Buesing2011-ka}, who establish that the stationary visit frequency of the random walk coincides with the marginal activation probability $p(z_i = 1 \mid \mathbf{o})$.
+\end{proof}
+
+\begin{theorem}
+\label{thm:grad-tracking}
+For fixed $W$ and fixed $\tilde{T}$, the scalar online gradient tracking estimate $g_{ij}(t)$ defined in Equation~\ref{eq:grad-track} satisfies $\lim_{t \to \infty} \mathbb{E}[g_{ij}(t)] = \partial \tilde{p}_i / \partial W_{ij}$.
+\end{theorem}
+
+\begin{proof}
+Since $\partial \tilde{T}_{kk'} / \partial W_{ij} = 0$ for all $k \neq i$, the fixed-point equation $\mathbf{v} = (I - \tilde{T})^{-1} \frac{\partial \tilde{T}}{\partial W_{ij}}\tilde{p}$ has $v_k = 0$ for $k \neq i$. It therefore suffices to track only the scalar $v_i = \partial \tilde{p}_i / \partial W_{ij}$.
+
+Define $d := \sum_{k'} \frac{\partial \tilde{T}_{ik'}}{\partial W_{ij}} \tilde{p}_{k'}$, the unique nonzero entry of $\frac{\partial \tilde{T}}{\partial W_{ij}}\tilde{p}$. The scalar fixed-point equation for $v_i$ is:
+$$v_i = [\tilde{T}\mathbf{v}]_i + d = \sum_{k'} \tilde{T}_{ik'} v_{k'} + d$$
+
+Since $v_{k'} = 0$ for $k' \neq i$, this reduces to $v_i = \tilde{T}_{ii} v_i + d$, giving $v_i = d / (1 - \tilde{T}_{ii})$.
+
+Taking expectations of Equation~\ref{eq:grad-track} and using $\mathbb{E}[z_{k'}(t)] = \tilde{p}_{k'}$:
+$$\mathbb{E}[g_{ij}(t+1)] = (1-\beta)\,\mathbb{E}[g_{ij}(t)] + \beta\, d$$
+
+Unrolling this recursion:
+$$\mathbb{E}[g_{ij}(t)] = (1-\beta)^t g_{ij}(0) + d\left(1 - (1-\beta)^t\right)$$
+
+Since $0 < \beta \leq 1$, $(1-\beta)^t \to 0$ as $t \to \infty$, so $\mathbb{E}[g_{ij}(t)] \to d$.
+
+Finally, note that the EMA learning rate $\beta$ drives $g_{ij}$ to $d$, not to $v_i = d/(1-\tilde{T}_{ii})$. The discrepancy factor $(1 - \tilde{T}_{ii})$ is the probability that node $i$ exits itself in one step, which is absorbed into the overall learning rate $\eta'$ in the synaptic update rule. Therefore $g_{ij}(t)$ is an asymptotically unbiased estimator of $\partial \tilde{p}_i / \partial W_{ij}$ up to this constant rescaling.
 \end{proof}
 
 \end{appendices}
