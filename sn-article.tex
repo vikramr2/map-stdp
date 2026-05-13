@@ -90,7 +90,7 @@
 
 \begin{document}
 
-\title[Map-STDP]{Map-STDP}
+\title[Map-STDP]{Map-STDP: Does it form cortices?}
 
 %%=============================================================%%
 %% GivenName	-> \fnm{Joergen W.}
@@ -101,14 +101,15 @@
 %%  \sfx{IV}}\email{iauthor@gmail.com}
 %%=============================================================%%
 
-\author[1]{\fnm{Vikram} \sur{Ramavarapu}}\email{vikramr2@illinois.edu}
+\author{\fnm{Vikram} \sur{Ramavarapu}}
+% \email{vikramr2@illinois.edu}
 
-\affil[1]{\orgdiv{Computer Science}, \orgname{University of Illinois}, \orgaddress{\city{Urbana}, \state{Illinois}, \country{USA}}}
+% \affil[1]{\orgdiv{Computer Science}, \orgname{University of Illinois}, \orgaddress{\city{Urbana}, \state{Illinois}, \country{USA}}}
 %%==================================%%
 %% Sample for unstructured abstract %%
 %%==================================%%
 
-\abstract{STDP is a biologically plausible learning rule that has been widely used in spiking neural networks. However, STDP is a local learning rule that cannot capture the global modular structure of the neural network. In this paper, a new Map-STDP rule is derived using the map equation, which is an info-theoretic objective function for community detection.}
+\abstract{STDP is a local learning rule that may not capture the global modular structure of the neural network. In this paper, a new Map-STDP rule is derived using the map equation, which is an info-theoretic objective function for community detection.}
 
 %%================================%%
 %% Sample for structured abstract %%
@@ -132,11 +133,22 @@
 
 \section{Introduction}\label{sec1}
 
+\subsection{Problem}
 Spike-timing dependent plasticity (STDP) \cite{Shouval2010-uj} is a biologically plausible learning rule that has been widely used in spiking neural networks. When a pre-synaptic neuron fires shortly before a post-synaptic neuron, the synapse between them is strengthened. Conversely, if the pre-synaptic neuron fires shortly after the post-synaptic neuron, the synapse is weakened.
 
-However, STDP is a fully local rule that cannot capture the global structure of the neural network. This issue is much more prominent when population vectors are used for inference via the population of neurons in different regions of the network. In order to ensure the expressivity of the population vectors, the neural network must have a modular structure, much like the cortical organization of the brain.
+However, STDP is a fully local rule that may not capture the global structure of the neural network. Ideally, we want our learning rule to guide our network to form \emph{cortices}, which are densely connected communities of neurons that are sparsely connected to other communities.
 
-Moreover, neural dynamics are very stochastic and operate as a form of random walk \cite{Buesing2011-ka}, which is a major component of the map equation, an info-theoretic objective function for community detection in the Infomap algorithm \cite{Rosvall2008-vf}. The map equation measures the modular structure of a network by quantifying the amount of information needed to describe the flow of activity through the network via a random walk.
+\subsection{Why Cortices?}
+
+Cortices enable expressive spatial population codes that can perform representations such that cortices can be mapped to concepts.
+
+For example, in the case of ImageNet classification, we want the network to learn a modular structure where each community corresponds to a different class. This would allow the network to learn a more efficient representation of the data, as it would be able to leverage the modular structure to learn more compact representations of each class.
+
+In the case of the Gymnasium car racing environment, we would want the network to form five cortices that correspond to: do nothing, accelerate, brake, turn left, and turn right.
+
+\subsection{Random Walks and the Map Equation}
+
+Neural dynamics are very stochastic and operate as a form of random walk \cite{Buesing2011-ka}, which is a major component of the map equation, an info-theoretic objective function for community detection in the Infomap algorithm \cite{Rosvall2008-vf}. The map equation measures the modular structure of a network by quantifying the amount of information needed to describe the flow of activity through the network via a random walk.
 
 As such, a Map-STDP rule that incorporates the map equation is derived. The Map-STDP rule is a local learning rule that can capture the global modular structure of the neural network. Moreover, the Map-STDP rule preserves biorealism through the use of info-theoretic entropy maximization, stochastic neural dynamics, and local synaptic updates.
 
@@ -150,44 +162,22 @@ $$L(M) = q_{\curvearrowright} H(\mathcal{Q}) + \sum_{m \in M} p_{\circlearrowrig
 
 where $M$ is a partition of the network into $m$ communities. There are two terms. The first term represents the entropy of movement between communities, will the second term represents the entropy of movement within communities, where exiting the community is also considered a movement.
 
-\subsection{Neurological Entropy}
+\subsection{Connecting the Map Equation to Neural Computation}
 
-The brain also operates with two different types of entropy. The first is response entropy of the individual neurons \cite{dayan2001information}. Maximizing this entropy ensures that the neurons are utilizing their full dynamic range, so that they are as expressive as possible. Formally, for a neuron with firing rate $r$, and maximum firing rate $r_{max}$, the response entropy is defined as:
+Map-STDP is designed to be compounded with a standard STDP rule that maximizes mutual information between stimulus and neural response, a well-established consequence of Hebbian learning under information-theoretic objectives \cite{dayan2001information}. The STDP term handles single-neuron expressivity, while the map equation term acts as a structural constraint at the population level.
 
-$$H = \log_{2}\left( \frac{r_{max}}{\Delta r} \right)$$
-
-assuming a uniform distribution of firing rates, where $\Delta r$ is the resolution of the firing rate. With this entropy value emerges mutual information between the stimulus and the neural response, which is a measure of how much information the neural response conveys about the stimulus. This is formalized as:
-
-$$I(r; a) = H - \langle H_a \rangle_a$$
-
-The second is thermodynamic entropy, otherwise known as free energy \cite{Friston2010-cj}. Given $p$, the brain's probabilistic model of the world, and $q$, the brain's recognition density, the free energy is defined as:
-
-$$F = \mathbb{E}_{q}[-\log (z, o)] - H(q(z))$$
-
-Where $z$ is the latent variables and $o$ is the sensory input. The first term is the expected negative log likelihood of the brain's model of the world, which is also known as the energy. The second term is the entropy of the brain's recognition density. This can be expanded further as:
-
-$$H(q) = \mathbb{E}_{q}[-\log q(z)]$$
-
-Therefore,
-
-$$F = \mathbb{E}_{q}[\log q(z) - \log p(z, o)] = D_{KL}(q(z) || p(z, o)) - \log p(o)$$
-
-\subsection{Connecting the Map Equation to Neurological Entropy}
-
-The map equation can be connected to both neurological entropies mentioned above through the theme of surprise minimization. Response entropy minimizes surprise at the neural level, while free energy minimizes surprise at the network level. The map equation addresses the meso-scale level.
-
-First, with response entropy, standard STDP already maximizes mutual information between the stimulus and the neural response. This means that the Map-STDP rule would be optimally utilized when compounded with an STDP rule that maximizes response entropy, while the map equation term acts as a modular gating mechanism.
-
-Second, with free energy, the map equation can be seen as operating on the same underlying distribution that free energy minimization converges to. Specifically, the stationary distribution that emerges from the SNN's MCMC dynamics, $p(\mathbf{z}|\mathbf{o})$ \cite{Buesing2011-ka}, is precisely the distribution that minimizes variational free energy in Equation \ref{eq:free-energy}, that is, the 
-optimal recognition density $q(\mathbf{z}) = p(\mathbf{z}|\mathbf{o})$ at the free energy minimum. The map equation operates on the marginal visit frequencies $\tilde{p}_i = p(z_i = 1 | \mathbf{o})$ that emerge as a byproduct of this same sampling process. In this sense the map equation and free energy minimization are complementary: free energy minimization defines what the network should represent, while the map equation defines how the mesoscale structure of the network should be organized to represent it efficiently.
+The deeper grounding comes from variational free energy \cite{Friston2010-cj}. The SNN's MCMC dynamics \cite{Buesing2011-ka} produce a stationary distribution $p(\mathbf{z}|\mathbf{o})$ over neural activity patterns given sensory input $\mathbf{o}$. This is precisely the recognition density that minimizes variational free energy. This distribution represents the network's implicit model of the world. The map equation operates on the marginal visit frequencies $\tilde{p}_i = p(z_i = 1 | \mathbf{o})$, which are byproducts of this same sampling process. Map-STDP therefore does not introduce a separate objective: it imposes community structure on the distribution the network is already converging to, with the addition of mesoscale organization of $p(\mathbf{z}|\mathbf{o})$.
 
 \section{Deriving Map-STDP}\label{sec2}
 
-As mentioned earlier, in order to properly address response entropy, the Map-STSP rule should be compounded with an STDP rule that maximizes response entropy. As such, we can start with a rule in the form of:
+As mentioned earlier, in order to properly address response entropy, the Map-STDP rule should be compounded with an STDP rule that maximizes response entropy. As such, we can start with a rule in the form of:
 
-$$\Delta W_{ij} = \eta \cdot \text{STDP}(i, j) - \eta' \cdot G(i, j)$$
+\begin{equation}
+\Delta W_{ij} = \eta \cdot \text{STDP}(i, j) - \eta' \cdot G(i, j)
+\label{eq:learning-rate}
+\end{equation}
 
-where $\text{STDP}(i, j)$ is a standard STDP rule that maximizes response entropy, $G(i, j) = \partial L / \partial W_{ij}$ is the gradient of the map equation, and $\eta$, $\eta'$ are separate learning rates for the two objectives. The two terms are additive rather than multiplicative, so each objective acts independently: STDP drives the synaptic updates toward maximizing response entropy, while the map gradient term descends the map equation loss to encourage modular structure. The goal is to derive the form of $G(i, j)$.
+where $\text{STDP}(i, j)$ is a standard STDP rule that maximizes response entropy, $G(i, j)$ is a modular gating function, and $\eta$, $\eta'$ are separate learning rates for the two objectives. The two terms are additive rather than multiplicative, so each objective acts independently: STDP drives the synaptic updates toward maximizing response entropy, while the map gradient term descends the map equation loss to encourage modular structure. The goal is to derive the form of $G(i, j)$.
 
 In its general form, a random walk on a network has a transition matrix $T$ that can be defined as:
 
@@ -234,10 +224,7 @@ Now, it's time to come back to the map equation and derive the form of $G(i, j)$
 $$p_m := \sum_{i \in m} \tilde{p}_i$$
 $$q_m := \sum_{i \in m} \sum_{j \notin m} \tilde{T}_{ij} \tilde{p}_i$$
 $$p_{\circlearrowright}^m = p_m + q_m$$
-
-\begin{equation}
-q_{\curvearrowright} = \sum_{m \in M} q_m
-\end{equation}
+$$q_{\curvearrowright} = \sum_{m \in M} q_m$$
 
 Where $p_m$ is the total visit frequency of community $m$, and $q_m$ is the total exit frequency of community $m$. We can then rewrite the map equation as:
 
@@ -252,121 +239,77 @@ $$H(\mathcal{P}^m) = -\frac{q_m}{p_m + q_m} \log \left( \frac{q_m}{p_m + q_m} \r
 Now, substituting this back into the map equation gives us:
 
 \begin{align*}
-L(M) &= -\sum_{m \in M} q_m \log \left( \frac{q_m}{q_{\curvearrowright}} \right) \\
-&\quad - \sum_{m \in M} (p_m + q_m) \left[ -\frac{q_m}{p_m + q_m} \log \left( \frac{q_m}{p_m + q_m} \right) - \sum_{i \in m} \frac{\tilde{p}_i}{p_m + q_m} \log \left( \frac{\tilde{p}_i}{p_m + q_m} \right) \right] \\
-&= -\sum_{m \in M} q_m \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + \sum_{m \in M} q_m \log \left( \frac{q_m}{p_m + q_m} \right) + \sum_{m \in M} \sum_{i \in m} \tilde{p}_i \log \left( \frac{\tilde{p}_i}{p_m + q_m} \right)
+L(M) &= -\sum_{m \in M} q_m \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + \sum_{m \in M} q_m \log \left( \frac{q_m}{p_m + q_m} \right) + \sum_{m \in M} \sum_{i \in m} \tilde{p}_i \log \left( \frac{\tilde{p}_i}{p_m + q_m} \right)
 \end{align*}
 
 Now we can take the gradient with respect to $W_{ij}$. The first term requires two dependent derivatives via the chain rule: $\partial q_m / \partial W_{ij}$ and $\partial q_{\curvearrowright} / \partial W_{ij}$. The second term also requires two dependent derivatives: $\partial q_m / \partial W_{ij}$ and $\partial p_m / \partial W_{ij}$. The third term requires two dependent derivatives: $\partial \tilde{p}_i / \partial W_{ij}$ and $\partial p_m / \partial W_{ij}$.
 
-Starting with computing $\partial \tilde{p}_i / \partial W_{ij}$:
+When computing $\partial \tilde{p}_i / \partial W_{ij}$:
 
 $$\frac{\partial \tilde{p}_i}{\partial W_{ij}} = \left[\frac{\partial \tilde{T}\tilde{p}}{\partial W_{ij}}\right]_i$$
 $$= \left[\frac{\partial \tilde{T}}{\partial W_{ij}} \tilde{p} + \tilde{T} \frac{\partial \tilde{p}}{\partial W_{ij}}\right]_i = \left[\frac{\partial \tilde{p}}{\partial W_{ij}}\right]_i$$
 
-Removing the $[\cdot]_i$ operator, this gives us a fixed point partial differential equation. We can solve this as follows:
+Removing the $[\cdot]_i$ operator gives us a fixed point partial differential equation. We can solve this as follows:
 
 $$\frac{\partial \tilde{p}}{\partial W_{ij}} = (I - \tilde{T})^{-1} \frac{\partial \tilde{T}}{\partial W_{ij}} \tilde{p}$$
 
-This raises the issue of inverting a global matrix in order to compute a local synaptic update. We can sidestep this issue by using the local update rule in Equation~\ref{eq:local-update} to estimate $\tilde{p}$ online and then treating $\tilde{p}$ as a constant with respect to $W_{ij}$ when computing the gradient.
+This raises the issue of a global matrix inversion. We sidestep it by treating $\tilde{p}$ as constant with respect to $W_{ij}$ during the synaptic update, consistent with an EM interpretation: the E-step re-estimates $\tilde{p}$ via Equation~\ref{eq:local-update}, while the M-step optimizes $W$ with $\tilde{p}$ held fixed. Under this approximation, $\partial p_m / \partial W_{ij} = 0$.
 
-Similarly, $\partial p_m / \partial W_{ij}$ can be computed as:
+When we derive $G(i, j)$ under this approximation, we get the following form:
 
-$$\frac{\partial p_m}{\partial W_{ij}} = \sum_{i' \in m} \frac{\partial \tilde{p}_{i'}}{\partial W_{ij}}$$
+$$G(i, j) = \tilde{p}_i \tilde{p}_j \frac{\mathbb{I}[j \notin m(i)] \tilde{s}_i - e_i}{\tilde{s}_i^2} \log \frac{q_{\curvearrowright}}{p_{m(i)} + q_{m(i)}}$$
 
-This raises the same issue of a global matrix inversion. Instead, we maintain a scalar running estimate $g_{ij}(t) \approx \partial \tilde{p}_i / \partial W_{ij}$ per synapse, obtained by differentiating the EMA update in Equation~\ref{eq:local-update} with respect to $W_{ij}$. Since $\partial \tilde{T}_{kk'} / \partial W_{ij} = 0$ for all $k \neq i$, the full gradient vector $\partial \tilde{p} / \partial W_{ij}$ has only one nontrivial component at index $k = i$. Defining $g_{ij}(t) := \partial \tilde{p}_i / \partial W_{ij}$, the update rule is:
+The full derivation can be found in Appendix~\ref{sec:proofs}.
+
+Where $e_i = \sum_{j' \notin m(i)} W_{ij'} \tilde{p}_{j'}$ is the total exit flow from node $i$. The gating function $G(i, j)$ is the same as the gradient of the map equation with respect to $W_{ij}$, treating $\tilde{p}$ as constant with respect to $W$.
+
+We can potentially simplify this equation by removing terms that have constant sign, assuming they get absorbed into the learning rate. For example, $\tilde{p}_i$, $\tilde{p}_j$, and $\tilde{s}_i$ are always positive, so they can be removed without affecting the direction of the update. We want to keep our network modular. This means that so long as we keep our learning rate negative (which in Equation \ref{eq:learning-rate}, we do), we can remove the log term as well, since $q_{\curvearrowright} < p_{m(i)} + q_{m(i)}$ is a necessary condition for modularity. This gives us the following simplified form of the Map-STDP rule:
 
 \begin{equation}
-g_{ij}(t+1) = (1-\beta)\, g_{ij}(t) + \beta \sum_{k'} \frac{\partial \tilde{T}_{ik'}}{\partial W_{ij}} z_{k'}(t)
-\label{eq:grad-track}
+G_{sim}(i, j) = \mathbb{I}[j \notin m(i)] - \frac{e_i}{\tilde{s}_i}
 \end{equation}
 
-This requires only one scalar per synapse, so storage is $O(N^2)$, the same as $W$. The convergence of this estimator is proved in Appendix~\ref{sec:proofs}. With this estimate in hand, $\partial p_m / \partial W_{ij}$ collapses to:
+Given a negative learning rate for the gating term, this simplified rule can be interpreted as follows: if $j \notin m(i)$, then $G_{sim}(i, j) = 1 - \bar{e}_i > 0$, so $W_{ij}$ is decreased, discouraging cross-community connectivity. If $j \in m(i)$, then $G_{sim}(i, j) = -\bar{e}_i < 0$, so $W_{ij}$ is increased, reinforcing intra-community connectivity. In both cases the magnitude of the update is modulated by $\bar{e}_i = e_i / \tilde{s}_i$, the current normalized exit probability of node $i$. This means nodes that are already well-contained within their community ($\bar{e}_i \approx 0$) receive small updates, while nodes with high community leakage ($\bar{e}_i \approx 1$) receive large corrections. The rule is self-regulating in the sense that it applies the strongest pressure where community structure is most violated.
 
-$$\frac{\partial p_m}{\partial W_{ij}} \approx g_{ij}(t) \cdot \mathbf{1}[i \in m]$$
-
-since $g_{ij,k} = 0$ for all $k \neq i$.
-
-Now let's rewrite the map equation as follows:
-
-$$L(M) = A + B + C$$
-
-Where:
-$$A := -\sum_{m \in M} q_m \log \left( \frac{q_m}{q_{\curvearrowright}} \right)$$
-$$B := \sum_{m \in M} q_m \log \left( \frac{q_m}{p_m + q_m} \right)$$
-$$C := \sum_{m \in M} \sum_{i \in m} \tilde{p}_i \log \left( \frac{\tilde{p}_i}{p_m + q_m} \right)$$
-
-Then, the gradient can be computed as:
-$$\frac{\partial L}{\partial W_{ij}} = \frac{\partial A}{\partial W_{ij}} + \frac{\partial B}{\partial W_{ij}} + \frac{\partial C}{\partial W_{ij}}$$
-
-Starting with $\partial A / \partial W_{ij}$:
-$$\frac{\partial A}{\partial W_{ij}} = -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + q_m \frac{\partial}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) \right]$$
-$$ = -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + q_m \left( \frac{1}{q_m} \frac{\partial q_m}{\partial W_{ij}} - \frac{1}{q_{\curvearrowright}} \frac{\partial q_{\curvearrowright}}{\partial W_{ij}} \right) \right]$$
-$$ = -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{q_{\curvearrowright}} \frac{\partial q_{\curvearrowright}}{\partial W_{ij}} \right]$$
-
-Now for $\partial B / \partial W_{ij}$:
-$$\frac{\partial B}{\partial W_{ij}} = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + q_m \frac{\partial}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) \right]$$
-$$ = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + q_m \left( \frac{1}{q_m} \frac{\partial q_m}{\partial W_{ij}} - \frac{1}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right) \right]$$
-$$ = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
-
-And finally for $\partial C / \partial W_{ij}$:
-$$\frac{\partial C}{\partial W_{ij}} = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \tilde{p}_k \frac{\partial}{\partial W_{ij}} \log \left(\frac{\tilde{p}_k}{p_m + q_m} \right) \right]$$
-$$ = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \tilde{p}_k \left( \frac{1}{\tilde{p}_k} \frac{\partial \tilde{p}_k}{\partial W_{ij}} - \frac{1}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right) \right]$$
-$$ = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \frac{\partial \tilde{p}_k}{\partial W_{ij}} - \frac{\tilde{p}_k}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
-
-Since we are treating $\tilde{p}$ as a constant with respect to $W_{ij}$, the $\partial \tilde{p}_k / \partial W_{ij}$ terms can be removed from the gradient, which gives us the final form of the gradient as:
-$$\frac{\partial C}{\partial W_{ij}} = \sum_{m \in M} \sum_{k \in m} \left[ - \frac{\tilde{p}_k}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
-
-Similarly, we can adjust all terms and remove all $\partial \tilde{p}_i / \partial W_{ij}$ terms, which gives us the following:
-
-\begin{align*}
-\frac{\partial B}{\partial W_{ij}} &= \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{p_m + q_m} \left(\frac{\partial q_m}{\partial W_{ij}} \right) \right] \\
-&= \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \left[ \log \left( \frac{q_m}{p_m + q_m} \right) + 1 - \frac{q_m}{p_m + q_m} \right] \\
-\frac{\partial C}{\partial W_{ij}} &= \sum_{m \in M} \sum_{k \in m} \left[ - \frac{\tilde{p}_k}{p_m + q_m} \left(\frac{\partial q_m}{\partial W_{ij}} \right) \right] \\
-&= - \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \left[\sum_{k \in m} \frac{\tilde{p}_k}{p_m + q_m} \right]
-\end{align*}
-
-Now we can compute $\partial q_m / \partial W_{ij}$. Recall that:
-
-$$q_m = \sum_{i' \in m} \sum_{j' \notin m} \tilde{T}_{i'j'} \tilde{p}_{i'}$$
-
-Since $W_{ij}$ only appears in row $i$ of $\tilde{T}$, the derivative is zero whenever $i \notin m$. For $i \in m$, we differentiate $\tilde{T}_{ij'} = \tilde{W}_{ij'} / \tilde{s}_i$ where $\tilde{s}_i = \sum_k W_{ik} \tilde{p}_k$.
-
-\textbf{Case 1: $i \notin m$.} No dependence on $W_{ij}$:
-$$\frac{\partial q_m}{\partial W_{ij}} = 0$$
-
-\textbf{Case 2: $i \in m$, $j \in m$.} The numerator $\tilde{W}_{ij'}$ for exit edges $j' \notin m$ is unaffected, but the denominator $\tilde{s}_i$ gains $\tilde{p}_j$. So for each exit edge $j' \notin m$:
-$$\frac{\partial \tilde{T}_{ij'}}{\partial W_{ij}} = -\frac{\tilde{T}_{ij'} \tilde{p}_j}{\tilde{s}_i}$$
-
-Summing over all exit edges from $i$:
-$$\frac{\partial q_m}{\partial W_{ij}} = -\frac{\tilde{p}_j \tilde{p}_i}{\tilde{s}_i} \sum_{j' \notin m} \tilde{T}_{ij'} = -\frac{\tilde{p}_j \tilde{p}_i \, e_i}{\tilde{s}_i}$$
-
-where $e_i := \sum_{j' \notin m} \tilde{T}_{ij'}$ is the total exit probability of node $i$.
-
-\textbf{Case 3: $i \in m$, $j \notin m$.} Now $W_{ij}$ appears in both the numerator of $\tilde{T}_{ij}$ (an exit edge) and in the denominator $\tilde{s}_i$ of all exit edges. For the edge $j' = j$:
-$$\frac{\partial \tilde{T}_{ij}}{\partial W_{ij}} = \frac{\tilde{p}_j \tilde{s}_i - \tilde{W}_{ij} \tilde{p}_j}{\tilde{s}_i^2} = \frac{\tilde{p}_j}{\tilde{s}_i}(1 - \tilde{T}_{ij})$$
-
-For all other exit edges $j' \notin m$, $j' \neq j$, only the denominator is affected:
-$$\frac{\partial \tilde{T}_{ij'}}{\partial W_{ij}} = -\frac{\tilde{T}_{ij'} \tilde{p}_j}{\tilde{s}_i}$$
-
-Summing over all exit edges:
-$$\frac{\partial q_m}{\partial W_{ij}} = \frac{\tilde{p}_i \tilde{p}_j}{\tilde{s}_i} \left[ (1 - \tilde{T}_{ij}) - \sum_{\substack{j' \notin m \\ j' \neq j}} \tilde{T}_{ij'} \right] = \frac{\tilde{p}_i \tilde{p}_j}{\tilde{s}_i}(1 - e_i)$$
-
-In summary:
+One issue that is raised is that needing to compute $e_i$ and $\tilde{s}_i$ for every synaptic update violates locality. However, since $W_{ij}=0$ for non-neighbors, we can compute $e_i$ and $\tilde{s}_i$ using only local information from the neighbors of node $i$:
 \begin{equation}
-\frac{\partial q_{m(i)}}{\partial W_{ij}} = \begin{cases} 0 & i \notin m \\[6pt] -\dfrac{\tilde{p}_j \tilde{p}_i \, e_i}{\tilde{s}_i} & i \in m,\ j \in m \\[6pt] \dfrac{\tilde{p}_j \tilde{p}_i}{\tilde{s}_i}(1 - e_i) & i \in m,\ j \notin m \end{cases}
-\label{eq:dqm}
+e_i = \sum_{j' \in N(i)} \mathbb{I}[j' \notin m(i)] W_{ij'} \tilde{p}_{j'}
 \end{equation}
 
-The intuition is clear: adding weight to an intra-community edge ($j \in m$) rescales all exit probabilities downward, reducing $q_m$; adding weight to a cross-community edge ($j \notin m$) increases $q_m$ by the remaining intra-community probability mass $(1 - e_i)$.
+\begin{equation}
+\tilde{s}_i = \sum_{k \in N(i)} W_{ik} \tilde{p}_k
+\end{equation}
+
+Where $N(i)$ is the set of neighbors of node $i$. This means that the Map-STDP rule can be implemented in a biologically plausible manner, as it only requires information from the local neighborhood of each synapse.
 
 \section{Training}\label{sec12}
 
-Now that we have derived the Map-STDP rule, we can train an SNN using this rule. We however have multiple update steps that are interdependent: the synaptic updates depend on the online estimate of $\tilde{p}$, which in turn depends on the community assignments of the nodes. To address this, we use an alternating optimization approach between $\tilde{p}$ and $W_{ij}$, and every $T$ steps we can reassign communities, and repeat this process until convergence. 
+\begin{figure}
+\centering
+\includegraphics[width=0.8\textwidth]{algo_infograph.png}
+\caption{The network of updates during training. The Map-STDP rule would involve an E-step where the network dynamics are run to update $\tilde{p}$, and an M-step where $W$ is updated using the Map-STDP rule with $\tilde{p}$ held constant. The community assignments $M$ can either be kept static or periodically updated using a community detection algorithm.}
+\end{figure}
 
-Furthermore, although the Map-STDP rule was derived from Infomap's map equation, it can be used with any community detection algorithm, as it only requires a community assignment $M$ regardless of how it was generated. If the application requires a fixed set of outputs (e.g., classification), a clustering algorithm with a fixed number of communities can be used. However, for applications involving unsupervised representation learning, such as an SNN processing natural visual or auditory stimuli where the number of meaningful concepts is unknown and may change over time, a variable-$k$ method is more appropriate. In such settings, a fixed number of communities would either merge concepts that should be distinct or artificially split those that should not be, whereas a variable-$k$ algorithm like Leiden or Louvain naturally grows the number of communities as the weight structure becomes more differentiated, allowing the modular structure to reflect the true complexity of the input distribution. In either case, the community assignments are updated every $T$ steps as described above.
+Now that we have derived the Map-STDP rule, we need to work out the mechanics of training. There are four main structures that need to be cached:
 
-The starting network can be initialized using a synthetic network generator. The type of network generator can be chosen based on the application. For example, if we require a constant number of communities, we can use the stochastic block model. If we require a variable number of communities, we can use the LFR benchmark. The network can also be initialized with random weights, which will then be updated using the Map-STDP rule.
+\begin{itemize}
+    \item $M$: the community assignment of each node. This can be stored as a vector of integers, where the $i$-th element is the community that node $i$ belongs to.
+    \item $\tilde{p}$: the stationary distribution of the random walk on the network. This can be stored as a vector of floats, where the $i$-th element is the stationary probability of node $i$.
+    \item $N(i)$: the set of neighbors of each node. This can be stored as a list of lists, where the $i$-th element is a list of the neighbors of node $i$.
+    \item $W$: the weight matrix of the network. This can be stored as a 2D array, where the element at row $i$ and column $j$ is the weight of the edge from node $i$ to node $j$.
+\end{itemize}
+
+With this leaves us with some open questions:
+
+\begin{itemize}
+    \item \textbf{Should $M$ be kept static or periodically updated?} If we keep $M$ static, then the Map-STDP rule will only reinforce the initial community structure, which may not be optimal. On the other hand, if we periodically update $M$ using a community detection algorithm like Infomap, then the Map-STDP rule will be able to adapt to changes in the network structure and potentially find better community assignments. However, this comes at the cost of increased computational complexity due to running a community detection algorithm at each update step.
+    \item \textbf{How do we get the SNN to update its topology?} As opposed to simply just its weights. One possibility is that we set some hyperparameter $\epsilon$ such that if $W_{ij} < \epsilon$, then we set $W_{ij} = 0$. This would allow the network to prune weak connections and potentially form more distinct communities. However, this also introduces a new hyperparameter that needs to be tuned, and it may lead to instability in the training process if not handled carefully. Another possibility is a $k$ parameter such that all nodes have their top $k$ strongest connections kept and the rest set to zero. This would ensure that the network maintains a certain level of connectivity while still allowing for pruning of weaker connections. However, this also introduces a new hyperparameter that needs to be tuned, and it may lead to instability if $k$ is set too low or too high.
+    \item \textbf{How do we initialize the SNN, and $M$?} One possibility is to initialize as a random Erdos-Renyi graph, with communities initialized randomly such that each node has a $1/|M|$ chance of being assigned to each community. This would provide a neutral starting point for the network to learn from, without any inherent bias towards a particular community structure. However, this also means that the network may take longer to converge to an optimal community structure, as it has to learn both the weights and the community assignments from scratch. Another possibility is to initialize with some amount of community structure, potentially using a stochastic block model. This would give the network a head start in learning the community structure, as it would already have some initial communities to work with. However, this also introduces bias towards the initial community structure, which may not be optimal for the task at hand.
+\end{itemize}
+
+It should be noted that although the Map-STDP uses the map equation as its objective function, it does not necessarily need to operate using Infomap communities. As the update rule requires any community assignment, $M$, we could potentially use any community detection algorithm we'd like. If the goal is to select from a constant set outcomes (e.g. classification or discrete control), then we could use methods like Infomap and SBM to produce community assignments with a constant number of communities. However, if the goal is to learn a more flexible representation of the input stimulus, then we could use methods like Louvain or Leiden that produce a variable number of communities based on the structure of the network.
+
+This model may also benefit from a central community which broadcasts to all other communities. This central community could be linked to a receptive field that encodes the input stimulus, and it could also be linked to a readout layer that produces the output response. This would be in tune with the idea of the Global Network Workspace Theory (GNWT) \cite{Baars2005-zv}, which posits that there is a central workspace in the brain that integrates information from different specialized modules (communities) and broadcasts it to the rest of the brain. This could potentially allow the network to learn more complex representations of the input stimulus, as it would be able to leverage the modular structure of the network to learn more efficient representations.
 
 %%===========================================================================================%%
 %% If you are submitting to one of the Nature Portfolio journals, using the eJP submission   %%
@@ -381,7 +324,7 @@ The starting network can be initialized using a synthetic network generator. The
 
 \begin{appendices}
 
-\section{Proofs and Remarks}\label{sec:proofs}
+\section{Proofs}\label{sec:proofs}
 
 \begin{theorem}
 \label{thm:convergence}
@@ -405,52 +348,97 @@ so $\tilde{p}$ is a fixed point of the update rule.
 \end{proof}
 
 \begin{theorem}
-\label{thm:approximation}
-For fixed $W$, the online estimate $\tilde{p}_k(t)$ is an asymptotically unbiased approximator for $\langle z_k \rangle = p(z_k = 1 \mid \mathbf{o})$, i.e., $\lim_{t \to \infty} \mathbb{E}[\tilde{p}_k(t)] = \langle z_k \rangle$.
+\label{thm:map-derivation}
+The gating function $G(i, j)$ is the same as the gradient of the map equation with respect to $W_{ij}$, treating $\tilde{p}$ as constant with respect to $W$.
 \end{theorem}
 
 \begin{proof}
-Unrolling the recursion in Equation~\ref{eq:local-update} gives:
+Start by rewriting the map equation as follows:
 
-$$\mathbb{E}[\tilde{p}_i(t)] = (1-\beta)^t \tilde{p}_i(0) + \beta \sum_{s=0}^{t-1}(1-\beta)^{t-1-s} \mathbb{E}\left[\sum_j \tilde{T}_{ij} z_j(s)\right]$$
+$$L(M) = A + B + C$$
 
-Since $W$ is held fixed, $\mathbb{E}[\sum_j \tilde{T}_{ij} z_j(s)] = \sum_j \tilde{T}_{ij}\langle z_j \rangle = \tilde{p}_i$ by Theorem~\ref{thm:convergence}. Substituting:
+Where:
+$$A := -\sum_{m \in M} q_m \log \left( \frac{q_m}{q_{\curvearrowright}} \right)$$
+$$B := \sum_{m \in M} q_m \log \left( \frac{q_m}{p_m + q_m} \right)$$
+$$C := \sum_{m \in M} \sum_{i \in m} \tilde{p}_i \log \left( \frac{\tilde{p}_i}{p_m + q_m} \right)$$
 
-$$\mathbb{E}[\tilde{p}_i(t)] = (1-\beta)^t \tilde{p}_i(0) + \tilde{p}_i \cdot \beta \sum_{s=0}^{t-1}(1-\beta)^{t-1-s}$$
+Then, the gradient can be computed as:
+$$\frac{\partial L}{\partial W_{ij}} = \frac{\partial A}{\partial W_{ij}} + \frac{\partial B}{\partial W_{ij}} + \frac{\partial C}{\partial W_{ij}}$$
 
-Evaluating the geometric sum $\beta\sum_{s=0}^{t-1}(1-\beta)^{t-1-s} = 1 - (1-\beta)^t$:
+Starting with $\partial A / \partial W_{ij}$:
+$$\frac{\partial A}{\partial W_{ij}} = -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + q_m \frac{\partial}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) \right]$$
+$$ = -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{q_{\curvearrowright}} \frac{\partial q_{\curvearrowright}}{\partial W_{ij}} \right]$$
 
-$$\mathbb{E}[\tilde{p}_i(t)] = (1-\beta)^t \tilde{p}_i(0) + \tilde{p}_i\left(1 - (1-\beta)^t\right)$$
+Now, we can simplify this even further by computing $\partial q_{\curvearrowright} / \partial W_{ij}$:
 
-Since $0 < \beta \leq 1$, we have $(1-\beta)^t \to 0$ as $t \to \infty$, and therefore:
+$$\frac{\partial q_{\curvearrowright}}{\partial W_{ij}} = \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}}=\frac{\partial q_{m(i)}}{\partial W_{ij}}$$
 
-$$\lim_{t \to \infty} \mathbb{E}[\tilde{p}_i(t)] = \tilde{p}_i = \langle z_i \rangle$$
+Where $m(i)$ is the community that node $i$ belongs to. This is because $q_m$ only depends on $W_{ij}$ if $i$ belongs to community $m$. Now if we expand the second and third terms of the gradient, we can see that they cancel each other out:
 
-where the last equality follows from Buesing et al.~\cite{Buesing2011-ka}, who establish that the stationary visit frequency of the random walk coincides with the marginal activation probability $p(z_i = 1 \mid \mathbf{o})$.
-\end{proof}
+\begin{align*}
+\frac{\partial A}{\partial W_{ij}} &= -\sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{q_{\curvearrowright}} \frac{\partial q_{m(i)}}{\partial W_{ij}} \right] \\
+&= - \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right) -\sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} + \sum_{m \in M} \frac{q_m}{q_{\curvearrowright}} \frac{\partial q_m}{\partial W_{ij}} \\
+&= - \left[\sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right)\right] - \frac{\partial q_{m(i)}}{\partial W_{ij}} + \frac{\partial q_{m(i)}}{\partial W_{ij}}\cdot\frac{1}{q_{\curvearrowright}}\sum_{m \in M} q_m \\
+&= - \left[\sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right)\right] - \frac{\partial q_{m(i)}}{\partial W_{ij}} + \frac{\partial q_{m(i)}}{\partial W_{ij}}\cdot\frac{1}{\sum_{m \in M} q_m}\sum_{m \in M} q_m
+\end{align*}
 
-\begin{theorem}
-\label{thm:grad-tracking}
-For fixed $W$ and fixed $\tilde{T}$, the scalar online gradient tracking estimate $g_{ij}(t)$ defined in Equation~\ref{eq:grad-track} satisfies $\lim_{t \to \infty} \mathbb{E}[g_{ij}(t)] = \partial \tilde{p}_i / \partial W_{ij}$.
-\end{theorem}
+Finally, this simplifies to:
 
-\begin{proof}
-Since $\partial \tilde{T}_{kk'} / \partial W_{ij} = 0$ for all $k \neq i$, the fixed-point equation $\mathbf{v} = (I - \tilde{T})^{-1} \frac{\partial \tilde{T}}{\partial W_{ij}}\tilde{p}$ has $v_k = 0$ for $k \neq i$. It therefore suffices to track only the scalar $v_i = \partial \tilde{p}_i / \partial W_{ij}$.
+$$\frac{\partial A}{\partial W_{ij}} = -\sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{q_{\curvearrowright}} \right)$$
 
-Define $d := \sum_{k'} \frac{\partial \tilde{T}_{ik'}}{\partial W_{ij}} \tilde{p}_{k'}$, the unique nonzero entry of $\frac{\partial \tilde{T}}{\partial W_{ij}}\tilde{p}$. The scalar fixed-point equation for $v_i$ is:
-$$v_i = [\tilde{T}\mathbf{v}]_i + d = \sum_{k'} \tilde{T}_{ik'} v_{k'} + d$$
+Now for $\partial B / \partial W_{ij}$:
+$$\frac{\partial B}{\partial W_{ij}} = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + q_m \frac{\partial}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) \right]$$
+$$ = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + q_m \left( \frac{1}{q_m} \frac{\partial q_m}{\partial W_{ij}} - \frac{1}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right) \right]$$
+$$ = \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
 
-Since $v_{k'} = 0$ for $k' \neq i$, this reduces to $v_i = \tilde{T}_{ii} v_i + d$, giving $v_i = d / (1 - \tilde{T}_{ii})$.
+And finally for $\partial C / \partial W_{ij}$:
+$$\frac{\partial C}{\partial W_{ij}} = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \tilde{p}_k \frac{\partial}{\partial W_{ij}} \log \left(\frac{\tilde{p}_k}{p_m + q_m} \right) \right]$$
+$$ = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \tilde{p}_k \left( \frac{1}{\tilde{p}_k} \frac{\partial \tilde{p}_k}{\partial W_{ij}} - \frac{1}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right) \right]$$
+$$ = \sum_{m \in M} \sum_{k \in m} \left[ \frac{\partial \tilde{p}_k}{\partial W_{ij}} \log \left( \frac{\tilde{p}_k}{p_m + q_m} \right) + \frac{\partial \tilde{p}_k}{\partial W_{ij}} - \frac{\tilde{p}_k}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
 
-Taking expectations of Equation~\ref{eq:grad-track} and using $\mathbb{E}[z_{k'}(t)] = \tilde{p}_{k'}$:
-$$\mathbb{E}[g_{ij}(t+1)] = (1-\beta)\,\mathbb{E}[g_{ij}(t)] + \beta\, d$$
+Since we are treating $\tilde{p}$ as a constant with respect to $W_{ij}$, the $\partial \tilde{p}_k / \partial W_{ij}$ terms can be removed from the gradient, which gives us the final form of the gradient as:
+$$\frac{\partial C}{\partial W_{ij}} = \sum_{m \in M} \sum_{k \in m} \left[ - \frac{\tilde{p}_k}{p_m + q_m} \left( \frac{\partial p_m}{\partial W_{ij}} + \frac{\partial q_m}{\partial W_{ij}} \right) \right]$$
 
-Unrolling this recursion:
-$$\mathbb{E}[g_{ij}(t)] = (1-\beta)^t g_{ij}(0) + d\left(1 - (1-\beta)^t\right)$$
+Similarly, we can adjust all terms and remove all $\partial \tilde{p}_i / \partial W_{ij}$ terms, which gives us the following:
 
-Since $0 < \beta \leq 1$, $(1-\beta)^t \to 0$ as $t \to \infty$, so $\mathbb{E}[g_{ij}(t)] \to d$.
+\begin{align*}
+\frac{\partial B}{\partial W_{ij}} &= \sum_{m \in M} \left[ \frac{\partial q_m}{\partial W_{ij}} \log \left( \frac{q_m}{p_m + q_m} \right) + \frac{\partial q_m}{\partial W_{ij}} - \frac{q_m}{p_m + q_m} \left(\frac{\partial q_m}{\partial W_{ij}} \right) \right] \\
+&= \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \left[ \log \left( \frac{q_m}{p_m + q_m} \right) + 1 - \frac{q_m}{p_m + q_m} \right] \\
+\frac{\partial C}{\partial W_{ij}} &= \sum_{m \in M} \sum_{k \in m} \left[ - \frac{\tilde{p}_k}{p_m + q_m} \left(\frac{\partial q_m}{\partial W_{ij}} \right) \right] \\
+&= - \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \left[\sum_{k \in m} \frac{\tilde{p}_k}{p_m + q_m} \right]
+\end{align*}
 
-Finally, note that the EMA learning rate $\beta$ drives $g_{ij}$ to $d$, not to $v_i = d/(1-\tilde{T}_{ii})$. The discrepancy factor $(1 - \tilde{T}_{ii})$ is the probability that node $i$ exits itself in one step, which is absorbed into the overall learning rate $\eta'$ in the synaptic update rule. Therefore $g_{ij}(t)$ is an asymptotically unbiased estimator of $\partial \tilde{p}_i / \partial W_{ij}$ up to this constant rescaling.
+Combining these terms, all three share a factor of $\partial q_m / \partial W_{ij}$. Grouping and using $\sum_{k \in m} \tilde{p}_k = p_m$:
+
+\begin{align*}
+\frac{\partial L}{\partial W_{ij}} &= \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \left[ -\log \frac{q_m}{q_{\curvearrowright}} + \log \frac{q_m}{p_m + q_m} + 1 - \frac{q_m}{p_m + q_m} - \frac{p_m}{p_m + q_m} \right]
+\end{align*}
+
+The last two terms cancel since $1 - \frac{q_m}{p_m+q_m} - \frac{p_m}{p_m+q_m} = 0$, and the logarithms combine as $-\log\frac{q_m}{q_{\curvearrowright}} + \log\frac{q_m}{p_m+q_m} = \log\frac{q_{\curvearrowright}}{p_m+q_m}$, giving the final gradient:
+
+$$\frac{\partial L}{\partial W_{ij}} = \sum_{m \in M} \frac{\partial q_m}{\partial W_{ij}} \log \frac{q_{\curvearrowright}}{p_m + q_m}$$
+
+We can simplify the gradient even further as $\partial q_m / \partial W_{ij}$ only depends on the community that node $i$ belongs to. Therefore, we can rewrite the gradient as:
+$$\frac{\partial L}{\partial W_{ij}} = \frac{\partial q_{m(i)}}{\partial W_{ij}} \log \frac{q_{\curvearrowright}}{p_{m(i)} + q_{m(i)}}$$
+
+Now, we need to compute $\partial q_{m(i)} / \partial W_{ij}$. We can rewrite $q_{m(i)}$ as:
+\begin{align*}
+q_{m(i)} &= \sum_{i' \in m(i)} \sum_{j' \notin m(i)} \tilde{T}_{i'j'} \tilde{p}_{i'} \\
+&= \sum_{i' \in m(i)} \sum_{j' \notin m(i)} \frac{\tilde{W}_{i'j'}}{\tilde{s}_{i'}} \tilde{p}_{i'} \\
+&= \sum_{i' \in m(i)} \sum_{j' \notin m(i)} \frac{W_{i'j'} \tilde{p}_{j'}}{\sum_k W_{i'k} \tilde{p}_k} \tilde{p}_{i'} \\
+&= \sum_{i'\in m(i)} \tilde{p}_{i'} \sum_{j' \notin m(i)} \frac{W_{i'j'} \tilde{p}_{j'}}{\sum_k W_{i'k} \tilde{p}_k}
+\end{align*}
+
+The terms in $q_{m(i)}$ for all other $i' \neq i$ do not depend on $W_{ij}$, so they can be removed from the derivative, giving us:
+$$\frac{\partial q_{m(i)}}{\partial W_{ij}} = \tilde{p}_i \frac{\partial}{\partial W_{ij}} \left[ \frac{\sum_{j' \notin m(i)} W_{ij'} \tilde{p}_{j'}}{\sum_k W_{ik} \tilde{p}_k} \right]$$
+
+This can be computed using the quotient rule:
+$$\frac{\partial q_{m(i)}}{\partial W_{ij}} = \tilde{p}_i \frac{\left( \sum_k W_{ik} \tilde{p}_k \right) \tilde{p}_j \mathbb{I}[j \notin m(i)] - \left( \sum_{j' \notin m(i)} W_{ij'} \tilde{p}_{j'} \right) \tilde{p}_j}{\left( \sum_k W_{ik} \tilde{p}_k \right)^2}$$
+$$= \tilde{p}_i \tilde{p}_j \frac{\mathbb{I}[j \notin m(i)] \left( \sum_k W_{ik} \tilde{p}_k \right) - \sum_{j' \notin m(i)} W_{ij'} \tilde{p}_{j'}}{\left( \sum_k W_{ik} \tilde{p}_k \right)^2}$$
+$$= \tilde{p}_i \tilde{p}_j \frac{\mathbb{I}[j \notin m(i)] \tilde{s}_i - e_i}{\tilde{s}_i^2}$$
+
+Where $e_i = \sum_{j' \notin m(i)} W_{ij'} \tilde{p}_{j'}$ is the total exit flow from node $i$. Substituting this back into the gradient gives us the final form of $G(i, j)$:
+$$\frac{\partial L}{\partial W_{ij}} = \tilde{p}_i \tilde{p}_j \frac{\mathbb{I}[j \notin m(i)] \tilde{s}_i - e_i}{\tilde{s}_i^2} \log \frac{q_{\curvearrowright}}{p_{m(i)} + q_{m(i)}}$$
 \end{proof}
 
 \end{appendices}
