@@ -282,6 +282,38 @@ e_i = \sum_{j' \in N(i)} \mathbb{I}[j' \notin m(i)] W_{ij'} \tilde{p}_{j'}
 
 Where $N(i)$ is the set of neighbors of node $i$. This means that the Map-STDP rule can be implemented in a biologically plausible manner, as it only requires information from the local neighborhood of each synapse.
 
+\section{Biological Plausibility}\label{sec11}
+
+Earlier we touched upon the use of an STDP term alongside a Map Equation term in order to maximize response entropy while also encouraging modular structure through the minimization of free energy.
+
+However, there are several aspects of Map-STDP that are less biologically plausible:\begin{itemize}
+    \item \textbf{Community Assignments:} The Map-STDP rule requires knowledge of the community assignment of each node, which is not something that is explicitly represented in the brain.
+    \item \textbf{EM Phase Separation:} The Map-STDP rule relies on an EM-like separation of timescales, where the E-step updates the stationary distribution $\tilde{p}$ while the M-step updates the weights $W$ with $\tilde{p}$ held constant. This separation may not be biologically realistic, as it requires a level of coordination and synchronization that may not be present in neural circuits.
+\end{itemize}
+
+The crux of the issue lies in the global assignment of nodes to communities. In real cortices, lateral inhibition is a local mechanism that can give rise to the emergence of distinct communities without the need for an explicit global community assignment. 
+
+Lateral inhibition provides a local, emergent mechanism to replace the explicit community assignment $\mathbb{I}[j \notin m(i)]$. Introduce a set of inhibitory synaptic weights $\mathbf{I}$, where $I_{ij} \geq 0$ is the strength of inhibitory projection from neuron $j$ onto neuron $i$. Define the normalized inhibitory competition score:
+
+$$\varphi_{ij} = \frac{I_{ij} \tilde{p}_j}{\sum_k I_{ik} \tilde{p}_k}$$
+
+This $\varphi_{ij}$ is high when $j$ is a strong inhibitory competitor of $i$---which emerges when $j$ and $i$ belong to functionally distinct communities---and near zero when $j$ cooperates with $i$. Replacing $\mathbb{I}[j \notin m(i)]$ with $\varphi_{ij}$ and redefining the exit flow as $e_i^{LI} = \sum_{j'} \varphi_{ij'} W_{ij'} \tilde{p}_{j'}$ gives the laterally-inhibited gating function:
+
+\begin{equation}
+G_{LI}(i,j) = \varphi_{ij} - \bar{e}_i^{LI}
+\end{equation}
+
+where $\bar{e}_i^{LI} = e_i^{LI} / \tilde{s}_i$ is the normalized exit flow weighted by the inhibitory competition score. Under this formulation, community membership is no longer an explicit global label: it is instead encoded implicitly in the inhibitory drive, with neurons that strongly suppress one another treated as belonging to different communities.
+
+The inhibitory weights $\mathbf{I}$ can themselves be updated via an anti-Hebbian rule: $\Delta I_{ij} = \eta_{inh} \cdot \tilde{p}_i \cdot \tilde{p}_j$, which strengthens inhibition between co-active neurons and allows competition boundaries to sharpen over time.
+
+This formulation also clarifies what Map-STDP with lateral inhibition offers over lateral inhibition alone. Lateral inhibition by itself (as in Kohonen self-organizing maps) creates competition-driven community structure but optimizes an implicit objective---the partition that emerges is whatever the winner-take-all dynamics produce, with no guarantee of quality. Map-STDP adds two things that lateral inhibition cannot provide:
+
+\begin{itemize}
+    \item \textbf{An explicit information-theoretic objective.} The map equation gives a measurable criterion for partition quality: the description length of a random walk through the network. This makes the community structure interpretable and quantifiable, rather than an emergent side-effect.
+    \item \textbf{Self-regulating update magnitude.} The term $\bar{e}_i^{LI}$ acts as adaptive gain control. Neurons already well-contained within their functional community (low $\bar{e}_i^{LI}$) receive small updates; neurons with high cross-community leakage receive large corrections. Lateral inhibition alone only suppresses competitors---it has no such signal about how far the current partition is from the optimum.
+\end{itemize}
+
 \section{Training}\label{sec12}
 
 \begin{figure}
