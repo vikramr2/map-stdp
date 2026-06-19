@@ -1,0 +1,23 @@
+name: map-stdp
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch
+  - torchvision
+  - "numpy<2"
+  - scipy
+  - matplotlib
+  - networkx
+  - pandas
+  - tqdm
+  - pip:
+      - snntorch
+      - tonic
+      - pbr
+      - expelliarmus
+      - h5py
+      - importRosbag
