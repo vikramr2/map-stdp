@@ -1,123 +1,130 @@
 """
-Simplified suppression-based STDP rule (Gautam & Kohno 2023).
+Simplified suppression-based STDP (Gautam & Kohno 2023, Eq. 7).
 
-Equation (7) from the paper:
-  Δw = +1 bit  if Δt >= 0 AND Δt < t_pre  AND Δt_post > St_post   (LTP)
-  Δw = -1 bit  if Δt < 0  AND |Δt| < t_post AND Δt_pre > St_pre   (LTD)
+Two separate STDP paths — chosen to minimise memory traffic:
 
-where:
-  Δt      = t_post - t_pre   (signed spike interval for the current pair)
-  Δt_post = time since the PREVIOUS postsynaptic spike (suppresses potentiation)
-  Δt_pre  = time since the PREVIOUS presynaptic spike  (suppresses depression)
+Recurrent edges (≤ ~700 with 10 nodes/community)
+    Stored as flat arrays (rec_post, rec_pre).  Per step: index into t_last and z
+    with ~700 elements — very fast.
 
-Parameters used for the 4-bit variant (Table I / Fig 3(b)):
-  t_pre   =  5.7 ms  → window for causal LTP
-  t_post  = 28.5 ms  → window for anti-causal LTD
-  St_pre  = 17.1 ms  → pre-suppression threshold
-  St_post = 20.1 ms  → post-suppression threshold
-  weight resolution: 4-bit, step = 1/15
+Input edges  (n_ws × N_in = 10 × 2312 = 23 120 with 10-node communities)
+    NOT stored as a flat edge list; instead we keep separate t_last_ws (n_ws,) and
+    t_last_in (N_in,) vectors and compute (n_ws × N_in) outer products ONLY when
+    at least one workspace neuron or input channel is active.  No fancy indexing.
 
-All times are in simulation steps (1 step = 1 ms).
+LTP/LTD rule (4-bit, simplified Eq. 7)
+    LTP: post fires, Δt_since_post > St_post, 0 < Δt_since_pre < t_pre
+    LTD: pre  fires, Δt_since_pre  > St_pre,  0 < Δt_since_post < t_post
+    step = ±1/15
 """
+from __future__ import annotations
 
 import torch
 
 
 class SuppressionSTDP:
-    """
-    Tracks spike timing for all neurons and accumulates ΔW updates.
-
-    Convention: W[i, j]  =  synaptic weight from pre-neuron j to post-neuron i.
-
-    LTP fires when post=i fires and pre=j fired within [0, t_pre) steps ago,
-         provided no recent previous post spike suppresses it.
-    LTD fires when pre=j fires and post=i fired within (0, t_post) steps ago,
-         provided no recent previous pre spike suppresses it.
-    """
-
-    # 4-bit fixed-point parameters from the paper (all in ms / timesteps at 1 ms resolution)
     T_PRE_MS   =  5.7
     T_POST_MS  = 28.5
     ST_PRE_MS  = 17.1
     ST_POST_MS = 20.1
-    WEIGHT_STEP = 1.0 / 15.0   # 4-bit resolution
+    WEIGHT_STEP = 1.0 / 15.0
 
     def __init__(
         self,
-        n_neurons: int,
-        mask: torch.Tensor,          # (N, N) bool/float connectivity mask
+        n_rec: int,                    # number of recurrent neurons
+        n_in: int,                     # number of input channels
+        rec_post: torch.Tensor,        # (E_rec,) post in [0, n_rec)
+        rec_pre: torch.Tensor,         # (E_rec,) pre  in [0, n_rec)
+        ws_local_idx: torch.Tensor,    # (n_ws,)  local indices of workspace neurons in rec
         dt_ms: float = 1.0,
-        device: torch.device = None,
-        input_n: int = 0,            # extra input neurons prepended (virtual)
+        device: torch.device | None = None,
     ):
-        self.n     = n_neurons
-        self.n_in  = input_n
-        self.n_tot = n_neurons + input_n
-        self.dt    = dt_ms
-        self.device = device or torch.device("cpu")
+        self.device  = device or torch.device("cpu")
+        self.N       = n_rec
+        self.N_in    = n_in
+        self.n_ws    = ws_local_idx.numel()
+        self.dt      = dt_ms
 
-        # Convert ms thresholds to integer timesteps
         self.t_pre   = int(self.T_PRE_MS   / dt_ms)
         self.t_post  = int(self.T_POST_MS  / dt_ms)
         self.st_pre  = int(self.ST_PRE_MS  / dt_ms)
         self.st_post = int(self.ST_POST_MS / dt_ms)
 
-        self.mask = mask.to(self.device)  # (N_tot, N_tot) or relevant sub-block
+        # Recurrent edges
+        self.rec_post = rec_post.to(self.device)
+        self.rec_pre  = rec_pre.to(self.device)
+        self.E_rec    = rec_post.numel()
+
+        # Workspace neuron indices (local to recurrent array)
+        self.ws_idx = ws_local_idx.to(self.device)
 
         self.reset()
 
     # ------------------------------------------------------------------
     def reset(self):
-        """Call between samples to clear timing state."""
-        NEG_INF = -100_000
-        # t_last[k] = timestep of the most-recent spike of neuron k (before current t)
-        self.t_last = torch.full((self.n_tot,), NEG_INF,
-                                 dtype=torch.float32, device=self.device)
-        # Accumulated weight delta; reset each sample, applied in bulk at end
-        self.dW = torch.zeros(self.n_tot, self.n_tot,
-                              dtype=torch.float32, device=self.device)
+        NEG_INF = -1_000_000.0
+        # Timing for recurrent neurons
+        self.t_last_rec = torch.full((self.N,),    NEG_INF, dtype=torch.float32, device=self.device)
+        # Timing for input channels
+        self.t_last_in  = torch.full((self.N_in,), NEG_INF, dtype=torch.float32, device=self.device)
+        # Accumulators
+        self.dW_rec = torch.zeros(self.E_rec,             dtype=torch.float32, device=self.device)
+        self.dW_in  = torch.zeros(self.n_ws, self.N_in,  dtype=torch.float32, device=self.device)
 
     # ------------------------------------------------------------------
-    def step(self, z: torch.Tensor, t: int):
+    def step(self, z_rec: torch.Tensor, z_in: torch.Tensor, t: int):
         """
-        Update STDP accumulators for one timestep.
-
-        Args:
-            z : spike vector (n_tot,) in {0, 1}, float
-            t : current integer timestep
+        z_rec : (N_rec,) float spike vector
+        z_in  : (N_in,)  float spike vector
+        t     : integer timestep (ms)
         """
-        # Time since each neuron's last spike — using OLD t_last (before update)
-        t_since = t - self.t_last          # (N_tot,)
+        step  = self.WEIGHT_STEP
+        t_f   = float(t)
 
-        # ---- LTP -------------------------------------------------------
-        # Row = post (currently firing), Col = pre (fired recently)
-        # supp_ok_post[i]: time since i's previous spike > St_post
-        supp_ok_post = (t_since > self.st_post).float()
-        # ltp_elig[j]: j fired within [1, t_pre) steps ago
-        #   (use >0 to exclude t_since=0, i.e., j has never spiked or fired simultaneously)
-        ltp_elig = ((t_since > 0) & (t_since < self.t_pre)).float()
+        # ---- Recurrent STDP (flat edge approach) -----------------------
+        ts_rec = t_f - self.t_last_rec            # (N_rec,) time-since-last-spike
 
-        # outer(post_fires * supp, pre_elig) → shape (N_tot, N_tot)
-        dW_ltp = torch.outer(z * supp_ok_post, ltp_elig)
+        ts_post = ts_rec[self.rec_post]            # (E_rec,)
+        ts_pre  = ts_rec[self.rec_pre]             # (E_rec,)
 
-        # ---- LTD -------------------------------------------------------
-        # Row = post (fired recently), Col = pre (currently firing)
-        supp_ok_pre = (t_since > self.st_pre).float()
-        ltd_elig = ((t_since > 0) & (t_since < self.t_post)).float()
+        ltp_r = (
+            (z_rec[self.rec_post] > 0)
+            & (ts_post > self.st_post)
+            & (ts_pre  > 0) & (ts_pre < self.t_pre)
+        )
+        self.dW_rec[ltp_r] += step
 
-        dW_ltd = torch.outer(ltd_elig, z * supp_ok_pre)
+        ltd_r = (
+            (z_rec[self.rec_pre] > 0)
+            & (ts_pre  > self.st_pre)
+            & (ts_post > 0) & (ts_post < self.t_post)
+        )
+        self.dW_rec[ltd_r] -= step
 
-        # Apply connectivity mask and accumulate
-        self.dW += (dW_ltp - dW_ltd) * self.mask * self.WEIGHT_STEP
+        # ---- Input STDP (2D outer-product approach) ---------------------
+        # We work with ts_ws (n_ws,) and ts_in (N_in,) — no fancy indexing.
+        ts_ws = ts_rec[self.ws_idx]                # (n_ws,)  t_since for workspace neurons
+        ts_in = t_f - self.t_last_in               # (N_in,)  t_since for input channels
 
-        # ---- Update t_last ---------------------------------------------
-        # Only update for neurons that actually fired
-        fired = z > 0
-        self.t_last[fired] = float(t)
+        z_ws  = z_rec[self.ws_idx]                 # (n_ws,)  current ws spike
+
+        # LTP: workspace (post) fires, suppression ok, input (pre) in window
+        ws_ltp_ok = z_ws * (ts_ws > self.st_post).float()   # (n_ws,)
+        in_ltp_ok = ((ts_in > 0) & (ts_in < self.t_pre)).float()  # (N_in,)
+        if ws_ltp_ok.any() and in_ltp_ok.any():
+            self.dW_in += step * torch.outer(ws_ltp_ok, in_ltp_ok)
+
+        # LTD: input (pre) fires, suppression ok, workspace (post) in window
+        ws_ltd_ok = ((ts_ws > 0) & (ts_ws < self.t_post)).float()  # (n_ws,)
+        in_ltd_ok = z_in * (ts_in > self.st_pre).float()            # (N_in,)
+        if ws_ltd_ok.any() and in_ltd_ok.any():
+            self.dW_in -= step * torch.outer(ws_ltd_ok, in_ltd_ok)
+
+        # ---- Update timing ------------------------------------------------
+        self.t_last_rec[z_rec > 0] = t_f
+        self.t_last_in [z_in  > 0] = t_f
 
     # ------------------------------------------------------------------
-    def get_and_reset_dW(self) -> torch.Tensor:
-        """Return accumulated ΔW and zero the accumulator."""
-        dW = self.dW.clone()
-        self.dW.zero_()
-        return dW
+    def reset_dW(self):
+        self.dW_rec.zero_()
+        self.dW_in.zero_()

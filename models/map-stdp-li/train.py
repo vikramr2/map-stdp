@@ -23,6 +23,7 @@ Usage
         --epochs 10 \
         --save models/map-stdp-li/checkpoints/
 """
+from __future__ import annotations
 
 import sys
 import argparse
@@ -80,9 +81,9 @@ class MapSTDP_LI(MapSTDPBase):
         return G_LI
 
     # ------------------------------------------------------------------
-    def apply_weight_update(self, dW_stdp: torch.Tensor):
+    def apply_weight_update(self):
         """Extend base: also update inhibitory weights anti-Hebbianly."""
-        super().apply_weight_update(dW_stdp)
+        super().apply_weight_update()
 
         # ΔI_ij = η_inh · p̃_i · p̃_j
         eta_inh = self.hp.get("eta_inh", 0.005)
@@ -105,7 +106,9 @@ def parse_args():
     p.add_argument("--tau-m",     type=float, default=LI_HP["tau_m"])
     p.add_argument("--theta",     type=float, default=LI_HP["theta"])
     p.add_argument("--beta-p",    type=float, default=LI_HP["beta_p"])
-    p.add_argument("--max-t",     type=int,   default=LI_HP["max_t"])
+    p.add_argument("--max-t",       type=int,   default=LI_HP["max_t"])
+    p.add_argument("--max-samples", type=int,   default=None,
+                   help="Cap training samples per epoch (for quick smoke tests)")
     p.add_argument("--device",    default="cpu")
     return p.parse_args()
 
@@ -123,7 +126,8 @@ def main():
         "tau_m":     args.tau_m,
         "theta":     args.theta,
         "beta_p":    args.beta_p,
-        "max_t":     args.max_t,
+        "max_t":      args.max_t,
+        "max_samples": args.max_samples,
     }
 
     ws = Path(args.workspace)

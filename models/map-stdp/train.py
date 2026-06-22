@@ -19,6 +19,7 @@ Usage
         --epochs 10 \
         --save models/map-stdp/checkpoints/
 """
+from __future__ import annotations
 
 import sys
 import argparse
@@ -64,7 +65,9 @@ def parse_args():
     p.add_argument("--tau-m",     type=float, default=DEFAULT_HP["tau_m"])
     p.add_argument("--theta",     type=float, default=DEFAULT_HP["theta"])
     p.add_argument("--beta-p",    type=float, default=DEFAULT_HP["beta_p"])
-    p.add_argument("--max-t",     type=int,   default=DEFAULT_HP["max_t"])
+    p.add_argument("--max-t",       type=int,   default=DEFAULT_HP["max_t"])
+    p.add_argument("--max-samples", type=int,   default=None,
+                   help="Cap training samples per epoch (for quick smoke tests)")
     p.add_argument("--device",    default="cpu")
     return p.parse_args()
 
@@ -81,7 +84,8 @@ def main():
         "tau_m":     args.tau_m,
         "theta":     args.theta,
         "beta_p":    args.beta_p,
-        "max_t":     args.max_t,
+        "max_t":      args.max_t,
+        "max_samples": args.max_samples,
     }
 
     # Resolve workspace path relative to repo root

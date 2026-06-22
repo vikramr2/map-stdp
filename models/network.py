@@ -22,6 +22,7 @@ Map-STDP quantities (from the paper, Section 3):
     ē_i^LI  = e_i^LI / s̃_i
     G_LI(i,j) = φ_ij - ē_i^LI
 """
+from __future__ import annotations
 
 import csv
 from pathlib import Path
