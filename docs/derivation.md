@@ -2,9 +2,11 @@
 
 Author: Vikram Ramavarapu
 
+**Goal.** Make information dynamics a working surrogate for thermodynamics in a neural model. Neurons pay a real metabolic and thermodynamic cost to communicate, and we hypothesise that this cost is higher when activity crosses into cortices a neuron rarely talks to. Information-theoretic quantities of neural activity flow, such as description lengths, entropy rates and entropy production, can be computed and differentiated inside the model. If they track that cost, plasticity can minimise them directly, and the network learns to be both modular and thermodynamically efficient.
+
 STDP is local, so on its own it has no reason to organise a network into cortices: dense modules with sparse links between them. Map-STDP makes structure a *neuromodulated* term. Each module has a neuromodulator that reports how much a candidate **description length** $D$ grows when activity crosses a given transition, and that signal gates STDP. The map equation is the baseline $D$. Seven alternatives, several with a direct thermodynamic reading, plug into the same rule (§5).
 
-This document is a corrected and consolidated rewrite of the original LaTeX derivation, `derivation/mapstdp.tex`, which has since been removed from the tree but is still in git history (e.g. `git show effefbf:derivation/mapstdp.tex`). Appendix B lists what changed.
+This document is a corrected and consolidated rewrite of an earlier derivation. Appendix B lists what changed.
 
 ## At a glance
 
@@ -432,16 +434,14 @@ Because $q_m = \sum_{j \in m} \sum_{i \notin m} J_{ij}$, we get $g_{ij} = M^{\as
 - power-iteration error ratios stay below $1 - \alpha$;
 - $\sum_i W_{ij} G(i, j) = 0$ to machine precision.
 
-## Appendix B: Changes from the original tex
+## Appendix B: Corrections to the earlier derivation
 
-The original `derivation/mapstdp.tex` is in git history (commit `effefbf` and earlier).
-
-1. **Sign error.** The tex expanded $L(M)$ with $+$ on its second and third terms; both are negative. The gradient's log factor becomes $M^{\ast}_m = \log \frac{q_{\curvearrowright}(p_m+q_m)}{q_m^2} \ge 0$, not $\log \frac{q_{\curvearrowright}}{p_m+q_m} \le 0$.
-2. **Direction convention.** $W_{ij}$ is the synapse from pre $j$ to post $i$ throughout, and the walk follows spikes. The tex row-normalised but wrote $\tilde{p} = \tilde{T} \tilde{p}$. Gating is now indexed by the presynaptic neuron.
+1. **Sign error.** The earlier version expanded $L(M)$ with $+$ on its second and third terms; both are negative. The gradient's log factor becomes $M^{\ast}_m = \log \frac{q_{\curvearrowright}(p_m+q_m)}{q_m^2} \ge 0$, not $\log \frac{q_{\curvearrowright}}{p_m+q_m} \le 0$.
+2. **Direction convention.** $W_{ij}$ is the synapse from pre $j$ to post $i$ throughout, and the walk follows spikes. The earlier version row-normalised but wrote $\tilde{p} = \tilde{T} \tilde{p}$. Gating is now indexed by the presynaptic neuron.
 3. **Teleportation.** The stimulus enters as $\alpha v(\mathbf{o})$, making the flow unique and the rule stimulus-dependent.
-4. **Flow vs. firing.** The tex equated $p(z_j = 1 \mid \mathbf{o})$ with the stationary distribution. That is now an explicit assumption (§2.2).
-5. **Convergence.** The tex showed only a fixed point. This version proves contraction.
-6. **Lateral inhibition.** The tex's $\varphi_{ij}$ did not reduce to the indicator; it is replaced by $\chi_{ij}$, and the problems with the inhibitory update are flagged.
+4. **Flow vs. firing.** The earlier version equated $p(z_j = 1 \mid \mathbf{o})$ with the stationary distribution. That is now an explicit assumption (§2.2).
+5. **Convergence.** The earlier version showed only a fixed point. This version proves contraction.
+6. **Lateral inhibition.** The earlier $\varphi_{ij}$ did not reduce to the indicator; it is replaced by $\chi_{ij}$, and the problems with the inhibitory update are flagged.
 7. **Three-factor restructure (new).** The structural term is a neuromodulated, cost-gated STDP rule, (4). Its modulator is the marginal description cost, and eight candidate description lengths plug in. The factor $M^{\ast}_m$, previously absorbed into the learning rate, is the map equation's per-module neuromodulator. $G$ is the lag-1 Markov-stability gradient. Every modulator is defined at module level for memristive crossbars.
 
 ## References

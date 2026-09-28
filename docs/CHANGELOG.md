@@ -6,7 +6,7 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ### Removed
 
-- **`derivation/`**: the original LaTeX derivation (`mapstdp.tex`, compiled PDF, figures, Springer Nature template files). It is superseded by `docs/derivation.md` and recoverable from git (`effefbf`). The training-loop figure (`algo_infograph.png`) was dropped from the docs because it depicted the old per-sample E-step/M-step loop.
+- **The original LaTeX derivation** and its template files, superseded by `docs/derivation.md`. Its training-loop figure was dropped because it depicted the old per-sample E-step/M-step loop.
 - **The PyTorch prototype in `models/`.** It had:
   - an SBM starting-topology generator;
   - a shared LIF simulation with an E-step/M-step training loop;
@@ -17,7 +17,7 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ### Added
 
-- **`docs/derivation.md`**, a corrected markdown rewrite of `derivation/mapstdp.tex`. The tex is kept unchanged. The rewrite:
+- **`docs/derivation.md`**, a corrected markdown rewrite of the original LaTeX derivation. The rewrite:
   - fixes a sign error in the expansion of $L(M)$. The gradient's log factor becomes $\log\frac{q_\curvearrowright(p_m+q_m)}{q_m^2} \ge 0$, verified by finite differences.
   - adopts a single direction convention: $W_{ij}$ is pre $j$ → post $i$, and the walk follows spikes forward. As a result, $G_{sim}(i,j) = \mathbb I[i\notin m(j)] - \bar e_j$ is indexed by the presynaptic neuron.
   - adds the stimulus as a teleportation term, $\pi = (1-\alpha)T\pi + \alpha v(\mathbf o)$.
@@ -35,7 +35,7 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
   - a notation table saying where each quantity lives;
   - an intuition for the map equation as a two-level code, and the fact that leakage always costs bits;
   - a single assumptions list;
-  - the changes from the tex moved to Appendix B.
+  - the corrections to the earlier version moved to Appendix B.
 
   New result: $\sum_i W_{ij} G(i,j) = 0$, so a multiplicative map term conserves each neuron's outgoing weight (checked numerically). All math now renders in KaTeX, GitHub and Markdown Preview Enhanced: no `\tag`, `\,`, `\{` or `\|`, and every span is validated with KaTeX.
 - **`docs/SPEC.md`**, cross-references updated to the new section and equation numbers. $G_{sim}$ is renamed to $G$, and math spacing is fixed.

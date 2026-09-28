@@ -10,7 +10,7 @@ Research question: can an information-theoretic description length of neural act
 
 ## Docs
 
-- `docs/derivation.md` is the **canonical** derivation. The original LaTeX version (`derivation/`) was removed. It is in git history (`git show effefbf:derivation/mapstdp.tex`), but it contains a sign error and inconsistent direction conventions that the markdown version corrects, so do not use it as a source. Put math changes in the markdown.
+- `docs/derivation.md` is the **canonical** derivation. Its Appendix B lists the corrections to an earlier version, which had a sign error and inconsistent direction conventions. Put math changes in the markdown.
 - `docs/SPEC.md` holds the goals, the design considerations (simulator, tasks, stimulus, description length as neuromodulator, memristive hardware), open questions and milestones. Items marked **Proposal** are undecided. Do not treat them as settled.
 - `docs/CHANGELOG.md`: add a dated entry for any change to docs or code, including decisions and reversals.
 
