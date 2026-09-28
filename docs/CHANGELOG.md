@@ -5,6 +5,8 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 ## 2026-09-27
 
 ### Removed
+
+- **`derivation/`**: the original LaTeX derivation (`mapstdp.tex`, compiled PDF, figures, Springer Nature template files). It is superseded by `docs/derivation.md` and recoverable from git (`effefbf`). The training-loop figure (`algo_infograph.png`) was dropped from the docs because it depicted the old per-sample E-step/M-step loop.
 - **The PyTorch prototype in `models/`.** It had:
   - an SBM starting-topology generator;
   - a shared LIF simulation with an E-step/M-step training loop;
@@ -14,6 +16,7 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
   The project restarts from ideation. The code remains in git history (last at `fcedb0a`).
 
 ### Added
+
 - **`docs/derivation.md`**, a corrected markdown rewrite of `derivation/mapstdp.tex`. The tex is kept unchanged. The rewrite:
   - fixes a sign error in the expansion of $L(M)$. The gradient's log factor becomes $\log\frac{q_\curvearrowright(p_m+q_m)}{q_m^2} \ge 0$, verified by finite differences.
   - adopts a single direction convention: $W_{ij}$ is pre $j$ → post $i$, and the walk follows spikes forward. As a result, $G_{sim}(i,j) = \mathbb I[i\notin m(j)] - \bar e_j$ is indexed by the presynaptic neuron.
@@ -25,6 +28,7 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 - **`docs/CHANGELOG.md`**, this file.
 
 ### Changed
+
 - **`CLAUDE.md`**, rewritten for the docs-first phase. It now also lists math-rendering conventions.
 - **`docs/derivation.md`**, consolidated to put interpretation first:
   - an "At a glance" section with the rule, a sign/magnitude table and a worked example;
@@ -35,3 +39,23 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
   New result: $\sum_i W_{ij} G(i,j) = 0$, so a multiplicative map term conserves each neuron's outgoing weight (checked numerically). All math now renders in KaTeX, GitHub and Markdown Preview Enhanced: no `\tag`, `\,`, `\{` or `\|`, and every span is validated with KaTeX.
 - **`docs/SPEC.md`**, cross-references updated to the new section and equation numbers. $G_{sim}$ is renamed to $G$, and math spacing is fixed.
+- **Decision: structure is a neuromodulated 3-factor rule.** The structural term is now cost-modulated STDP: $\Delta W_{ij} = -\lambda (g_{ij} - \bar{g}_j) \kappa_{ij}$. The neuromodulator broadcasts the *marginal* description cost $g_{ij} = \partial D / \partial J_{ij}$, a $K \times K$ module-pair table.
+  - Chosen over a factorized-gradient hardware rule because of the new memristive-crossbar target.
+  - The exact gradient remains the analysis reference and simulation baseline.
+  - Supersedes SPEC 3-factor variants A/B/C.
+- **`docs/derivation.md`**, restructured around the rule:
+  - new §4: the rule, and Theorem 3, which shows the expected update is $-\lambda W_{ij} \partial D / \partial W_{ij}$; marginal vs. pointwise cost;
+  - new §5: eight candidate description lengths as modulators (map equation, entropy rate, entropy production, cost-weighted map equation, Markov stability, SBM description length, predictive dissipation, cross-module information flow);
+  - new §6: crossbar mapping;
+  - neuromodulator/energy motivation with verified citations.
+
+  New results, each checked numerically:
+  - $M^{\ast}_m$, previously absorbed into the learning rate, is the map equation's per-module neuromodulator, firing only on module exits.
+  - $G$ is exactly the lag-1 Markov-stability gradient.
+  - Broadcasting pointwise codeword length is biased: correlation 0.976 with the true descent direction, against 0.9999 for the marginal cost.
+  - Coarse-grained $\sigma_K$ lower-bounds $\sigma$, but $h_K$ has no general ordering with $h$.
+- **`docs/SPEC.md`**, restructured:
+  - §6 merges C4 and C5 into "Description length as a neuromodulator", with a candidate table and decision criteria;
+  - new §7 (C6) sets memristive crossbars as the hardware target, with its constraints;
+  - ablations, M1 and M5 updated.
+- **`CLAUDE.md`** adds the crossbar-native constraint.
