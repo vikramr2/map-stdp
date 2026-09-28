@@ -14,7 +14,7 @@ Find a learning framework in which **information-dynamic entropy is a surrogate 
 2. keep task performance; and
 3. reduce a biophysical energy proxy.
 
-Map-STDP ([`derivation.md`](derivation.md), Eq. 5) is the current rule. Whether the map equation is the *right* description length is itself a question (§6).
+Map-STDP ([`derivation.md`](derivation.md), Eq. 6) is the current rule. Whether the map equation is the *right* description length is itself a question (§6).
 
 ## 2. Architecture
 
@@ -25,7 +25,7 @@ stimulus o ──► receptive field ──► workspace community ──► out
 ```
 
 - **Output cortical columns.** Each discrete action or image class is a community (column). The readout is the column with the most spikes in the decision window.
-- **Workspace.** A central community receives the stimulus and broadcasts to the columns, following Global Neuronal Workspace Theory (see `derivation.md` §5).
+- **Workspace.** A central community receives the stimulus and broadcasts to the columns, following Global Neuronal Workspace Theory (see `derivation.md` §7).
 - **Conventions.** $W_{ij}$ is the synapse from pre $j$ to post $i$. The flow $\pi$ follows spikes forward.
 
 ## 3. C1: Simulator
@@ -35,7 +35,7 @@ stimulus o ──► receptive field ──► workspace community ──► out
 Why it fits:
 
 - The dynamics and plasticity are written as equations, so the model stays close to the math.
-- Map-STDP's per-neuron sums map onto Brian2's `(summed)` synaptic variables. Per-presynaptic sums (`..._pre = ... (summed)`) give $d_j$ and $e_j$, and per-postsynaptic sums give the E-step drive in Eq. 3.
+- Map-STDP's per-neuron sums map onto Brian2's `(summed)` synaptic variables. Per-presynaptic sums (`..._pre = ... (summed)`) give $d_j$ and $e_j$, and per-postsynaptic sums give the E-step drive in `derivation.md` Eq. 2.
 - The community labels $m(\cdot)$ can be neuron variables, and synapses can read them via `m_pre` / `m_post`.
 
 Risks:
@@ -43,7 +43,7 @@ Risks:
 - **Closed-loop RL** needs `network_operation` (or an equivalent Python callback) to step the gym environment and set input rates. That works only in runtime mode, not `cpp_standalone`, so it will be slow for large networks.
 - **Scale.** Large open-loop vision runs may need Brian2CUDA or Brian2GeNN (standalone). If those are still too slow, a PyTorch SNN library with batching is the fallback, at the cost of equation-level fidelity.
 
-**Proposal.** Use Brian2 for M1–M4 (§9). Revisit when M4 wall-clock times are known.
+**Proposal.** Use Brian2 for M1–M4 (§10). Revisit when M4 wall-clock times are known.
 
 ## 4. C2: Applications
 
@@ -52,7 +52,7 @@ Risks:
 **Task ladder:**
 
 | Track  | Step 1             | Step 2                                  | Stretch     |
-|--------|--------------------|-----------------------------------------|-------------|
+| --- | --- | --- | --- |
 | RL     | CartPole (2 cols)  | LunarLander (4 cols)                    | CarRacing (5 discrete) |
 | Vision | MNIST / N-MNIST (10 cols) | Imagenette (10-class ImageNet subset) | ImageNet-1k (1000 cols) |
 
@@ -83,7 +83,7 @@ Risks:
 **Proposal: candidates to compare.**
 
 | Candidate | What it measures | Relation to thermodynamics | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Map equation $L(M)$ | Two-level codelength of the flow given partition $M$ | Per-transition codeword length ≈ "cost" of a spike transmission; rare cross-module hops cost more | Baseline; gives Map-STDP |
 | Entropy rate $h = -\sum_j \pi_j \sum_i T_{ij}\log T_{ij}$ | Unavoidable information per step | Partition-free lower bound, $L(M) \ge h$ | $L(M) - h$ = overhead of the modular code |
 | Entropy production $\sigma = \tfrac12\sum_{ij}(J_{ij}-J_{ji})\log\frac{J_{ij}}{J_{ji}}$, $J_{ij}=\pi_jT_{ij}$ | Irreversibility of the flow | *Is* the thermodynamic entropy production of a Markov jump process (Schnakenberg) | Needs reciprocal links; zero for detailed balance |
@@ -103,26 +103,26 @@ Risks:
 
 **Direction:** consider reducing the rule to a 3-factor STDP rule.
 
-Common structure: an eligibility trace $\dot e_{ij} = -e_{ij}/\tau_e + \mathrm{STDP}_{ij}(t)$, and $\Delta W_{ij} = \eta\, M(t)\, e_{ij}$, where $M(t)$ is a neuromodulator (reward-prediction error $R - \bar R$).
+Common structure: an eligibility trace $\dot e_{ij} = -e_{ij}/\tau_e + \mathrm{STDP}_{ij}(t)$, and $\Delta W_{ij} = \eta M(t) e_{ij}$, where $M(t)$ is a neuromodulator (reward-prediction error $R - \bar R$).
 
 **Proposal: variants.**
 
-- **(A) Additive baseline.** $\Delta W_{ij} = \eta M(t)e_{ij} - \eta' G_{sim}(i,j)$. The map term stays a separate, unmodulated heterosynaptic term.
-- **(B) Map term folded into the third factor.** $\Delta W_{ij} = \eta\, M(t)\, g(\bar e_j, \chi_{ij})\, e_{ij}$, where $g$ gates plasticity by community leakage. For example, $g = 1 - \lambda(\chi_{ij} - \bar e_j)$ damps potentiation on cross-module synapses when the presynaptic neuron is leaky. This is the "true" 3-factor reduction and the main hypothesis.
+- **(A) Additive baseline.** $\Delta W_{ij} = \eta M(t)e_{ij} - \eta' G(i,j)$. The map term stays a separate, unmodulated heterosynaptic term.
+- **(B) Map term folded into the third factor.** $\Delta W_{ij} = \eta M(t) g(\bar e_j, \chi_{ij}) e_{ij}$, where $g$ gates plasticity by community leakage. For example, $g = 1 - \lambda(\chi_{ij} - \bar e_j)$ damps potentiation on cross-module synapses when the presynaptic neuron is leaky. This is the "true" 3-factor reduction and the main hypothesis.
 - **(C) Two timescales.** Fast reward-modulated STDP, with the map term applied as a slow consolidation or homeostatic step (e.g. once per episode). This also relaxes the EM separation problem.
 
 The key comparison is A vs. B: does folding the structure pressure into the modulator preserve modularity and performance?
 
-**Open:** $G_{sim}$ is signed and has no eligibility of its own. In (B), the map term acts only when $M(t) \neq 0$, so modules may not form in the absence of reward. This needs checking.
+**Open:** $G$ is signed and has no eligibility of its own. In (B), the map term acts only when $M(t) \neq 0$, so modules may not form in the absence of reward. This needs checking.
 
 ## 8. Open questions carried from the derivation
 
 - **Partition $M$.** Static (SBM initialization) or periodically re-detected (Infomap, Leiden)? For fixed-output tasks, the columns probably pin $M$ for the output communities, and only the workspace would be re-detected.
 - **Structural plasticity.** Threshold pruning ($W_{ij} < \epsilon$) vs. top-$k$ per neuron.
 - **Initialization.** SBM (head start, bias) vs. Erdős–Rényi (neutral, slow).
-- **Locality convention.** The forward walk ties flow to firing but needs presynaptic (axonal) sums. The backward, dendritically normalized walk has postsynaptic sums but loses that tie. See `derivation.md` §3.6.
+- **Locality convention.** The forward walk ties flow to firing but needs presynaptic (axonal) sums. The backward, dendritically normalized walk has postsynaptic sums but loses that tie. See `derivation.md` §5.
 - **Lateral-inhibition variant.** The anti-Hebbian $\Delta I_{ij} = \eta\pi_i\pi_j$ is unbounded and treats co-active neurons as competitors, which conflicts with Hebbian STDP. It also ignores Dale's law. It needs a bounded, correctly signed rule, probably through interneuron populations.
-- **Mean-field validity.** Does $\pi \approx$ normalized firing rate (`derivation.md` §3.2) hold in the simulated regime? Measure it at M1.
+- **Mean-field validity.** Does $\pi \approx$ normalized firing rate (`derivation.md` §2.2) hold in the simulated regime? Measure it at M1.
 
 ## 9. Metrics and ablations
 
@@ -137,7 +137,7 @@ The key comparison is A vs. B: does folding the structure pressure into the modu
 ## 10. Milestones
 
 | ID | Milestone | Done when |
-|----|-----------|-----------|
+| --- | --- | --- |
 | M0 | Docs: corrected derivation, spec, changelog | This commit |
 | M1 | Brian2 rule prototype on a small SBM graph (no task) | Online $\pi$ estimate matches power iteration; $L(M)$ decreases under Map-STDP; mean-field check reported |
 | M2 | CartPole, 2 columns, closed loop | Beats random policy; modules persist |

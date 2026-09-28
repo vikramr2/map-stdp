@@ -25,4 +25,13 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 - **`docs/CHANGELOG.md`**, this file.
 
 ### Changed
-- **`CLAUDE.md`**, rewritten for the docs-first phase.
+- **`CLAUDE.md`**, rewritten for the docs-first phase. It now also lists math-rendering conventions.
+- **`docs/derivation.md`**, consolidated to put interpretation first:
+  - an "At a glance" section with the rule, a sign/magnitude table and a worked example;
+  - a notation table saying where each quantity lives;
+  - an intuition for the map equation as a two-level code, and the fact that leakage always costs bits;
+  - a single assumptions list;
+  - the changes from the tex moved to Appendix B.
+
+  New result: $\sum_i W_{ij} G(i,j) = 0$, so a multiplicative map term conserves each neuron's outgoing weight (checked numerically). All math now renders in KaTeX, GitHub and Markdown Preview Enhanced: no `\tag`, `\,`, `\{` or `\|`, and every span is validated with KaTeX.
+- **`docs/SPEC.md`**, cross-references updated to the new section and equation numbers. $G_{sim}$ is renamed to $G$, and math spacing is fixed.

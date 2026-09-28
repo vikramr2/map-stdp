@@ -18,8 +18,8 @@ Research question: can an information-theoretic description length of neural act
 
 - $W_{ij}$ is the synapse from **presynaptic $j$ to postsynaptic $i$**. The random walk follows spikes forward: $T_{ij} = W_{ij}/d_j$, where $d_j$ is $j$'s total outgoing weight.
 - The stimulus enters the flow through teleportation: $\pi = (1-\alpha)T\pi + \alpha v(\mathbf o)$.
-- The simplified gating is indexed by the presynaptic neuron: $G_{sim}(i,j) = \mathbb I[i\notin m(j)] - \bar e_j$.
-- Math in markdown uses `$…$` / `$$…$$`, which GitHub renders with MathJax.
+- The simplified gating is indexed by the presynaptic neuron: $G(i,j) = \mathbb{I}[i \notin m(j)] - \bar{e}_j$.
+- Math must render in GitHub, VS Code and Markdown Preview Enhanced: put display `$$` on their own lines with blank lines around them, use `\lbrace`/`\rbrace` and `\lVert`/`\rVert` instead of `\{`/`\}` and `\|`, avoid `\,`, `\;` and `\tag` (number equations as `\qquad \text{(n)}`), and use braced arguments (`\mathbb{I}`, `\bar{e}`).
 - Before changing a derivation, check the gradient claims numerically (finite differences on a small random network).
 
 ## Environment
