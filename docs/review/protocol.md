@@ -1,6 +1,6 @@
 # Systematic Review Protocol: Information and Thermodynamic Cost in Neural Systems
 
-Status: **v1.2, approved by the author on 2026-10-01 and frozen before the Phase 2 search.** Later changes go only through §B.13. Registration: not registered. The git commit of this version is the timestamped protocol (see §B.11).
+Status: **v1.3.** v1.2 was approved by the author on 2026-10-01 and frozen before the Phase 2 search. Later changes go only through §B.13; v1.3 revised the search strings after the recall check failed. Registration: not registered. The git commit of this version is the timestamped protocol (see §B.11).
 
 This review supports the Map-STDP hypothesis (`docs/SPEC.md` §1) but is designed to test it, not to confirm it. Its findings feed the open items in SPEC §6 ("Energy model") and §1 ("information-dynamic entropy is a surrogate for thermodynamic entropy").
 
@@ -133,9 +133,9 @@ Scopus, Web of Science and PsycINFO are **not accessible** in this environment. 
 
 ### B.5 Search strategy (OpenAlex syntax; adapted per database in Phase 2)
 
-Pilot counts are OpenAlex title-and-abstract hits on 2026-10-01. Each string is translated to PubMed and arXiv syntax with the same terms.
+Counts are OpenAlex hits from the executed search on 2026-10-01 (`search.py`, `data/search_log.json`). Each string is translated to PubMed and arXiv syntax with the same terms.
 
-**S-A (SQ2 linkage), 308 hits:**
+**S-A (SQ2 linkage), 370 hits (amended in v1.3):**
 
 ```text
 ("mutual information" OR "information rate" OR "bits per" OR "description length"
@@ -143,7 +143,8 @@ Pilot counts are OpenAlex title-and-abstract hits on 2026-10-01. Each string is 
  OR "transfer entropy" OR "entropy rate")
 AND ("metabolic cost" OR "energy cost" OR "energetic cost" OR "energy efficiency"
  OR "energy consumption" OR ATP OR "entropy production")
-AND (neuron OR neurons OR synapse OR synaptic OR axon OR brain OR cortex OR spiking)
+AND (neuron OR neurons OR neural OR synapse OR synaptic OR axon OR brain OR cortex OR spiking)
+NOT ("deep learning" OR "neural network accelerator")
 ```
 
 **S-B (SQ3 network), 171 hits:**
@@ -166,17 +167,27 @@ AND ("action potential" OR "action potentials" OR "synaptic transmission"
 AND (neuron OR neurons OR brain OR cortex)
 ```
 
-**S-C2 (SQ1 thermodynamics), 490 hits:**
+**S-C2 (SQ1 thermodynamics), 582 hits (amended in v1.3):**
 
 ```text
 ("entropy production" OR Landauer OR "stochastic thermodynamics"
  OR "nonequilibrium thermodynamics" OR "non-equilibrium thermodynamics")
-AND (neuron OR neurons OR synapse OR synaptic OR "neural activity" OR "brain dynamics")
+AND (neuron OR neurons OR synapse OR synaptic OR "neural activity" OR "brain dynamics"
+ OR "human brain" OR "brain activity" OR "whole-brain")
 ```
 
-The pilot total before deduplication is about 1,290 OpenAlex records, plus PubMed and arXiv. Including the bare term `neural` raised S-C2 to more than 2,000 hits, mostly artificial-network papers, so it was dropped.
+**S-D (foundational titles; title field only), 20 hits (added in v1.3):**
 
-**Seed set for recall checking and citation chasing.** This list is unverified and will be checked in Phase 2. It includes:
+```text
+("neural information" OR "neural code" OR "neural codes" OR "neural coding"
+ OR "cortical computation" OR "neural computation" OR "neural signalling" OR "neural signaling")
+AND ("metabolic cost" OR "energy cost" OR "energetic cost" OR "energy efficiency"
+ OR "energy consumption" OR metabolic OR "cost of")
+```
+
+The executed search returned 1,870 records across the three databases, which came to 1,276 after deduplication. 147 of them have no abstract in any source. Adding the bare term `neural` to S-C2 raised it to more than 2,000 hits, mostly artificial-network papers, so S-C2 uses brain-specific phrases instead.
+
+**Seed set for recall checking and citation chasing.** Ten seeds are eligible under §B.2. Still et al. (2012) and Rosvall & Bergstrom (2008) are not about neural systems; they are used only for citation chasing and the gap check, and are not counted in the recall check. The seeds are:
 
 - Attwell & Laughlin (2001), the grey-matter energy budget;
 - Laughlin, de Ruyter van Steveninck & Anderson (1998), the metabolic cost of neural information;
@@ -191,7 +202,7 @@ The pilot total before deduplication is about 1,290 OpenAlex records, plus PubMe
 - Bullmore & Sporns (2012), the economy of brain network organisation;
 - Rosvall & Bergstrom (2008), the map equation (the gap check).
 
-**Recall check.** If the database searches miss more than 2 eligible seeds, the strings are revised and re-run before screening proceeds. Every revision is logged in §B.13.
+**Recall check.** If the database searches miss more than 2 eligible seeds, the strings are revised and re-run before screening proceeds. Every revision is logged in §B.13. **Result:** the v1.2 strings missed 3 of 10 eligible seeds (Laughlin et al. 1998, Lennie 2003, Lynn et al. 2021), so they were revised (amendment 3). The v1.3 strings retrieve all 10.
 
 ### B.6 Study records and selection
 
@@ -252,6 +263,7 @@ PRISMA 2020 (27 items), with the deviations in §B.6, §B.8 and §B.9 listed in 
 | --- | --- | --- | --- |
 | 2026-10-01 | §A, §B.2, §B.3 | v1.0 → v1.1: added cost classes M/T/W/P with no cross-class pooling; excluded the variational free-energy principle; made decoupling evidence an explicit SQ2 target; added S-B and the seed recall check | Devil's Advocate Checkpoint 1 (Appendix C) |
 | 2026-10-01 | §B.5, §B.11, Appendix C | v1.1 → v1.2: added transfer entropy and entropy rate to S-A (308 hits); narrowed S-B (171 hits); recorded author decisions (SQ1 kept, author audit committed, git as registration) | Author approval at the end of Phase 1; made before the search, so no data had been seen |
+| 2026-10-01 | §B.5 | v1.2 → v1.3: added `neural` and a deep-learning exclusion to S-A; added brain-scale phrases to S-C2; added the title-only string S-D. Tried and rejected: `bit OR bits` in S-A (2,589 hits, because "a bit" is common English) and `spikes` plus "energy consumption" in S-C1 (2,333 hits). | The recall check failed (3 of 10 eligible seeds missed). Two of the misses have no abstract in OpenAlex and their titles lack the S-A terms; Lynn et al. 2021 says "human brain", which S-C2 did not cover. Titles and abstracts were inspected only for the missed seeds, and none were screened. |
 
 ---
 
