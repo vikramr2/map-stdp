@@ -1,0 +1,22 @@
+{
+  "date": "2026-10-01",
+  "counts": {
+    "S-A/openalex": 370,
+    "S-A/pubmed": 67,
+    "S-A/arxiv": 44,
+    "S-B/openalex": 171,
+    "S-B/pubmed": 95,
+    "S-B/arxiv": 25,
+    "S-C1/openalex": 322,
+    "S-C1/pubmed": 76,
+    "S-C1/arxiv": 9,
+    "S-C2/openalex": 582,
+    "S-C2/pubmed": 44,
+    "S-C2/arxiv": 40,
+    "S-D/openalex": 20,
+    "S-D/pubmed": 4,
+    "S-D/arxiv": 1
+  },
+  "raw": 1870,
+  "deduplicated": 1276
+}
