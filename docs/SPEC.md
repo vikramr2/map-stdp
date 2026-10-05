@@ -31,9 +31,9 @@ stimulus o_f ──► controller C ─────────────► a
 
 There are three community types (`derivation.md` §2):
 
-- **Controller $\mathcal C$.** One central community that receives the stimulus: $v(\mathbf o)$ is concentrated here. It routes flow to latent and action communities. It is the analogue of the cerebral cortex integrating input and selecting among motor programmes, and of the workspace in Global Workspace Theory. Because the stimulus enters here, the extracted chain is stimulus-conditioned (`derivation.md` §2.4).
-- **Action communities $\mathcal A$.** One per discrete action. The policy is the flow share of each action community, or equivalently the column with the most spikes in the frame window (`derivation.md` Eq. 1d).
-- **Latent communities $\mathcal L$.** Abstract states that are not tied to an action. With carry-over they persist across frames and form a learned world model.
+- **Controller $\mathcal C$.** One central community that receives the stimulus: $v(\mathbf o)$ is concentrated here. It routes flow to latent and action communities. It is a functional abstraction: loosely cortex-inspired, closer anatomically to thalamus or sensory cortex, with a broadcast role like the workspace in Global Workspace Theory. Keep its internal recurrence low, because recurrence blurs the policy (`derivation.md` §2.4). Because the stimulus enters here, the extracted chain is stimulus-conditioned (`derivation.md` §2.4).
+- **Action communities $\mathcal A$.** One per discrete action, analogous to basal-ganglia action channels. The policy is the flow share of each action community (`derivation.md` Eq. 1d). In spiking, a race readout (first population to spike) gives exactly the same policy, while the column with the most spikes is a different, near-greedy policy.
+- **Latent communities $\mathcal L$.** Abstract states that are not tied to an action, analogous to task-state codes in orbitofrontal cortex and hippocampus. With carry-over they persist across frames and form a learned world model.
 
 **Conventions.** $W_{ij}$ is the synapse from pre $j$ to post $i$. The flow $\pi_f$ follows spikes forward and is computed once per frame $f$.
 
@@ -53,7 +53,7 @@ Risks:
 - **Closed-loop RL** needs `network_operation` (or an equivalent Python callback) to step the gym environment and set input rates. That works only in runtime mode, not `cpp_standalone`, so it will be slow for large networks.
 - **Scale.** If runtime mode is too slow, options are Brian2CUDA or Brian2GeNN (standalone, which complicates the closed loop), or a PyTorch SNN library with batching, at the cost of equation-level fidelity.
 
-**Proposal.** Use Brian2 for M1–M4 (§11). Revisit when M3 wall-clock times are known.
+**Proposal.** Run the RL ladder first on a **numpy flow-level reference**: implicit walk, expected or sampled pairings, and the same modulators. Use Brian2 for spiking fidelity at M1 and M2, then for the ladder once the rules work. The wall-clock cost of closed-loop Brian2 is an untested estimate: a few hundred to 1000 neurons in runtime mode at roughly 1–10× slower than real time. At 500–3500 episodes × ~100 frames × 100–250 ms, that is hours to days per seed. Brian2 is not yet installed, and timing it is part of M1.
 
 ## 4. C2: Applications
 
@@ -85,11 +85,15 @@ Risks:
 
 - software reference: $n$ sparse matrix–vector products;
 - crossbar: $n$ analogue reads;
-- spiking: about one synaptic delay per hop, so about 20 ms per frame.
+- spiking: not discrete hops. The recurrent dynamics relax with time constant about $\tau/\alpha$, so a frame takes about 100–250 ms, and a 50 Hz environment needs frame-skipping (`derivation.md` §2.3).
 
 The software reference is the default. The spiking estimate is the biological and hardware variant, and its agreement with the reference is a milestone (M1).
 
-**Proposal: carry-over.** Latent state persists across frames by mixing the previous frame's latent flow into the teleportation vector with weight $\rho$ (`derivation.md` Eq. 1b). With $\rho = 0$, frames are independent, which suffices for fully observed tasks.
+**Proposal: carry-over.** Latent state persists across frames by mixing the previous frame's latent flow into the teleportation vector with weight $\rho$ (`derivation.md` Eq. 1b). With $\rho = 0$, frames are independent, which suffices for fully observed tasks. Linear carry-over forgets geometrically, by a factor of about 0.3–0.4 per frame in a test, so holding a cue needs:
+
+- a module-level soft winner-take-all over latent communities;
+- eligibility traces at least as long as the cue-to-reward delay;
+- protection of controller→latent routing.
 
 **Timescale ordering:** walk hops, then frames, then plasticity.
 
@@ -105,15 +109,19 @@ The software reference is the default. The spiking estimate is the biological an
 
 **Direction:** there may be a better description length than the map equation, and the structural term should be a three-factor rule, since neuromodulators gate costly plasticity. Each candidate description length gets its own neuromodulator.
 
-**Decision (2026-09-27): cost-modulated STDP is the implemented form.** See `derivation.md` §4. The rule is
+**Decision (2026-09-27): cost-modulated STDP is the implemented form.** See `derivation.md` §4.
+
+**Decision (2026-10-04): the task term is TD-modulated STDP with action-gated eligibility.** It replaces $(R - \bar{R}) e_{ij}$, which gets no action credit when the action is sampled from flow shares, and stalls under sparse reward. See `derivation.md` §4.6. The rule is
 
 $$
-\Delta W_{ij} = \eta \left( R - \bar{R} \right) e_{ij} - \lambda \left( g_{ij} - \bar{g}_j \right) \kappa_{ij}
+\Delta W_{ij} = \eta \delta e_{ij} - \lambda \left( g_{ij} - \bar{g}_j \right) \kappa_{ij}
 $$
 
 where:
 
-- $\kappa_{ij}$ is the causal pre→post coincidence;
+- $\delta$ is a global TD error from a module-level linear critic (`derivation.md` Eq. 4c);
+- $e_{ij}$ is a trace of $\kappa_{ij} (h_{m(i)} - \bar{h}_j)$, where the $K$-vector $h$ marks the chosen action (Eq. 4b). Its average is a weight-scaled policy-gradient score. It needs the chosen action broadcast to the action modules, like an efference copy;
+- $\kappa_{ij}$ is the pre→post coincidence, counted as causal minus acausal pairings in spiking, to cancel chance coincidences;
 - $g_{ij} = \partial D / \partial J_{ij}$ is the **marginal** description cost of the transition, a $K \times K$ module-pair table broadcast per module;
 - $\bar{g}_j$ is a per-neuron baseline.
 
@@ -124,6 +132,19 @@ Why this form:
 - **Crossbars.** It is a single rule for memristive crossbars (§7).
 - **No trace for structure.** Description costs are instantaneous, so the structural term needs no eligibility trace. Only delayed task reward does.
 - **Marginal, not pointwise.** The modulator must be the marginal cost. Broadcasting pointwise cost, such as each step's codeword length, is biased (checked in simulation).
+
+**Known conflict: structure starves routing** (`derivation.md` §4.5). Controller→action and controller→latent links are cross-module, so the map term alone drives the controller's exit flow to zero. The action communities starve, $M^{\ast}$ diverges, and the policy collapses.
+
+**Proposal: dual routing term.** Subtract $\mu$ from $g_{ba}$ on the routing module pairs, with $\mu$ set by dual ascent toward a target routing flow $q^{\ast}$ (Eq. 4a). The simplest variant exempts those pairs. Preliminary flow-level bandit results (4 seeds), P(correct):
+
+| Structural term | P(correct) |
+| --- | --- |
+| none | 0.657 |
+| map term alone | 0.50, with 3 of 4 runs collapsed |
+| routing pairs exempt | 0.693 |
+| dual term | 0.762 |
+
+**Schedule.** Ramp $\lambda$ up only after return exceeds random.
 
 **Candidates** (`derivation.md` §5 has the modulator, pointwise cost and caveats for each):
 
@@ -153,6 +174,7 @@ Why this form:
 - **Estimators.** Which ones to use for predictive dissipation and information flow.
 - **Composite modulators.** Whether candidates should be combined. For example, map equation plus $\lambda \sigma_K$, because $\sigma$ alone exerts no modular pressure.
 - **Lateral inhibition.** How $M^{\ast}$ is defined when modules are implicit.
+- **Biological carriers.** A neuromodulator can plausibly carry a slow per-region scalar, but not a $K \times K$ table. The map equation and Markov stability need only $K$ scalars and a mask; the cost-weighted map equation, $h_K$ and $\sigma_K$ need tables (`derivation.md` §5, §6).
 
 ## 7. C6: Hardware target: memristive crossbars
 
@@ -179,7 +201,13 @@ Constraints this places on every rule (see `derivation.md` §6):
 - **Initialization.** SBM (head start, bias) vs. Erdős–Rényi (neutral, slow).
 - **Locality convention.** The forward walk ties flow to firing and maps onto crossbar row sums. The backward, dendritically normalized walk has postsynaptic sums but loses that tie. See `derivation.md` §6.
 - **Lateral-inhibition variant.** The anti-Hebbian $\Delta I_{ij} = \eta\pi_i\pi_j$ is unbounded and treats co-active neurons as competitors, which conflicts with Hebbian STDP. It also ignores Dale's law. It needs a bounded, correctly signed rule, probably through interneuron populations.
-- **Mean-field validity.** Does $\pi \approx$ normalized firing rate, and do causal pairings occur at a rate proportional to $J_{ij}$ (`derivation.md` §2.2)? Theorem 3 depends on both. Measure them at M1.
+- **Mean-field validity.** Does $\pi \approx$ normalized firing rate, and do causal pairings occur at a rate proportional to $J_{ij}$ (`derivation.md` §2.2)? Theorem 3 depends on both. It needs constant $d_j$, global normalisation by inhibition, and balanced pairing counts. A preliminary Poisson test found 85% chance pairings in a 20 ms window. Measure at M1, and derive $\mathbb{E}[\Delta W]$ including the residual chance term.
+- **Controller in $D$.** Should the controller be a map-equation module at all, or an input layer outside $D$?
+- **Routing target.** How to set $q^{\ast}$ for the dual term, and whether it should be learned from reward.
+- **Nonlinear carry-over.** Is a nonlinear latent carry-over compatible with the theory, given that the gradients assume a linear resolvent?
+- **Device behaviour.** Do memristors with state-dependent updates give the multiplicative ($\propto W$) form natively, or only as an expectation over pairings?
+- **Dale's law.** Route lateral inhibition through per-module interneuron pools with inhibitory STDP (Vogels et al. 2011). The same pools supply normalisation and rate homeostasis (`derivation.md` §7).
+- **Efference copy.** The action-gated eligibility and the race readout need the chosen action broadcast to the action modules. How plausible is that, and what carries it?
 
 ## 9. Metrics
 
@@ -194,6 +222,11 @@ Constraints this places on every rule (see `derivation.md` §6):
 ## 10. Ablations
 
 - STDP only
+- task term: action-gated vs. plain eligibility; TD vs. $R - \bar{R}$
+- routing: dual term vs. exemption vs. none
+- $\lambda$ schedule: ramped vs. constant
+- spiking readout: race vs. argmax
+- pairing count: causal-only vs. causal minus acausal
 - exact-gradient baseline (additive $G$)
 - cost-modulated rule per candidate
 - per-module vs. global modulator
@@ -209,8 +242,8 @@ Constraints this places on every rule (see `derivation.md` §6):
 | ID | Milestone | Done when |
 | --- | --- | --- |
 | M0 | Docs: corrected derivation, spec, changelog; reformulated around communities as states | Done (2026-09-27, reformulated 2026-10-04) |
-| M1 | Brian2 rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking estimate agrees with it within a frame window; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; mean-field and pairing-rate checks reported |
-| M2 | CartPole, closed loop | Beats random policy; modules persist; policy from $T^K$ agrees with the spiking readout |
+| M1 | Numpy flow-level reference, plus Brian2 rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking error against window length (in units of $\tau/\alpha$) reported; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; pairing counts regressed on $J_{ij}$ and $r_i r_j$; no silent or runaway runs |
+| M2 | CartPole, closed loop (numpy reference first, then Brian2) | Beats random policy; dual term vs. exemption vs. none compared; modules persist; policy from $T^K$ agrees with the spiking race readout |
 | M3 | Acrobot, MountainCar, LunarLander | Runs end to end; returns reported for all ablations; wall-clock informs the simulator decision |
 | M4 | Partially observable task with latent communities and carry-over | Carry-over beats $\rho = 0$; latent chain predicts the next latent state |
 | M5 | Modulator comparison (§6): all candidates | Candidates scored on the five criteria |

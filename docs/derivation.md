@@ -6,9 +6,9 @@ Author: Vikram Ramavarapu
 
 **Side tie: thermodynamics.** Neurons pay a real metabolic and thermodynamic cost to communicate. We hypothesise that this cost is higher when activity crosses into cortices a neuron rarely talks to. If description length tracks that cost, the information dynamics that the rule minimises double as a model of thermodynamics in the brain. This is a secondary hypothesis, tested through an energy proxy (§1).
 
-STDP is local, so on its own it has no reason to organise a network into cortices: dense modules with sparse links between them. Map-STDP makes structure a *neuromodulated* term. Each module has a neuromodulator that reports how much a candidate **description length** $D$ grows when activity crosses a given transition, and that signal gates STDP. The map equation is the baseline $D$. Seven alternatives plug into the same rule (§5).
+STDP is local, so on its own it has no reason to organise a network into cortices: dense modules with sparse links between them. Map-STDP makes structure a *neuromodulated* term. Each module has a modulatory signal that reports how much a candidate **description length** $D$ grows when activity crosses a given transition, and that signal gates STDP. A per-module modulator is an abstraction. Its closest biological carriers are regional dopamine or astrocytic domains (§6). The map equation is the baseline $D$. Seven alternatives plug into the same rule (§5).
 
-**Each environment frame is one walk.** The stimulus of frame $t$ re-injects the walker, and the walk is run implicitly to its per-frame flow $\pi_t$ in a fixed number of hops (§2.3). Description length, modulators and the extracted Markov model are all per frame.
+**Each environment frame is one walk.** The stimulus of frame $f$ re-injects the walker, and the walk is run implicitly to its per-frame flow $\pi_f$ in a fixed number of hops (§2.3). Description length, modulators and the extracted Markov model are all per frame.
 
 This document is a corrected and consolidated rewrite of an earlier derivation, reformulated on 2026-10-04 around communities as states. Appendix B lists what changed.
 
@@ -17,16 +17,19 @@ This document is a corrected and consolidated rewrite of an earlier derivation, 
 For every causal spike pairing $j \to i$ (pre $j$ fires, then post $i$ within the STDP window; indicator $\kappa_{ij}(t)$), the synapse changes by
 
 $$
-\Delta W_{ij}(t) = \underbrace{\eta \left( R(t) - \bar{R} \right) e_{ij}(t)}_{\text{task: reward-modulated STDP}} - \underbrace{\lambda \left( g_{ij} - \bar{g}_j \right) \kappa_{ij}(t)}_{\text{structure: cost-modulated STDP}}
+\Delta W_{ij}(t) = \underbrace{\eta \delta(t) e_{ij}(t)}_{\text{task: TD-modulated STDP}} - \underbrace{\lambda \left( g_{ij} - \bar{g}_j \right) \kappa_{ij}(t)}_{\text{structure: cost-modulated STDP}}
 $$
 
 where:
 
-- $g_{ij} = \partial D / \partial J_{ij}$ is the **marginal description cost** of one more unit of flow from $j$ to $i$. It depends only on the modules of $i$ and $j$, so each module's neuromodulator can broadcast it.
+- $\delta$ is a global TD error from a critic readout (§4.6).
+- $e_{ij}$ is an **action-gated** eligibility trace. Each pairing adds $\kappa_{ij} (h_{m(i)} - \bar{h}_j)$, where $h$ is a $K$-vector that marks the chosen action's module (§4.6). The trace is needed because reward arrives late.
+- $g_{ij} = \partial D / \partial J_{ij}$ is the **marginal description cost** of one more unit of flow from $j$ to $i$. It depends only on the modules of $i$ and $j$, so a per-module modulatory signal can broadcast it.
 - $\bar{g}_j$ is its average over $j$'s outgoing transitions, a per-neuron baseline.
-- $e_{ij}$ is an STDP eligibility trace, needed only because task reward arrives late.
 
-How to read it:
+Both terms have the same form: a module-level broadcast, minus a per-neuron baseline, times a spike coincidence.
+
+How to read the structural term:
 
 - **The modulator reports cost.** A transition that makes activity more expensive to describe than $j$'s usual transitions ($g_{ij} > \bar{g}_j$) depresses the synapse that produced it. A cheaper-than-usual transition potentiates it.
 - **On average it is gradient descent** (Theorem 3): $\mathbb{E}[\Delta W_{ij}] = -\lambda W_{ij} \partial D / \partial W_{ij}$. This is multiplicative, weight-scaled descent of the description length.
@@ -38,18 +41,19 @@ How to read it:
 | $i$ in a **different** module from $j$ | $\propto -(1 - \bar{e}_j)$ | weakened |
 | $i$ in the **same** module as $j$ | $\propto +\bar{e}_j$ | strengthened |
 
-- **It suits memristive crossbars** (§6). The update is a pulse-coincidence STDP event scaled by a per-module signal. There are no per-synapse nonlinear reads, no transposed access, and no per-synapse trace for the structural term, because description costs are instantaneous.
-- **The communities are the states** (§2.4). In each frame, the module-to-module flow defines a Markov chain $T_K(\mathbf o)$ over communities. Its flow into the action communities is the policy, and its flow between latent communities across frames is a learned world model.
+- **Known conflict** (§4.5). Controller-to-action routing is cross-module by definition, so the map term alone starves the action modules. A dual routing term is proposed as the fix.
+- **It suits memristive crossbars** (§6). The update is a pulse-coincidence STDP event scaled by a per-module signal. There are no per-synapse nonlinear reads and no transposed access. In hardware, description costs are available at the moment of the transition, so the structural term needs no trace. A biological modulator would lag, and would need one.
+- **The communities are the states** (§2.4). In each frame, the module-to-module flow defines a Markov chain $T^K(\mathbf o)$ over communities. Its flow into the action communities is the policy, and its flow between latent communities across frames is a learned world model.
 
 ## 1. Motivation
 
 - **Communities as states.** An agent needs a compact state space, but a spiking network's microstate (which neurons fire) is far too large to serve as one. If the network is modular, the coarse-grained walk between modules is a small Markov chain that can be read out. When modules map onto actions and latent situations, the network carries its own abstract model of the task: which latent state it is in, and which action that state leads to.
-- **A central controller.** The stimulus enters one central controller community, which routes activity to latent and action communities. This is loosely analogous to the cerebral cortex, which integrates sensory input and selects among motor programmes. It also follows the broadcast architecture of Global Workspace Theory [Baars 2005]. The controller is what makes the extracted chain depend on the stimulus (§2.4).
+- **A central controller.** The stimulus enters one central controller community, which routes activity to latent and action communities. The controller is what makes the extracted chain depend on the stimulus (§2.4). This is a functional abstraction, loosely inspired by the cerebral cortex integrating sensory input. A single stimulus-receiving router has no exact anatomical counterpart; it is closer to thalamus or sensory cortex, and cortex itself is highly modular. The readout of action communities resembles channel selection in the basal ganglia [Redgrave et al. 1999]. Latent communities resemble task-state representations in orbitofrontal cortex [Wilson et al. 2014] and latent-structure learning [Gershman & Niv 2010]. The broadcast role echoes Global Workspace Theory [Baars 2005].
 - **Cortices are useful codes.** When modules map onto concepts, population activity becomes a readable spatial code. Each discrete action gets a module.
-- **Neural activity is a random walk.** Stochastic spiking networks sample from a distribution over activity patterns [Buesing et al. 2011]. The map equation [Rosvall & Bergstrom 2008] scores modularity by the description length of a random walk, so it applies naturally to spiking.
-- **Plasticity is expensive, and neuromodulators gate it.** Memory formation has a measurable metabolic cost. Starving *Drosophila* switch off protein-synthesis-dependent long-term memory, and forcing it shortens their survival [Plaçais & Preat 2013]. Distributing learning between cheap transient changes and costly consolidation saves energy manifold [Li & van Rossum 2020]. Three-factor rules, where a local eligibility flag becomes a weight change only when a neuromodulator arrives, have direct experimental support [Gerstner et al. 2018].
+- **Activity as a walk on the neuron graph.** Stochastic spiking networks sample from a distribution over activity patterns [Buesing et al. 2011]. We model a different, simpler object: a walker on the neuron graph whose stationary flow approximates normalised firing rates (§2.2). The map equation [Rosvall & Bergstrom 2008] scores modularity by the description length of such a walk.
+- **Plasticity is expensive, and neuromodulators gate it.** Memory formation has a measurable metabolic cost. Starving *Drosophila* switch off protein-synthesis-dependent long-term memory, and forcing it shortens their survival [Plaçais & Preat 2013]. Distributing learning between cheap transient changes and costly consolidation saves energy by up to an order of magnitude [Li & van Rossum 2020]. Three-factor rules, where a local eligibility flag becomes a weight change only when a neuromodulator arrives, have direct experimental support [Gerstner et al. 2018].
 - **Side hypothesis (thermodynamics).** The neuromodulator *carries a description-length signal*, so plasticity is spent where it reduces the information-theoretic cost of the network's activity. If that cost tracks metabolic cost, the same rule also makes the network thermodynamically efficient. The state abstraction does not depend on this hypothesis; it is tested separately against an energy proxy.
-- **Free energy.** Under the free-energy view [Friston 2010], the sampling distribution is the network's recognition density. The structural term organises that same distribution into modules instead of adding an unrelated goal.
+- **Free energy.** Under the free-energy view [Friston 2010], one can read the sampling distribution as the network's recognition density. The structural term organises that same distribution into modules instead of adding an unrelated goal.
 
 ## 2. Setup: activity as flow
 
@@ -74,7 +78,7 @@ How to read it:
 | $q_{\curvearrowright} = \sum_m q_m$ | total rate of switching modules | network |
 | $J_{ba} = \sum_{i \in b, j \in a} J_{ij}$, $T^K_{ba} = J_{ba} / p_a$ | flow and transition probability from module $a$ to module $b$ | module pair |
 
-The membrane equation of a sampling SNN [Buesing et al. 2011] is $u_i = b_i + \sum_j W_{ij} z_j(t)$, so activity flows from $j$ to $i$.
+The membrane potential is $u_i = b_i + \sum_j W_{ij} z_j(t)$, as in sampling SNNs [Buesing et al. 2011], so activity flows from $j$ to $i$.
 
 ### 2.1 The walker follows the spikes
 
@@ -98,12 +102,18 @@ where $\hat{z}(t) = z(t) / \sum_k z_k(t)$, taken as zero when nothing fires.
 
 Within a frame, (2) runs over that frame's simulation steps, with $\hat{\pi}$ reset to $v(\mathbf{o}_f)$ at the start of the frame or carried over from the previous frame (§2.3).
 
-**Assumption (mean field).** The normalised firing rates satisfy the same balance as (1). This holds approximately for linear rate responses, presynaptic normalisation, and a stimulus share $\alpha$ of the drive. Two things follow:
+**Assumption (mean field).** The normalised firing rates satisfy the same balance as (1). Two things follow:
 
 - $r = \pi$, and (2) tracks $\pi$ with $O(\beta)$ noise.
 - **Causal spike pairings $j \to i$ occur at a rate proportional to $J_{ij}$.**
 
-The second consequence is what lets spike coincidences stand in for walker steps in §4. Whether the assumption holds is something to measure.
+The second consequence is what lets spike coincidences stand in for walker steps in §4. The assumption needs three things that a spiking network does not provide by default:
+
+1. **Constant presynaptic output.** Spiking drive depends on $W_{ij}$, not on $W_{ij}/d_j$, so (1) describes the rates only if each $d_j$ is held fixed. That requires presynaptic normalisation. The task term does not preserve $d_j$ on its own.
+2. **Global divisive normalisation.** $\hat{z} = z / \sum_k z_k$ is a network-wide quantity. Biologically, it needs global inhibitory gain control, which the inhibitory pools of §7 can supply.
+3. **No chance coincidences.** In a spiking network, the causal-pairing rate is about $J_{ij}$ plus a chance term proportional to $\tau_{STDP} r_i r_j$, which does not depend on $W_{ij}$ and biases Theorem 3. In a preliminary linear-Poisson (Hawkes) test, 85% of causal pairings in a 20 ms window were chance pairings. **Fix:** let $\kappa_{ij}$ count causal minus acausal pairings, which is a balanced, antisymmetric STDP window. This cancels the symmetric chance term in expectation, but variance remains: the same test gave a correlation of $0.63$ between the balanced count and $J_{ij}$ over 60 s.
+
+Whether the assumption holds is measured at M1, by regressing pairing counts on $J_{ij}$ and on $r_i r_j$.
 
 ### 2.3 One walk per frame
 
@@ -121,9 +131,16 @@ There are three ways to run the $n$ hops:
 | --- | --- | --- |
 | Software reference | one sparse matrix–vector product | $n$ products |
 | Memristive crossbar | one analogue matrix–vector read | $n$ reads |
-| Spiking network | one synaptic delay | about $n$ ms, e.g. 20 ms per frame, which fits a 50 Hz environment |
+| Spiking network | not a discrete hop: the recurrent dynamics relax with time constant about $\tau/\alpha$ ($\tau$ the membrane or synaptic time constant) | about 100–250 ms per frame (4–10 Hz). A 50 Hz environment needs frame-skipping |
 
-The spiking version estimates $\pi_f$ through (2), with sampling noise and under the mean-field assumption. How closely it matches the reference is measured, not assumed.
+The spiking version estimates $\pi_f$ through (2), with sampling noise and under the mean-field assumption. Its transient decays roughly as $e^{-\alpha t / \tau}$, so reaching a 2% error takes about $4 \tau / \alpha$: 100–200 ms for $\tau = 5$–$10$ ms and $\alpha = 0.2$. At cortical rates, a 20 ms window also gives each neuron only 0.1–0.2 spikes, and it is about as long as the STDP window, so pairings would straddle frames. In a preliminary Hawkes test (200 neurons, 5 modules), the module-level L1 error of $\hat{\pi}$ in a 20 ms window was 0.24–0.50, against the software bound of 0.023. To reduce it:
+
+- warm-start each frame from the previous one instead of resetting;
+- read the policy at module level;
+- use larger populations or a larger $\alpha$;
+- state the window in units of $\tau / \alpha$.
+
+How closely the spiking estimate matches the reference is measured at M1, not assumed. The RL experiments run on the software reference first.
 
 **Timescales.** Three timescales must be ordered: walk hops, then frames, then plasticity. The walk converges within a frame ($n$ hops), and plasticity is slow relative to frames ($\lambda, \eta$ small), so the EM split (§8) holds per frame.
 
@@ -134,6 +151,12 @@ v_f = (1 - \rho) v(\mathbf{o}_f) + \rho \frac{P_{\mathcal{L}} \pi_{f-1}}{p_{\mat
 $$
 
 Here $P_{\mathcal{L}}$ keeps only the entries of latent neurons and $p_{\mathcal{L}}$ is their total flow. Setting $\rho = 0$ recovers independent frames. With $\pi_{f-1}$ held fixed, every gradient below is unchanged. The neglected dependence of $\pi_f$ on $W$ is small. The cosine between the fixed-flow gradient and the full gradient was $0.977$ at $\rho = 0$ and $0.984$ at $\rho = 0.5$ (Appendix A).
+
+**Limit: linear carry-over forgets.** Equation (1b) is a contraction, and linear PageRank has no attractors. The difference between two histories therefore shrinks geometrically. In a test network it shrank by a factor of 0.29–0.39 per frame ($\rho = 0.5$–$0.9$), down to $10^{-6}$–$10^{-8}$ after 10 frames. So (1b) alone cannot hold a cue across a delay. **Proposal:**
+
+- **Make the carried vector nonlinear at module level.** Apply a soft winner-take-all over latent modules, e.g. weights $p_\ell^{\gamma} / \sum_{\ell'} p_{\ell'}^{\gamma}$ with $\gamma > 1$, in the periphery. That keeps it crossbar-native. With $\pi_{f-1}$ held fixed, the gradients are unchanged.
+- **Give credit across the delay.** Set the eligibility time constant at or above the cue-to-reward delay. As an off-hardware baseline, use e-prop-style traces for recurrent latent synapses [Bellec et al. 2020].
+- **Don't seal the latent modules.** The map term also seals latent modules, which blocks the cue from being written in. Controller-to-latent routing needs the dual term of §4.5.
 
 ### 2.4 Communities as states: the extracted Markov model
 
@@ -153,11 +176,15 @@ $$
 P(a \mid \mathbf{o}_f) = \frac{p_a(f)}{\sum_{a' \in \mathcal{A}} p_{a'}(f)}, \qquad a \in \mathcal{A} \qquad \text{(1d)}
 $$
 
-The spiking analogue is the action column with the most spikes in the frame window.
+Its spiking analogue is a **race readout**. The action is the module whose population spikes first in the frame. For independent Poisson populations with rates proportional to $p_a$, the race picks $a$ with probability exactly $p_a / \sum_{a'} p_{a'}$, so the race and (1d) are the same policy. The column with the most spikes is a *different* policy: nearly greedy at high spike counts and nearly random at low ones.
+
+**Limits of this policy family.** $P(a \mid \mathbf{o})$ is a ratio of linear functions of $v$, so it is a mixture of each controller neuron's routing, and it has no temperature to sharpen it. Recurrence inside the controller blurs the stimulus. In a preliminary flow-level test, even ideal routing reached P(correct) = 0.92 with no controller recurrence, falling to 0.59 when 95% of the controller's outgoing weight stayed within the controller ($\alpha = 0.2$). So keep controller recurrence low, for example by giving the controller a larger $\alpha$, or by exempting the controller's own column from the map term (§4.5).
 
 **World model (with carry-over).** The flow is linear in the teleportation vector, $\pi_f = R v_f$ with $R = \alpha (I - (1 - \alpha) T)^{-1}$. So the latent mass carried out of module $a$ lands in latent module $b$ in proportion to the latent-$b$ share of $R u_a$, where $u_a$ is $\pi_{f-1}$ restricted to $a$ and normalised. This gives a latent-to-latent transition matrix $P(b \mid a, \mathbf{o}_f)$ across frames, an abstract model of how the task's hidden state evolves. **Proposal**: its definition and estimator are not yet checked in simulation.
 
 Read together, the communities are the states of an abstract decision process. The controller is the stimulus-dependent router, the latent modules carry state between frames, and the action modules are output states that emit actions.
+
+**Biological reading.** The closest biology is clustered E/I networks whose clusters switch metastably [Litwin-Kumar & Doiron 2012], and HMM-decoded state sequences in cortex [Mazzucato et al. 2015]. There, module-to-module transitions take hundreds of milliseconds. That is a *frame* timescale, not a hop timescale, so the biologically meaningful state chain is the across-frame latent chain, not $T^K$ within a frame. Also, one anatomical module per state scales poorly: biological state codes are largely distributed and mixed.
 
 ## 3. The map equation
 
@@ -208,11 +235,11 @@ $$
 It has three factors:
 
 - **Pre and post** (factors 1 and 2), through the coincidence $\kappa_{ij}$.
-- **The neuromodulator** (factor 3), $g_{ij} - \bar{g}_j$.
+- **The modulator** (factor 3), $g_{ij} - \bar{g}_j$.
 
-For hardware and biological realism, $g_{ij}$ depends only on the module pair $(m(i), m(j))$. It is a $K \times K$ table computed from module-level statistics and broadcast by each module's modulator. The baseline $\bar{g}_j$ is a per-neuron running mean of the modulator over $j$'s own transitions.
+For hardware, $g_{ij}$ depends only on the module pair $(m(i), m(j))$. It is a $K \times K$ table computed from module-level statistics and broadcast per module. The baseline $\bar{g}_j$ is a per-neuron running mean of the modulator over $j$'s own transitions.
 
-The task term $\eta (R - \bar{R}) e_{ij}$ is standard reward-modulated STDP. Subtracting the expected reward $\bar{R}$ is required for it to learn the task instead of drifting [Frémaux et al. 2010]. It is the only part that needs an eligibility trace, because rewards are delayed. Description costs are known at the moment of the transition.
+A spiking implementation should count $\kappa_{ij}$ as causal minus acausal pairings, which removes chance coincidences in expectation (§2.2). In hardware, description costs are available at the moment of the transition, so the structural term needs no trace. A biological modulator lags by 0.3–2 s [Yagishita et al. 2014], so a biological structural term would need an eligibility trace too.
 
 ### 4.2 What the rule descends
 
@@ -232,6 +259,7 @@ This is gradient descent on $D$ with each coordinate scaled by its own weight, w
 
 - **Without the baseline** $\bar{g}_j$, an extra term $-\lambda J_{ij} \bar{g}_j$ shrinks every synapse of neuron $j$ in proportion to its traffic. It acts as a cost-weighted weight decay, not descent.
 - **A per-module baseline** $\bar{g}_m$ is a cheaper approximation. Its bias is $-\lambda J_{ij} (\bar{g}_j - \bar{g}_{m(j)})$.
+- **The baseline as presynaptic renormalisation.** To first order in $\lambda$, the baselined rule equals the unbaselined rule followed by multiplicatively rescaling each neuron's outgoing weights so that $d_j$ is unchanged. The relative difference was $2.5 \lambda$ (Appendix A). This gives $\bar{g}_j$ a biological reading as a presynaptic resource constraint. That constraint is plausible but untested, since most documented scaling mechanisms are postsynaptic. It is also the normalisation that the mean-field assumption needs (§2.2). Row rescaling is not crossbar-native, so on hardware the baseline stays explicit.
 
 ### 4.3 Marginal cost, not pointwise cost
 
@@ -266,6 +294,66 @@ What the pieces mean:
 
 **Additive reference rule.** The earlier form $\Delta W_{ij} = \eta \mathrm{STDP}(i, j) - \eta' G(i, j)$ drops the positive factors from (7). It remains the exact-gradient baseline in simulation. It is not the hardware rule.
 
+### 4.5 Conflict: structure starves routing (Proposal: dual routing term)
+
+In this architecture, the policy is carried by **cross-module** flow: controller to action, and controller to latent. The map term pushes every module to keep its flow inside, so it works against that routing.
+
+- **What happens.** Applied multiplicatively, $G$ scales all of a neuron's cross-module synapses by the same factor. It never changes *which* action a controller neuron prefers. It only drives that neuron's exit fraction $\bar{e}_j$ toward 0.
+- **Why that breaks learning.**
+  - All controller-to-action flow is exit flow, so the action modules starve.
+  - $M^{\ast}_{\mathcal{C}}$ diverges.
+  - Pairings on controller-to-action synapses, which occur at a rate proportional to $J$, vanish, so the task term cannot learn either.
+  - The most stimulus-driven controller neurons seal first, so the policy also loses its dependence on the stimulus.
+- **Evidence.** In a preliminary flow-level simulation (24 neurons, structural term only, $\lambda = 0.5$), flow into the action modules fell from 0.21 to 0 within 500 iterations, and $M^{\ast}$ overflowed by 2000.
+
+**Proposal: dual routing term.** Minimise $L$ subject to a target routing flow $q^{\ast}$ out of the controller. Its Lagrangian is $D_\mu = L - \mu (J_{route} - q^{\ast})$, with $J_{route} = \sum_{b \in \mathcal{A} \cup \mathcal{L}} J_{b \mathcal{C}}$. The modulator becomes
+
+$$
+g_{ba} = M^{\ast}_a \mathbb{I}[b \ne a] - \mu \mathbb{I}[a = \mathcal{C}, b \in \mathcal{A} \cup \mathcal{L}], \qquad \mu \leftarrow \max \left( 0, \mu + \eta_\mu \left( q^{\ast} - J_{route} \right) \right) \qquad \text{(4a)}
+$$
+
+This is still a $K \times K$ table, so it stays crossbar-native, and (5) and Theorem 3 apply to $D_\mu$ unchanged. The gradient was checked against finite differences (Appendix A). Because routing is held at $q^{\ast} > 0$, $q_{\mathcal{C}}$ stays positive and $M^{\ast}_{\mathcal{C}}$ stays finite.
+
+The simplest variant **exempts** the routing pairs from the map term, setting $g = 0$ there.
+
+In a preliminary flow-level contextual bandit (4 seeds, 6000 frames, action-gated eligibility), the final P(correct) was:
+
+| Structural term | P(correct) | Collapsed runs |
+| --- | --- | --- |
+| none ($\lambda = 0$) | 0.657 | — |
+| map term alone, $\lambda = 0.5$ | 0.50 | 3 of 4 |
+| map term, routing pairs exempt | 0.693 | 0 |
+| map term with dual (4a) | 0.762 | 0 |
+
+So, once routing is protected, the structural term **helps**: it seals the action modules, and leakage out of the action modules costs P(correct). These are preliminary numbers that still need checking on real tasks. $q^{\ast}$ is a free parameter, and whether it should be learned from reward is open.
+
+**Schedule.** Keep $\lambda = 0$ or small until return exceeds random, then ramp it up.
+
+### 4.6 The task term
+
+**Why plain reward-modulated STDP is not enough.** The usual task term is $\eta (R - \bar{R}) e_{ij}$, where $e_{ij}$ is a low-pass trace of STDP, and subtracting $\bar{R}$ keeps it from drifting [Frémaux et al. 2010]. It has two problems here:
+
+- **No action credit.** If the action is sampled from the flow shares (1d), independently of the spikes that build $e_{ij}$, then $\mathbb{E}[(R - \bar{R}) e_{ij}] = 0$ and nothing is learned. In a preliminary two-action contextual bandit, plain reward-modulated STDP stayed at chance.
+- **Sparse reward.** With sparse or delayed reward (MountainCar, LunarLander), $R - \bar{R}$ is near zero on almost every frame. Spiking agents that solved control tasks, including cartpole and acrobot swing-up, used a TD error in an actor-critic instead [Frémaux et al. 2013].
+
+**Action-gated eligibility.** With $\pi_f$ held fixed, take the surrogate policy $\tilde{P}(a \mid \mathbf{o}) = J^{in}_a / \sum_{a' \in \mathcal{A}} J^{in}_{a'}$, where $J^{in}_b = \sum_{i \in b} \sum_j J_{ij}$ is the link flow into module $b$. Its score with respect to $J_{ij}$ depends only on the module of $i$:
+
+$$
+h_b = \frac{\mathbb{I}[b = a^{\ast}]}{J^{in}_{a^{\ast}}} - \frac{\mathbb{I}[b \in \mathcal{A}]}{\sum_{a' \in \mathcal{A}} J^{in}_{a'}}, \qquad e_{ij} \leftarrow \left( 1 - \frac{1}{\tau_e} \right) e_{ij} + \kappa_{ij} \left( h_{m(i)} - \bar{h}_j \right), \qquad \bar{h}_j = \sum_k T_{kj} h_{m(k)} \qquad \text{(4b)}
+$$
+
+Here $a^{\ast}$ is the chosen action. By the Lemma, the expected trace increment in a frame is $W_{ij} \partial \log \tilde{P}(a^{\ast} \mid \mathbf{o}) / \partial W_{ij}$. That is a weight-scaled policy-gradient score, with exactly the form of (4): a $K$-vector broadcast, a per-neuron baseline and a coincidence. The surrogate is close to the true policy. The cosine with $W \odot \nabla \log P$ computed through the resolvent was $0.997$ (Appendix A).
+
+**TD error as third factor.** The task update is $\Delta W_{ij} = \eta \delta_f e_{ij}$, with a global TD error from a module-level critic:
+
+$$
+\delta_f = r_f + \gamma V_{f+1} - V_f, \qquad V_f = \sum_b u_b p_b(f), \qquad u_b \leftarrow u_b + \eta_V \delta_f p_b(f) \qquad \text{(4c)}
+$$
+
+The critic weights $u$ are a $K$-vector in the periphery, and $\delta$ is a global scalar, so the task term stays crossbar-native. A dedicated value population is the alternative. For one-step tasks (bandits), $\delta = R - \bar{R}(\mathbf{o})$.
+
+**Biological cost.** The vector $h$ requires the identity of the chosen action to be broadcast to the action modules, like an efference copy. That is an extra assumption, plausible through basal-ganglia–thalamic loops but not established for this use.
+
 ## 5. Candidate description lengths as modulators
 
 Each candidate is written at the level of module pairs. When a transition goes from module $a = m(j)$ to module $b = m(i)$, the modulator reads $g_{ba}$ from a $K \times K$ table. The table is built from module-level statistics:
@@ -289,13 +377,19 @@ Where a quantity is naturally per synapse, such as entropy rate or entropy produ
 
 The first four have closed-form gradients, checked against finite differences (Appendix A).
 
+**What each modulator has to broadcast.** This matters for biology more than for hardware:
+
+- **Map equation.** It needs only $K$ scalars $M^{\ast}_a$, plus a same/different-module mask and the global $q_{\curvearrowright}$. So it is the most plausible candidate for a per-region neuromodulator.
+- **Markov stability at lag 1.** Only a constant and a mask.
+- **Cost-weighted map equation, $h_K$ and $\sigma_K$.** These need full $K \times K$ tables. That is fine for a crossbar's periphery, but it is an abstraction biologically: no known neuromodulator carries a table of pairwise costs.
+
 ### 5.1 Map equation (baseline)
 
 This is §4.4. The modulator fires only on module exits, with strength $M^{\ast}_a$.
 
 - **Pointwise cost.** Within module $b$, the codeword is $-\log \frac{\pi_i}{p_b + q_b}$. On an exit from $a$ to $b$, add $-\log \frac{q_a}{p_a + q_a} - \log \frac{q_b}{q_{\curvearrowright}}$.
 - **Expected cost.** It averages to $L(M)$ exactly at $\alpha = 0$ and to within $O(\alpha)$ otherwise, since teleportation shifts arrival rates slightly away from $\pi$. The Monte Carlo error was $0.1\%$ at $\alpha = 0.15$.
-- **Reading.** Crossing into a rarely visited module is the expensive event, matching the hypothesis that "unfamiliar cortices cost more".
+- **Reading.** Crossing into a rarely visited module is the expensive event *in bits*. It is metabolically expensive only if rare transitions use long or costly projections. Metabolic cost scales with spikes, synaptic events and wiring [Attwell & Laughlin 2001], regardless of how rare a transition is. §5.4 makes that link explicit.
 
 ### 5.2 Entropy rate
 
@@ -318,7 +412,7 @@ $$
 - **What it is.** The Schnakenberg entropy production of a Markov jump process [Schnakenberg 1976]. Its trajectory version, $\log (J_{ij} / J_{ji})$ per step, is the stochastic-thermodynamic entropy produced along the path [Seifert 2005].
 - **Gradient.** $\partial \sigma / \partial W_{ij} = \frac{\pi_j}{d_j} ( A_{ij} - \bar{A}_j )$ with $A_{ij} = \log \frac{J_{ij}}{J_{ji}} + 1 - \frac{J_{ji}}{J_{ij}}$.
 - **Modulator.** $A$ minus its constant 1, which differs from the pointwise cost by $-J_{ji}/J_{ij}$. Broadcasting only the pointwise entropy produced would be biased.
-- **Reading.** This is the candidate most literally "thermodynamic". Lynn et al. measured coarse-grained entropy production of human brain-state transitions and found that it rises with task demands [Lynn et al. 2021].
+- **Reading.** This is the candidate most literally "thermodynamic". Lynn et al. measured coarse-grained entropy production of human brain-state transitions and found that it rises with task demands [Lynn et al. 2021]. Their measure comes from fMRI and is not a metabolic measurement.
 - **Caveats.**
   - It needs reciprocal flow, $J_{ji} > 0$.
   - A perfectly modular but reversible network has $\sigma = 0$, so $\sigma$ alone exerts no modular pressure.
@@ -403,17 +497,19 @@ Target: $W$ stored as conductances in a crossbar, with rows = presynaptic neuron
 | Modulator $g_{ba}$ | peripheral logic over $K \times K$ module statistics; broadcast per module |
 | Baseline $\bar{g}_j$ | per-row peripheral register: $\bar{g}_j = \sum_b T_{bj} g_{b, m(j)}$, from the masked reads |
 | Applying (4) | scale row-pulse amplitude by $-\lambda (g_{ba} - \bar{g}_j)$, one phase per target-module column mask. The map equation needs only 2 phases per module: exit columns and home columns |
-| Task eligibility $e_{ij}$ | the only per-synapse state; one option is volatile, diffusive memristors whose decay emulates a trace [Wang et al. 2017] |
+| Task eligibility $e_{ij}$ | the only per-synapse state; one option is volatile, diffusive memristors whose decay emulates a trace [Wang et al. 2017]. The action gating $h_{m(i)} - \bar{h}_j$ of (4b) is applied like (4): a $K$-vector by column mask, plus a per-row baseline |
+| TD error $\delta$, critic $u$ | a global scalar and a $K$-vector in the periphery (4c) |
 
 No step requires a nonlinear function of an individual device's conductance, or access to the transposed element $W_{ji}$. This is why every modulator is defined at module level.
 
-**Locality in the biological reading.** Everything a synapse needs is local to one of three places:
+**Locality in the biological reading.** A synapse $j \to i$ sits on the dendrite of $i$, inside $i$'s module. So a modulator released in a module reaches the synapses whose *postsynaptic* neuron is in that module. The local information is therefore the postsynaptic module $b$. What the synapse lacks is the identity of the presynaptic module $a$.
 
-- the synapse (coincidence);
-- its presynaptic neuron (row sums, $\bar{g}_j$);
-- the neuromodulator of its presynaptic module.
+- **Partial help from dendrites.** Local and long-range inputs are partly segregated by dendritic compartment [Petreanu et al. 2009]. That could supply the bit $\mathbb{I}[a \ne b]$, but not $a$ itself.
+- **Consequence for the map equation.** The modulator $g_{ba} = M^{\ast}_a \mathbb{I}[b \ne a]$ is indexed by the presynaptic module. Biologically it needs either $M^{\ast}$ roughly uniform across modules, or a projection-specific signal.
+- **What neuromodulators can carry.** They are slow: dopamine gates spike-timing plasticity over a window of about 0.3–2 s [Yagishita et al. 2014]. They are spatially specific at most regionally, as in functional clustering in VTA [Engelhard et al. 2019] and localised striatal dopamine waves [Hamid et al. 2021]. A per-region scalar is plausible; a full $K \times K$ table is not. Astrocyte domains are an alternative local carrier: they integrate activity over seconds and gate NMDA-receptor-dependent LTP [Henneberger et al. 2010].
+- **The baseline.** $\bar{g}_j$ can be read as presynaptic renormalisation (§4.2).
 
-The only structural information is the *module* of the postsynaptic partner. In hardware that is a column mask. Biologically it remains the non-local ingredient that §7 replaces.
+In hardware, the presynaptic module is a row label and the postsynaptic module a column mask, so none of this is an obstacle. §7 removes the explicit labels.
 
 ## 7. Removing explicit modules: lateral inhibition
 
@@ -427,22 +523,36 @@ When $\chi$ is binary, (8) reduces to $G$. In the three-factor form, the map mod
 
 Compared with lateral inhibition alone, as in Kohonen maps, which produces whatever partition winner-take-all dynamics yield, Map-STDP adds a measurable objective and adaptive gain.
 
-**Open problems.** The proposed inhibitory update $\Delta I_{ij} = \eta_{inh} \pi_i \pi_j$ has three:
+**Problems with direct inhibition.** The proposed inhibitory update $\Delta I_{ij} = \eta_{inh} \pi_i \pi_j$ has three:
 
 - it is unbounded;
 - it makes co-active neurons into competitors, which opposes Hebbian STDP;
-- direct inhibitory partners ignore Dale's law.
+- direct inhibition between excitatory neurons violates Dale's law, and the main network has no inhibitory population at all.
+
+**Proposal: route inhibition through interneurons.** Give each module a pool of inhibitory, PV-like interneurons, with E→I→E connections, and let $\chi_{ij}$ be defined through disynaptic inhibition. Plasticity on I→E synapses follows a bounded, homeostatic inhibitory STDP rule that sets each excitatory neuron's rate to a target [Vogels et al. 2011]. The same pools provide the global divisive normalisation that the mean-field assumption needs (§2.2), and the rate homeostasis that keeps the network from running away or falling silent (§8).
 
 ## 8. Training
 
 Training runs frame by frame. For each environment frame $f$:
 
 1. **Observe.** Read $\mathbf{o}_f$ and form the teleportation vector $v_f$, concentrated on the controller. With carry-over, mix in the previous frame's latent flow (1b).
-2. **Walk.** Run the $n$ hops of (1a). In software or on a crossbar this gives $\pi_f$ directly. In the spiking network, the neurons run for the frame window and (2) estimates $\hat{\pi}_f$.
-3. **Act.** Read the action from the action modules, (1d), or from the column with the most spikes.
-4. **Module statistics.** Compute $p_a$, $J_{ba}$ and $q_a$ for the frame, update the modulator table $g_{ba}$ (per frame or as a running average, §3.4), and refresh the per-row baselines $\bar{g}_j$.
-5. **Plasticity.** Apply the structural term (4) to the frame's causal pairings. Apply the task term when reward arrives, through the eligibility traces.
+2. **Walk.** Run the $n$ hops of (1a). In software or on a crossbar this gives $\pi_f$ directly. In the spiking network, the neurons run for the frame window (about $4 \tau / \alpha$, warm-started) and (2) estimates $\hat{\pi}_f$.
+3. **Act.** Sample the action from (1d), or use the race readout in the spiking network (§2.4).
+4. **Module statistics.** Compute $p_a$, $J_{ba}$ and $q_a$ for the frame. Update the modulator table $g_{ba}$ (per frame or as a running average, §3.4) and, if used, the routing dual $\mu$ (4a). Refresh the per-row baselines $\bar{g}_j$ and $\bar{h}_j$.
+5. **Plasticity.**
+   - Apply the structural term (4) to the frame's pairings (causal minus acausal in spiking).
+   - Add the action-gated increments (4b) to the eligibility traces.
+   - Compute the TD error (4c) and apply $\eta \delta_f e_{ij}$.
+   - Update the critic.
 6. **Carry over.** Keep the latent flow $P_{\mathcal{L}} \pi_f$ for the next frame.
+
+**Stability measures.**
+
+- **Clip $M^{\ast}$.** Clipping alone does not stop the drive toward $\bar{e} = 0$, because $M^{\ast} \ge 0$. That needs (4a).
+- **Add an additive floor or rewiring** (below), because multiplicative updates freeze near-zero synapses, and finite conductance levels make them exactly zero.
+- **Add rate homeostasis or inhibitory plasticity** (§7).
+- **Log rates and the branching ratio** from M1 onward.
+- **Ramp $\lambda$** from about 0 until return exceeds random (§4.5).
 
 **EM split.** $\pi_f$ and the module statistics are treated as fixed within each update. Two conditions are needed: the walk converges within a frame (enough hops $n$), and plasticity is slow relative to frames ($\lambda, \eta$ small). In the spiking variant, the estimate (2) must also settle within the frame window ($\beta$ large enough).
 
@@ -451,21 +561,32 @@ Periodically:
 - **Re-detect latent modules (optional).** The controller and action modules stay pinned, because they carry the input and the policy. Latent modules may be re-detected with Infomap or Leiden, which is the forward step of the alternating minimisation in §3.4. Static modules only reinforce the initial partition. Any partition works with (4).
 - **Rewire.** Prune synapses below $\epsilon$ or outside each neuron's top $k$, and create synapses. The SBM modulator (§5.6) can gate these events.
 
-Initialisation is either a stochastic block model (head start, but biased toward its partition) or Erdős–Rényi (neutral, slow). The **controller** module receives the stimulus, concentrating $v(\mathbf{o})$, and routes to the latent and action modules. Its broadcast role is analogous to Global Workspace Theory [Baars 2005].
+Initialisation is either a stochastic block model (head start, but biased toward its partition) or Erdős–Rényi (neutral, slow). The **controller** module receives the stimulus, concentrating $v(\mathbf{o})$, and routes to the latent and action modules. Keep its internal recurrence low (§2.4).
+
+**Timescales in numbers.** These still need to be reported:
+
+- the plasticity rates $\lambda$ and $\eta$ against the frame rate;
+- per-frame against running-average $g_{ba}$ when the policy is non-stationary.
+
+In biology, a frame of 100–250 ms sits between the walk relaxation (tens of ms) and neuromodulated plasticity (seconds and longer), so the ordering holds.
 
 ## 9. Assumptions and limitations
 
 1. **EM split.** $\pi$ and the module statistics are held fixed during updates.
-2. **Mean field.** Flow equals normalised firing rate, and causal pairings occur at a rate proportional to $J_{ij}$ (§2.2). This is untested. Theorem 3 depends on it.
+2. **Mean field.** Flow equals normalised firing rate, and causal pairings occur at a rate proportional to $J_{ij}$ (§2.2). Theorem 3 depends on both. It needs constant $d_j$, global normalisation and balanced (causal minus acausal) pairing counting, and it is untested in spiking.
 3. **Covariance rule.** (4) is exact only in expectation. Its variance grows with the number of synapses sharing a modulator, which is why modulators are per module and baselines per neuron.
 4. **Coarse-graining.** Module-level $\sigma_K$ lower-bounds the full $\sigma$ and misses irreversibility inside modules. In a test network it captured only 4% of $\sigma$ (0.018 vs. 0.41). $h_K$ has no general ordering with $h$.
 5. **Estimator candidates.** Predictive dissipation and information flow (§5.7–5.8) rely on peripheral estimators with unknown bias.
 6. **Teleportation.** It is not counted as an exit, and it perturbs the map equation's codeword averages by $O(\alpha)$.
-7. **Divergence.** The map equation's $M^{\ast}_m$ diverges as $q_m \to 0$, for a fully sealed module. It needs clipping.
+7. **Divergence.** The map equation's $M^{\ast}_m$ diverges as $q_m \to 0$, for a fully sealed module. It needs clipping, and for the controller the routing dual (4a).
 8. **Lateral inhibition.** The inhibitory plasticity is unresolved (§7).
 9. **Convergence within a frame.** Equation (1a) bounds the error of $n$ hops, but the spiking estimate has extra sampling noise, and in a short frame window it may not settle.
 10. **Carry-over.** $\rho$ is a free parameter. With $\pi_{f-1}$ held fixed, the gradient ignores the dependence through earlier frames (cosine $0.98$ with the full gradient in a test).
 11. **Number of latent modules.** $\lvert \mathcal{L} \rvert$ is a hyperparameter unless latent modules are re-detected.
+12. **Routing conflict.** The map term starves the controller's routing unless the dual (4a) or an exemption is used (§4.5). $q^{\ast}$ is a free parameter.
+13. **Surrogate policy gradient.** The action-gated eligibility (4b) follows the gradient of the one-step inflow surrogate, not of (1d) exactly (cosine $0.997$ in a test). The TD critic (4c) is linear in module visit rates.
+14. **Policy family.** (1d) has no temperature, and controller recurrence blurs it (§2.4).
+15. **Carry-over memory.** Linear carry-over forgets geometrically. Holding a cue needs the module-level nonlinearity proposed in §2.3.
 
 ---
 
@@ -538,6 +659,15 @@ Because $q_m = \sum_{j \in m} \sum_{i \notin m} J_{ij}$, we get $g_{ij} = M^{\as
 - with carry-over (1b), the fixed-flow gradient still matches finite differences to $\le 10^{-9}$. Its cosine with the full gradient, recomputing $\pi_f$ through $W$, is $0.977$ at $\rho = 0$ and $0.984$ at $\rho = 0.5$;
 - the identity (1c) holds to machine precision. Across stimuli, the controller column of $T^K$ has total standard deviation $0.0196$, against $\le 0.0035$ for the other columns, and $0.0006$ when stimuli differ only in how much drive each module receives, spread uniformly within modules.
 
+**Numerical checks for the review revisions** (random 13-node network: a controller of 4, 1 latent and 2 action modules of 3; $\alpha = 0.2$):
+
+- action-gated eligibility (4b): the surrogate score gradient matches finite differences to $\le 3 \times 10^{-10}$. Its cosine with $W \odot \nabla \log P$, computed through the exact resolvent, is $0.997$–$0.998$ over 5 stimuli. On a 6-stimulus bandit, the Monte Carlo average of $\delta \cdot$ (4b) over $2 \times 10^4$ frames of 300 sampled pairings matches $W \odot \nabla \mathbb{E}[R]$ (surrogate) with correlation $0.997$;
+- baseline as renormalisation (§4.2): the relative difference between the baselined update and the unbaselined update followed by restoring $d_j$ is $2.5 \times 10^{-4}$, $2.5 \times 10^{-5}$ and $2.5 \times 10^{-6}$ at $\lambda = 10^{-2}, 10^{-3}, 10^{-4}$, i.e. first order;
+- dual routing term (4a): its gradient via (5) matches finite differences of $D_\mu$ to $\le 6 \times 10^{-10}$;
+- carry-over (1b): the L1 distance between two histories shrinks by $0.29$ per frame at $\rho = 0.5$ and $0.39$ at $\rho = 0.9$, to $3 \times 10^{-8}$ and $6 \times 10^{-7}$ after 10 frames.
+
+The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, §2.3, §2.4 and §4.5 come from a separate review simulation. They have not been re-run, and should be reproduced at M1 and M2.
+
 ## Appendix B: Corrections to the earlier derivation
 
 1. **Sign error.** The earlier version expanded $L(M)$ with $+$ on its second and third terms; both are negative. The gradient's log factor becomes $M^{\ast}_m = \log \frac{q_{\curvearrowright}(p_m+q_m)}{q_m^2} \ge 0$, not $\log \frac{q_{\curvearrowright}}{p_m+q_m} \le 0$.
@@ -547,25 +677,50 @@ Because $q_m = \sum_{j \in m} \sum_{i \notin m} J_{ij}$, we get $g_{ij} = M^{\as
 5. **Convergence.** The earlier version showed only a fixed point. This version proves contraction.
 6. **Lateral inhibition.** The earlier $\varphi_{ij}$ did not reduce to the indicator; it is replaced by $\chi_{ij}$, and the problems with the inhibitory update are flagged.
 7. **Three-factor restructure.** The structural term is a neuromodulated, cost-gated STDP rule, (4). Its modulator is the marginal description cost, and eight candidate description lengths plug in. The factor $M^{\ast}_m$, previously absorbed into the learning rate, is the map equation's per-module neuromodulator. $G$ is the lag-1 Markov-stability gradient. Every modulator is defined at module level for memristive crossbars.
-8. **Reformulation: communities as states (2026-10-04, new).** The primary goal is now a state-space abstraction, and thermodynamics is a secondary hypothesis. Modules are typed as controller, action and latent. Flow is computed once per environment frame by a truncated walk, (1a), with optional carry-over of latent flow, (1b). The module chain $T^K(\mathbf{o})$, (1c), is the extracted Markov model, and the policy, (1d), is read from the action modules. The rule descends the frame-averaged description length, (3a): the inverse of community detection. The rule (4) and Theorems 1–3 are unchanged; they apply per frame.
+8. **Reformulation: communities as states (2026-10-04).** The primary goal is now a state-space abstraction, and thermodynamics is a secondary hypothesis. Modules are typed as controller, action and latent. Flow is computed once per environment frame by a truncated walk, (1a), with optional carry-over of latent flow, (1b). The module chain $T^K(\mathbf{o})$, (1c), is the extracted Markov model, and the policy, (1d), is read from the action modules. The rule descends the frame-averaged description length, (3a): the inverse of community detection. The rule (4) and Theorems 1–3 are unchanged; they apply per frame.
+9. **Review revisions (2026-10-04, new).** These follow a neuroscience review and an SNN-performance review.
+   - **Task term.** It now uses an action-gated eligibility trace (4b) with a TD error from a module-level critic (4c), because plain $R - \bar{R}$ STDP gets no action credit under (1d).
+   - **Routing conflict.** The map term starves controller routing; a dual routing term (4a) is proposed (§4.5).
+   - **Spiking timing.** Spiking frames take about $4 \tau / \alpha$ (100–250 ms), not one synaptic delay per hop.
+   - **Mean field.** It needs constant $d_j$, global normalisation, and causal-minus-acausal pairing counting.
+   - **Locality.** It is restated: the postsynaptic module is the local one.
+   - **Baseline.** $\bar{g}_j$ can be read as presynaptic renormalisation.
+   - **Readout and policy.** A race readout matches (1d), and the limits of the policy family are stated.
+   - **Carry-over.** Linear carry-over forgets geometrically; a module-level nonlinearity is proposed.
+   - **Lateral inhibition.** It is routed through interneurons with inhibitory STDP, so it respects Dale's law.
+   - **Claims softened.** Controller ↔ cortex is now a functional abstraction (basal ganglia, OFC and hippocampal analogues), Buesing et al. is correctly characterised, and the metabolic reading of the map equation is qualified.
 
 ## References
 
+- Attwell, D., & Laughlin, S. B. (2001). An energy budget for signaling in the grey matter of the brain. *Journal of Cerebral Blood Flow & Metabolism*, 21(10), 1133–1145.
 - Baars, B. J. (2005). Global workspace theory of consciousness: toward a cognitive neuroscience of human experience. *Progress in Brain Research*, 150, 45–53.
+- Bellec, G., Scherr, F., Subramoney, A., Hajek, E., Salaj, D., Legenstein, R., & Maass, W. (2020). A solution to the learning dilemma for recurrent networks of spiking neurons. *Nature Communications*, 11, 3625.
 - Buesing, L., Bill, J., Nessler, B., & Maass, W. (2011). Neural dynamics as sampling: a model for stochastic computation in recurrent networks of spiking neurons. *PLoS Computational Biology*, 7(11), e1002211.
 - Dayan, P., & Abbott, L. F. (2001). Information theory. In *Theoretical Neuroscience: Computational and Mathematical Modeling of Neural Systems* (pp. 123–150). MIT Press.
 - Delvenne, J.-C., Yaliraki, S. N., & Barahona, M. (2010). Stability of graph communities across time scales. *PNAS*, 107(29), 12755–12760.
+- Engelhard, B., Finkelstein, J., Cox, J., et al. (2019). Specialized coding of sensory, motor and cognitive variables in VTA dopamine neurons. *Nature*, 570, 509–513.
 - Frémaux, N., Sprekeler, H., & Gerstner, W. (2010). Functional requirements for reward-modulated spike-timing-dependent plasticity. *Journal of Neuroscience*, 30(40), 13326–13337.
+- Frémaux, N., Sprekeler, H., & Gerstner, W. (2013). Reinforcement learning using a continuous time actor-critic framework with spiking neurons. *PLoS Computational Biology*, 9(4), e1003024.
 - Friston, K. (2010). The free-energy principle: a unified brain theory? *Nature Reviews Neuroscience*, 11(2), 127–138.
+- Gershman, S. J., & Niv, Y. (2010). Learning latent structure: carving nature at its joints. *Current Opinion in Neurobiology*, 20(2), 251–256.
 - Gerstner, W., Lehmann, M., Liakoni, V., Corneil, D., & Brea, J. (2018). Eligibility traces and plasticity on behavioral time scales: experimental support of neoHebbian three-factor learning rules. *Frontiers in Neural Circuits*, 12, 53.
+- Hamid, A. A., Frank, M. J., & Moore, C. I. (2021). Wave-like dopamine dynamics as a mechanism for spatiotemporal credit assignment. *Cell*, 184(10), 2733–2749.
+- Henneberger, C., Papouin, T., Oliet, S. H. R., & Rusakov, D. A. (2010). Long-term potentiation depends on release of D-serine from astrocytes. *Nature*, 463, 232–236.
 - Horowitz, J. M., & Esposito, M. (2014). Thermodynamics with continuous information flow. *Physical Review X*, 4, 031015.
 - Li, H. L., & van Rossum, M. C. W. (2020). Energy efficient synaptic plasticity. *eLife*, 9, e50804.
+- Litwin-Kumar, A., & Doiron, B. (2012). Slow dynamics and high variability in balanced cortical networks with clustered connections. *Nature Neuroscience*, 15(11), 1498–1505.
 - Lynn, C. W., Cornblath, E. J., Papadopoulos, L., Bertolero, M. A., & Bassett, D. S. (2021). Broken detailed balance and entropy production in the human brain. *PNAS*, 118(47), e2109889118.
+- Mazzucato, L., Fontanini, A., & La Camera, G. (2015). Dynamics of multistable states during ongoing and evoked cortical activity. *Journal of Neuroscience*, 35(21), 8214–8231.
 - Peixoto, T. P. (2014). Hierarchical block structures and high-resolution model selection in large networks. *Physical Review X*, 4, 011047.
+- Petreanu, L., Mao, T., Sternson, S. M., & Svoboda, K. (2009). The subcellular organization of neocortical excitatory connections. *Nature*, 457, 1142–1145.
 - Plaçais, P.-Y., & Preat, T. (2013). To favor survival under food shortage, the brain disables costly memory. *Science*, 339(6118), 440–442.
+- Redgrave, P., Prescott, T. J., & Gurney, K. (1999). The basal ganglia: a vertebrate solution to the selection problem? *Neuroscience*, 89(4), 1009–1023.
 - Rosvall, M., & Bergstrom, C. T. (2008). Maps of random walks on complex networks reveal community structure. *PNAS*, 105(4), 1118–1123.
 - Schnakenberg, J. (1976). Network theory of microscopic and macroscopic behavior of master equation systems. *Reviews of Modern Physics*, 48(4), 571–585.
 - Seifert, U. (2005). Entropy production along a stochastic trajectory and an integral fluctuation theorem. *Physical Review Letters*, 95, 040602.
 - Shouval, H. Z., Wang, S. S.-H., & Wittenberg, G. M. (2010). Spike timing dependent plasticity: a consequence of more fundamental learning rules. *Frontiers in Computational Neuroscience*, 4.
 - Still, S., Sivak, D. A., Bell, A. J., & Crooks, G. E. (2012). Thermodynamics of prediction. *Physical Review Letters*, 109, 120604.
+- Vogels, T. P., Sprekeler, H., Zenke, F., Clopath, C., & Gerstner, W. (2011). Inhibitory plasticity balances excitation and inhibition in sensory pathways and memory networks. *Science*, 334(6062), 1569–1573.
 - Wang, Z., Joshi, S., Savel'ev, S. E., et al. (2017). Memristors with diffusive dynamics as synaptic emulators for neuromorphic computing. *Nature Materials*, 16, 101–108.
+- Wilson, R. C., Takahashi, Y. K., Schoenbaum, G., & Niv, Y. (2014). Orbitofrontal cortex as a cognitive map of task space. *Neuron*, 81(2), 267–279.
+- Yagishita, S., Hayashi-Takagi, A., Ellis-Davies, G. C. R., Urakubo, H., Ishii, S., & Kasai, H. (2014). A critical time window for dopamine actions on the structural plasticity of dendritic spines. *Science*, 345(6204), 1616–1620.

@@ -4,6 +4,44 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## 2026-10-04
 
+### Changed (review revisions)
+
+Applied the findings of the neuroscientist and SNN-expert reviews of `docs/derivation.md`.
+
+- **Decision: new task term.** TD-modulated STDP with an action-gated eligibility trace (derivation Eq. 4b, 4c, §4.6) replaces $(R - \bar{R}) e_{ij}$. That term gets no action credit when the action is sampled from flow shares, and stalls under sparse reward. The new eligibility has the same crossbar form as the structural rule.
+- **Proposal: dual routing term** (Eq. 4a, §4.5). The map term alone starves controller→action and controller→latent routing, because that routing is cross-module. The dual term holds routing at a target $q^{\ast}$, and the simplest variant exempts the routing pairs. It stays a Proposal until simulated.
+- **Spiking timing.** Spiking frames take about $4\tau/\alpha$ (100–250 ms), not 20 ms. The RL ladder runs on a numpy flow-level reference first, and Brian2 is used for fidelity at M1 and M2.
+- **Mean field.** The doc now states its three requirements: constant $d_j$, global normalisation, and causal-minus-acausal pairing counts.
+- **Locality (§6).** Restated: the postsynaptic module is the local one. The doc also notes what neuromodulators can carry, and that the per-neuron baseline equals presynaptic renormalisation to first order.
+- **Readout and memory.**
+  - A race readout matches Eq. 1d, and the limits of the policy family are stated.
+  - Linear carry-over forgets geometrically; a module-level nonlinearity is proposed.
+- **Lateral inhibition (§7)** is routed through interneurons with inhibitory STDP, for Dale's law.
+- **Training (§8)** gains stability measures and a $\lambda$ ramp. **Assumptions (§9)** gain items 12–15.
+- **Claims softened:** controller ↔ cortex (now a functional abstraction with basal-ganglia, OFC and hippocampal analogues), the characterisation of Buesing et al., the metabolic reading of the map equation, Friston, and Lynn et al. (an fMRI measure).
+- **References.** 14 added, each checked by title, venue and year during the review.
+- **New numerical checks (Appendix A):**
+  - action-gated eligibility: cosine 0.997 with the true $\nabla \log P$, and the Monte Carlo correlation is 0.997;
+  - baseline as renormalisation: first order, relative difference $2.5\lambda$;
+  - dual-term gradient: exact;
+  - carry-over memory decays 0.29–0.39 per frame.
+
+  The preliminary spiking and bandit numbers come from the review's own simulations and still need reproducing.
+- **`docs/SPEC.md`:**
+  - architecture analogies softened;
+  - spiking timing corrected;
+  - task-term decision recorded;
+  - routing conflict and dual Proposal added;
+  - new open questions (controller in $D$, $q^{\ast}$, nonlinear carry-over, device multiplicativity, Dale's law, efference copy);
+  - new ablations;
+  - M1 and M2 re-scoped.
+- **`CLAUDE.md`:** task term and routing-conflict notes.
+
+### Added
+
+- **`.claude/agents/snn-expert.md`**: a subagent expert in SNNs, local and three-factor learning, Brian2 and closed-loop RL, focused on improving performance within the crossbar-native constraints. It can run and edit code.
+- **`.claude/agents/neuroscientist.md`**: a read-only subagent that reviews biological plausibility (locality, timescales, neuromodulator specificity, Dale's law, strength of analogies) with verified citations.
+
 ### Changed
 
 - **Reformulation: communities as states.** The primary goal is now a state-space abstraction for spiking networks in which communities are the states. Map-STDP is framed as the **inverse** of community detection: the partition is given, and the rule learns weights that make it the minimum-description-length partition of the walk. The thermodynamic surrogate hypothesis becomes a secondary side tie, and the energy proxy a secondary metric.
