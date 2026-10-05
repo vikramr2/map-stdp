@@ -17,6 +17,7 @@ Research question: can a spiking network's communities serve as its states, givi
 ## Conventions
 
 - $W_{ij}$ is the synapse from **presynaptic $j$ to postsynaptic $i$**. The random walk follows spikes forward: $T_{ij} = W_{ij}/d_j$, where $d_j$ is $j$'s total outgoing weight.
+- SuperNeuroMAT's `weight_mat()` is indexed `[pre, post]`, the transpose of $W$: `W_snm = W.T`. Its built-in STDP has no third factor, so it stays off; Map-STDP is applied per frame from `ispikes`.
 - The stimulus enters the flow through teleportation: $\pi = (1-\alpha)T\pi + \alpha v(\mathbf o)$.
 - Flow is per frame: $\pi_f$ solves that equation with $v(\mathbf o_f)$, approximated by $n$ hops of power iteration. Frames are indexed $f$; $t$ is the simulation step. Module types are $\mathcal C$ (controller), $\mathcal A$ (actions) and $\mathcal L$ (latent); controller and action modules are pinned.
 - Structural rule: $\Delta W_{ij} = -\lambda (g_{ij} - \bar{g}_j) \kappa_{ij}$, where the modulator $g_{ij} = \partial D / \partial J_{ij}$ is the **marginal** cost, never the pointwise cost, and $\bar{g}_j$ is a per-neuron baseline. Its expectation is $-\lambda W_{ij} \partial D / \partial W_{ij}$. For the map equation it averages to the gating $G(i,j) = \mathbb{I}[i \notin m(j)] - \bar{e}_j$. Controller→action/latent routing is cross-module, so the map term alone starves it (derivation §4.5); the dual routing term is a **Proposal**.
@@ -26,4 +27,4 @@ Research question: can a spiking network's communities serve as its states, givi
 
 ## Environment
 
-The planned simulator is **Brian2** (see SPEC §3). `environment.yml` is stale: it still lists the old PyTorch/snntorch/tonic stack. Update it when implementation starts.
+The planned spiking simulator is **SuperNeuroMAT** (ORNL; see SPEC §3), with a numpy flow-level reference run first. Brian2 is only a fallback. `docs/superneuro` is the SuperNeuro reference submodule (README and tutorials). `environment.yml` is stale: it still lists the old PyTorch/snntorch/tonic stack. Update it when implementation starts. Never install packages globally without asking; use a scratchpad `--target` or a venv for experiments.

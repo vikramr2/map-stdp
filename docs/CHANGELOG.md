@@ -4,6 +4,29 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## 2026-10-04
 
+### Changed (simulator)
+
+- **Decision reversal: SuperNeuroMAT replaces Brian2** as the spiking simulator (SPEC §3). Reasons:
+  - its discrete-time matrix update makes one step one hop, and one crossbar read;
+  - the per-frame closed loop is plain Python;
+  - the plasticity code can be shared with the numpy reference;
+  - it has CPU, JIT and GPU backends;
+  - it can export to the NeuroCoreX FPGA platform (inference only).
+
+  Brian2 stays as a fallback for continuous-time checks. SuperNeuroABM is an option for heterogeneous neurons.
+- **Smoke test** (SuperNeuroMAT 3.5.0, installed only in the scratchpad):
+  - `weight_mat()` is `[pre, post]` (the transpose of $W$);
+  - built-in `aneg` is a per-step decay on non-coincident synapses, not acausal STDP, so Map-STDP is applied per frame outside `simulate`;
+  - `add_spike` times are relative to the current step;
+  - cost per frame is about 1 ms at ~100 neurons, 40–50 ms at ~500 and ~230 ms at ~1000, dominated by weight get/set in Python at larger sizes.
+- **`docs/derivation.md` §2.3:** a discrete-time note. One step with delay 1 is one hop. A branching-process mode (infinite leak, stochastic input) is a Proposal for M1.
+- **`CLAUDE.md`:** simulator, submodule, transpose convention, and no global installs.
+- **`.claude/agents/snn-expert.md`:** tooling is no longer Brian2-specific.
+
+### Added (simulator)
+
+- **`.claude/agents/superneuro-expert.md`**: a subagent expert in coding SuperNeuroMAT and SuperNeuroABM. Its API facts were checked against the source, and it follows the project constraints.
+
 ### Changed (review revisions)
 
 Applied the findings of the neuroscientist and SNN-expert reviews of `docs/derivation.md`.

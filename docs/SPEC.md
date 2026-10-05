@@ -39,21 +39,48 @@ There are three community types (`derivation.md` §2):
 
 ## 3. C1: Simulator
 
-**Direction: Brian2.**
+**Direction (revised 2026-10-04): SuperNeuroMAT** ([ORNL SuperNeuro](https://github.com/ORNL/superneuro); reference submodule in `docs/superneuro`). This replaces Brian2.
 
 Why it fits:
 
-- The dynamics and plasticity are written as equations, so the model stays close to the math.
-- Map-STDP's per-neuron sums map onto Brian2's `(summed)` synaptic variables. Per-presynaptic sums (`..._pre = ... (summed)`) give $d_j$ and $e_j$, and per-postsynaptic sums give the E-step drive in `derivation.md` Eq. 2.
-- The community labels $m(\cdot)$ can be neuron variables, and synapses can read them via `m_pre` / `m_post`.
-- The implicit per-frame walk (§5) is $n$ sparse matrix–vector products, cheap to run in the same `network_operation` that steps the environment.
+- **It already works the way the model does.** The simulator is discrete-time and matrix-based. Each step computes `states += input + W_snm.T @ spikes`, then threshold, reset and refractory period. With delay 1, one step is one matrix–vector product: one hop of the walk, and one crossbar read.
+- **The per-frame closed loop is plain Python.** Each frame does `simulate(k)`, reads `ispikes`, computes the plasticity, writes the weights back with `set_weights_from_mat`, then steps the Gymnasium environment. Brian2 would have been restricted to runtime mode for this.
+- **The plasticity code is shared with the numpy flow-level reference.** That reference runs the RL ladder first (§5).
+- **Backends:** `cpu` (with scipy sparse), `jit` (numba) and `gpu` (numba-cuda).
+- **A hardware path.** Networks export to the NeuroCoreX FPGA platform (`to_json`). That platform does inference only, and it is digital, not memristive.
+
+Gaps and how they are handled:
+
+| Gap | Handling |
+| --- | --- |
+| Built-in STDP is global (`apos`/`aneg` vectors per lag) with no third factor. `aneg` is not acausal STDP: it depresses every non-coincident synapse on every step, which works as a decay (checked). | Turn built-in STDP off for Map-STDP. Each frame, compute causal-minus-acausal pairing counts from `ispikes`, plus the modulator table, the action-gated eligibility and the TD error, in numpy. The built-in STDP is kept only for the "STDP only" ablation. |
+| Neurons are deterministic LIF with a subtractive linear leak, and there are no synaptic time constants. | Inject noise as random input spikes, or as random thresholds set from the frame loop or a per-step `callback`. |
+| `weight_mat()` is indexed `[pre, post]`, the transpose of our $W_{ij}$ (checked). | `W_snm = W.T` everywhere, as recorded in CLAUDE.md. |
+| Delays above 1 are built from hidden chains of neurons, which inflate $N$. | Use delay 1. |
+| No E/I populations or Dale's law. | Use signed weights with sign masks that the plasticity code enforces. SuperNeuroABM (LIF and Izhikevich neurons, exponential synapses, GPU through SAGESim) is an option for heterogeneous neuron models later. |
+| `add_spike` times are relative to the current step, because queued inputs shift after each `simulate` (checked). | Queue each frame's inputs at times 0 to $k-1$. |
+
+**Proposal: branching-process mode.** With `leak=inf`, a neuron's state resets every step, so spiking at $t+1$ depends only on input at $t$. With stochastic input, the network is then a branching process in which one step is one hop, the closest discrete analogue of the per-frame walk (`derivation.md` §2.3). Test it at M1 against the finite-leak mode.
+
+**Measured cost** (SuperNeuroMAT 3.5.0, smoke test, 20 steps per frame, 20% connectivity, custom plasticity applied every frame):
+
+| Neurons | Per frame, total | Per frame, inside `simulate` |
+| --- | --- | --- |
+| ~100 | ~1 ms (`jit` compiles once, ~0.1 s) | ~0.5 ms |
+| ~500 | 40–50 ms | 12–16 ms |
+| ~1000 | ~230 ms (`cpu`) | ~45 ms |
+
+Above a few hundred neurons, most of the time is spent outside `simulate`, reading and writing the weights and queuing input spikes in Python. Optimising that, for example with sparse weight updates or by writing the internal arrays directly, is an implementation task for M1.
 
 Risks:
 
-- **Closed-loop RL** needs `network_operation` (or an equivalent Python callback) to step the gym environment and set input rates. That works only in runtime mode, not `cpp_standalone`, so it will be slow for large networks.
-- **Scale.** If runtime mode is too slow, options are Brian2CUDA or Brian2GeNN (standalone, which complicates the closed loop), or a PyTorch SNN library with batching, at the cost of equation-level fidelity.
+- Plasticity runs in Python, outside the backend kernels.
+- The neuron model is limited.
+- The simulator is less established in the literature than Brian2.
 
-**Proposal.** Run the RL ladder first on a **numpy flow-level reference**: implicit walk, expected or sampled pairings, and the same modulators. Use Brian2 for spiking fidelity at M1 and M2, then for the ladder once the rules work. The wall-clock cost of closed-loop Brian2 is an untested estimate: a few hundred to 1000 neurons in runtime mode at roughly 1–10× slower than real time. At 500–3500 episodes × ~100 frames × 100–250 ms, that is hours to days per seed. Brian2 is not yet installed, and timing it is part of M1.
+**Fallbacks.** Brian2 for continuous-time or conductance-based fidelity checks, if a reviewer asks for them. A PyTorch SNN library with batching if scale demands it.
+
+**Proposal.** Run the RL ladder first on the numpy flow-level reference: implicit walk, expected or sampled pairings, and the same modulators. Use SuperNeuroMAT for spiking fidelity at M1 and M2, then for the ladder once the rules work. At 500–3500 episodes × ~100 frames, a few-hundred-neuron network costs minutes to hours per seed.
 
 ## 4. C2: Applications
 
@@ -242,8 +269,8 @@ Constraints this places on every rule (see `derivation.md` §6):
 | ID | Milestone | Done when |
 | --- | --- | --- |
 | M0 | Docs: corrected derivation, spec, changelog; reformulated around communities as states | Done (2026-09-27, reformulated 2026-10-04) |
-| M1 | Numpy flow-level reference, plus Brian2 rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking error against window length (in units of $\tau/\alpha$) reported; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; pairing counts regressed on $J_{ij}$ and $r_i r_j$; no silent or runaway runs |
-| M2 | CartPole, closed loop (numpy reference first, then Brian2) | Beats random policy; dual term vs. exemption vs. none compared; modules persist; policy from $T^K$ agrees with the spiking race readout |
+| M1 | Numpy flow-level reference, plus SuperNeuroMAT rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking error against window length (in units of $\tau/\alpha$) reported; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; pairing counts regressed on $J_{ij}$ and $r_i r_j$; no silent or runaway runs |
+| M2 | CartPole, closed loop (numpy reference first, then SuperNeuroMAT) | Beats random policy; dual term vs. exemption vs. none compared; modules persist; policy from $T^K$ agrees with the spiking race readout |
 | M3 | Acrobot, MountainCar, LunarLander | Runs end to end; returns reported for all ablations; wall-clock informs the simulator decision |
 | M4 | Partially observable task with latent communities and carry-over | Carry-over beats $\rho = 0$; latent chain predicts the next latent state |
 | M5 | Modulator comparison (§6): all candidates | Candidates scored on the five criteria |

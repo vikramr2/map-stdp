@@ -142,6 +142,11 @@ The spiking version estimates $\pi_f$ through (2), with sampling noise and under
 
 How closely the spiking estimate matches the reference is measured at M1, not assumed. The RL experiments run on the software reference first.
 
+**Discrete-time spiking (the planned simulator, SuperNeuroMAT).** With delay 1, one time step is one synaptic transmission, $u \leftarrow u + W z$, which is one matrix–vector product and so one hop. Whether a step behaves like a *walk* hop depends on the leak:
+
+- **Finite leak.** Neurons integrate over several steps, and the network relaxes over roughly $1/\alpha$ steps or more, as in continuous time.
+- **Infinite leak with stochastic input** (**Proposal**). The state resets every step, so the network is a branching process in which one step is one hop. Whether its normalised spike counts track $\pi_f$ within $n$ steps is tested at M1.
+
 **Timescales.** Three timescales must be ordered: walk hops, then frames, then plasticity. The walk converges within a frame ($n$ hops), and plasticity is slow relative to frames ($\lambda, \eta$ small), so the EM split (§8) holds per frame.
 
 **Proposal: carry-over.** If frames are independent, the network is a function of the current stimulus only. That is enough when the observation is the full state, but not otherwise. To let latent communities carry state, mix the previous frame's latent flow into the teleportation vector:

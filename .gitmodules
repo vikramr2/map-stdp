@@ -1,0 +1,3 @@
+[submodule "docs/superneuro"]
+	path = docs/superneuro
+	url = https://github.com/ORNL/superneuro.git
