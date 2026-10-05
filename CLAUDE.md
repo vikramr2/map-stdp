@@ -28,3 +28,8 @@ Research question: can a spiking network's communities serve as its states, givi
 ## Environment
 
 The planned spiking simulator is **SuperNeuroMAT** (ORNL; see SPEC §3), with a numpy flow-level reference run first. Brian2 is only a fallback. `docs/superneuro` is the SuperNeuro reference submodule (README and tutorials). `environment.yml` is stale: it still lists the old PyTorch/snntorch/tonic stack. Update it when implementation starts. Never install packages globally without asking; use a scratchpad `--target` or a venv for experiments.
+
+**Tooling.** The `map-stdp` conda env (`~/.conda/envs/map-stdp`, Python 3.11 and Node.js) holds the project's tools.
+
+- **ponytail** (project-scope plugin, `.claude/settings.json`): a least-code skill. Its hooks run `node`, so run `conda activate map-stdp` before launching `claude`.
+- **CodeGraph** (project-scope MCP server, `.mcp.json`; telemetry off): a code-intelligence index. The index lives in `.codegraph/`, which is gitignored by its own `.gitignore`. Run `codegraph sync` after large changes.

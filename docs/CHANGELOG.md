@@ -2,6 +2,17 @@
 
 This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. The project is research, so entries are dated rather than versioned. Record decisions and reversals here as well as file changes.
 
+## 2026-10-05
+
+### Added
+
+- **`map-stdp` conda env** (`~/.conda/envs/map-stdp`): Python 3.11 and Node.js 26, so the tooling has Node without a system-wide install.
+- **ponytail plugin** (v4.11.0, [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)), installed at project scope through `.claude/settings.json`. It is a least-code skill. Its hooks were reviewed before install: they inject instructions and write small mode files under `~/.claude` and `~/.config/ponytail`, with no network calls and no subprocesses. It needs `node` on PATH, so activate the env before launching `claude`.
+- **CodeGraph MCP server** (v1.6.2, [colbymchenry/codegraph](https://github.com/colbymchenry/codegraph)), installed in the env and registered at project scope in `.mcp.json`.
+  - Telemetry is off, both by `codegraph telemetry off` and by `CODEGRAPH_TELEMETRY=0`.
+  - The local index is in `.codegraph/`, which ignores itself.
+  - The repo has no code yet, so the index is empty until implementation starts.
+
 ## 2026-10-04
 
 ### Changed (simulator)
