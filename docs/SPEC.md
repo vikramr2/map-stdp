@@ -6,27 +6,36 @@ Each consideration below states the user's direction first. Items marked **Propo
 
 ## 1. Goal and hypothesis
 
-Find a learning framework in which **information-dynamic entropy is a surrogate for the thermodynamic entropy (metabolic cost) of neurons**.
+Give a spiking network a **state-space abstraction in which its communities are the states**, and use it to solve RL tasks.
 
-**Hypothesis.** A neuron pays more thermodynamic cost to communicate with neurons in cortices it does not normally talk to, and less within its usual partners. A description length of neural activity flow, such as the map equation, captures this: rare, cross-module transitions get long codewords and frequent, within-module transitions get short ones. A plasticity rule that descends this description length alongside a task-learning rule should therefore:
+**Approach.** A random walk on a graph with communities has a minimum description length: the map equation, or an alternative (§6). Community detection finds the partition that minimises that length for a given graph. **Map-STDP inverts this.** The partition is given, and a three-factor STDP rule shapes the weights until the given partition is the minimum-description-length one (`derivation.md` §3.4). The coarse-grained walk between communities is then a Markov model over the network's states, conditioned on the stimulus. It can be extracted, and it chooses the action (`derivation.md` §2.4).
 
-1. form modular cortices, one per concept;
-2. keep task performance; and
-3. reduce a biophysical energy proxy.
+**Hypotheses.**
 
-Map-STDP ([`derivation.md`](derivation.md), Eq. 4) is the current rule: cost-modulated STDP whose neuromodulator reports a description length. Which description length is right is itself a question (§6).
+1. **Modules form.** The communities emerge and match the intended controller, latent and action roles (NMI).
+2. **The state model works.** The extracted chain $T^K(\mathbf o)$ gives a policy that solves basic RL tasks. With carry-over, the latent communities give a predictive model of hidden state.
+3. **Side tie: thermodynamics.** A neuron pays more metabolic cost to communicate with cortices it does not normally talk to. If description length tracks that cost, the information dynamics the rule minimises are a model of thermodynamics in the brain, and the rule lowers a biophysical energy proxy. This is secondary: the state abstraction does not depend on it.
+
+Map-STDP ([`derivation.md`](derivation.md), Eq. 4) is the rule: reward-modulated STDP for the task, plus cost-modulated STDP whose neuromodulator reports the marginal description length. Which description length is best is an open question (§6).
 
 ## 2. Architecture
 
-```
-stimulus o ──► receptive field ──► workspace community ──► output columns (one per action / class)
-                                        ▲        │                 │
-                                        └────────┴── recurrent ◄───┘
+```text
+stimulus o_f ──► controller C ─────────────► action communities A ──► action
+                   ▲      │                        ▲
+                   │      ▼                        │
+                   └── latent communities L ───────┘
+                              │      ▲
+                              └──────┘  carry-over ρ: frame f → f+1
 ```
 
-- **Output cortical columns.** Each discrete action or image class is a community (column). The readout is the column with the most spikes in the decision window.
-- **Workspace.** A central community receives the stimulus and broadcasts to the columns, following Global Neuronal Workspace Theory (see `derivation.md` §8).
-- **Conventions.** $W_{ij}$ is the synapse from pre $j$ to post $i$. The flow $\pi$ follows spikes forward.
+There are three community types (`derivation.md` §2):
+
+- **Controller $\mathcal C$.** One central community that receives the stimulus: $v(\mathbf o)$ is concentrated here. It routes flow to latent and action communities. It is the analogue of the cerebral cortex integrating input and selecting among motor programmes, and of the workspace in Global Workspace Theory. Because the stimulus enters here, the extracted chain is stimulus-conditioned (`derivation.md` §2.4).
+- **Action communities $\mathcal A$.** One per discrete action. The policy is the flow share of each action community, or equivalently the column with the most spikes in the frame window (`derivation.md` Eq. 1d).
+- **Latent communities $\mathcal L$.** Abstract states that are not tied to an action. With carry-over they persist across frames and form a learned world model.
+
+**Conventions.** $W_{ij}$ is the synapse from pre $j$ to post $i$. The flow $\pi_f$ follows spikes forward and is computed once per frame $f$.
 
 ## 3. C1: Simulator
 
@@ -37,48 +46,64 @@ Why it fits:
 - The dynamics and plasticity are written as equations, so the model stays close to the math.
 - Map-STDP's per-neuron sums map onto Brian2's `(summed)` synaptic variables. Per-presynaptic sums (`..._pre = ... (summed)`) give $d_j$ and $e_j$, and per-postsynaptic sums give the E-step drive in `derivation.md` Eq. 2.
 - The community labels $m(\cdot)$ can be neuron variables, and synapses can read them via `m_pre` / `m_post`.
+- The implicit per-frame walk (§5) is $n$ sparse matrix–vector products, cheap to run in the same `network_operation` that steps the environment.
 
 Risks:
 
 - **Closed-loop RL** needs `network_operation` (or an equivalent Python callback) to step the gym environment and set input rates. That works only in runtime mode, not `cpp_standalone`, so it will be slow for large networks.
-- **Scale.** Large open-loop vision runs may need Brian2CUDA or Brian2GeNN (standalone). If those are still too slow, a PyTorch SNN library with batching is the fallback, at the cost of equation-level fidelity.
+- **Scale.** If runtime mode is too slow, options are Brian2CUDA or Brian2GeNN (standalone, which complicates the closed loop), or a PyTorch SNN library with batching, at the cost of equation-level fidelity.
 
-**Proposal.** Use Brian2 for M1–M4 (§10). Revisit when M4 wall-clock times are known.
+**Proposal.** Use Brian2 for M1–M4 (§11). Revisit when M3 wall-clock times are known.
 
 ## 4. C2: Applications
 
-**Direction:** a preliminary with a basic discrete-action RL gym environment and image classification, then more complex architectures. Each action or class is a cortical column.
+**Direction:** basic discrete-action RL environments first, several of them. Each action is a community.
 
-**Task ladder:**
+**Task ladder (Proposal):**
 
-| Track  | Step 1             | Step 2                                  | Stretch     |
+| Step | Environment | Actions | What it tests |
 | --- | --- | --- | --- |
-| RL     | CartPole (2 cols)  | LunarLander (4 cols)                    | CarRacing (5 discrete) |
-| Vision | MNIST / N-MNIST (10 cols) | Imagenette (10-class ImageNet subset) | ImageNet-1k (1000 cols) |
+| 1 | CartPole | 2 | closed loop, controller routing |
+| 2 | Acrobot, MountainCar | 3 each | more actions; MountainCar's sparse reward |
+| 3 | LunarLander | 4 | richer observation |
+| 4 | a partially observable task, e.g. a T-maze or MiniGrid memory task | 3–4 | latent communities with carry-over must hold hidden state |
 
-- **Vision input.** For Imagenette and beyond, raw pixels are too large for a local-rule SNN. The proposal is a **frozen pretrained feature encoder** (e.g. ResNet-18 penultimate features) with Poisson rate coding. The caveat is that the SNN then learns on top of features it did not learn itself. That should be stated in any result and ablated against raw-pixel encoding at the MNIST step.
-- **Proposal: classification as a contextual bandit.** Each image is a one-step episode, with reward $+1$ when the correct column wins and $0$ or $-1$ otherwise. A single reward-modulated rule (§6) then serves RL and vision alike. A teacher current into the correct column is an ablation, not the default.
+- **Observation encoding.** Continuous observations become $v(\mathbf o)$ over controller neurons, e.g. with Gaussian receptive fields per observation dimension. **Open**: the encoding and the controller size.
+- **Deferred: vision.** Image classification as a contextual bandit (one-step episodes, one community per class), MNIST and Imagenette with a frozen feature encoder. This is out of scope until the RL ladder works.
 
-## 5. C3: Stimulus in the equation
+## 5. C3 + C7: Stimulus, frames and timescale
 
-**Direction:** include the stimulus in the equations, possibly by making it part of the environment.
+**Direction:** the stimulus is in the equations, each environment frame is one random walk, and the walk must be implicit or very fast so that timescales do not become a problem.
 
-**Proposal (adopted in `derivation.md`): stimulus as teleportation.** $\pi = (1-\alpha)T\pi + \alpha v(\mathbf o)$, where $v(\mathbf o)$ is the normalized external drive. This:
+**Adopted: stimulus as teleportation.** $\pi_f = (1-\alpha)T\pi_f + \alpha v_f$ with $v_f = v(\mathbf o_f)$. This:
 
 - makes the flow well defined, since the chain is irreducible and the fixed point is unique;
-- makes $\pi$, and hence the gating, stimulus-conditioned; and
+- makes $\pi_f$, and hence the modulators and the extracted chain, stimulus-conditioned; and
 - gives $\alpha$ a measurable meaning: the external share of total drive.
 
-**Proposal (extension): environment as nodes.** Add sensor and actuator nodes, so that flow runs from action columns through the environment and back into the receptive field. The environment becomes a community in the map equation, and the codelength then accounts for agent–environment coupling. Try this after teleportation works.
+**Proposal: implicit walk per frame.** $\pi_f = \alpha (I - (1-\alpha)T)^{-1} v_f$ is approximated by $n$ hops of power iteration, with error $\le 2(1-\alpha)^n$ independent of network size (`derivation.md` Eq. 1a). Modular networks approach this bound, so budget for it: $\alpha = 0.2$ and $n = 20$ give $\le 2.3\%$. The three realisations are:
+
+- software reference: $n$ sparse matrix–vector products;
+- crossbar: $n$ analogue reads;
+- spiking: about one synaptic delay per hop, so about 20 ms per frame.
+
+The software reference is the default. The spiking estimate is the biological and hardware variant, and its agreement with the reference is a milestone (M1).
+
+**Proposal: carry-over.** Latent state persists across frames by mixing the previous frame's latent flow into the teleportation vector with weight $\rho$ (`derivation.md` Eq. 1b). With $\rho = 0$, frames are independent, which suffices for fully observed tasks.
+
+**Timescale ordering:** walk hops, then frames, then plasticity.
+
+**Proposal (extension): environment as nodes.** Add sensor and actuator nodes, so that flow runs from action communities through the environment and back into the controller. The environment becomes a community in the map equation, and the codelength then accounts for agent–environment coupling. Try this after teleportation works.
 
 **Open:**
 
-- Whether teleportation steps should count as module exits (Infomap's "recorded teleportation" choice). The derivation currently does not count them.
-- Whether $\alpha$ should be fixed, or estimated from the input and recurrent currents.
+- $n$, $\alpha$ and $\rho$, and whether $\alpha$ should be estimated from input and recurrent currents.
+- Whether teleportation and carry-over steps should count as module exits (Infomap's "recorded teleportation" choice). The derivation currently does not count them.
+- Whether the spiking estimate settles within a frame window short enough for the environment.
 
 ## 6. C4 + C5: Description length as a neuromodulator
 
-**Direction:** there may be a better information-theoretic surrogate for thermodynamic cost than the map equation, and the structural term should be a 3-factor rule, since neuromodulators gate costly plasticity. Each candidate description length gets its own neuromodulator.
+**Direction:** there may be a better description length than the map equation, and the structural term should be a three-factor rule, since neuromodulators gate costly plasticity. Each candidate description length gets its own neuromodulator.
 
 **Decision (2026-09-27): cost-modulated STDP is the implemented form.** See `derivation.md` §4. The rule is
 
@@ -92,7 +117,7 @@ where:
 - $g_{ij} = \partial D / \partial J_{ij}$ is the **marginal** description cost of the transition, a $K \times K$ module-pair table broadcast per module;
 - $\bar{g}_j$ is a per-neuron baseline.
 
-On average this is weight-scaled gradient descent on $D$ (`derivation.md` Theorem 3). The factorized exact gradient is kept only as the analysis reference and as simulation baseline A: the additive rule $\eta \mathrm{STDP} - \eta' G$. This supersedes the earlier variants A/B/C.
+On average this is weight-scaled gradient descent on $D$ (`derivation.md` Theorem 3). In an environment, $D$ is the frame-averaged description length, and the theorem holds frame by frame (`derivation.md` §3.4). The factorized exact gradient is kept only as the analysis reference and as simulation baseline A: the additive rule $\eta \mathrm{STDP} - \eta' G$.
 
 Why this form:
 
@@ -102,23 +127,25 @@ Why this form:
 
 **Candidates** (`derivation.md` §5 has the modulator, pointwise cost and caveats for each):
 
-| Candidate | Modulator $g_{ba}$ for a step from module $a$ to module $b$ | Thermodynamic reading | Status |
-| --- | --- | --- | --- |
-| Map equation | $M^{\ast}_a \mathbb{I}[b \ne a]$: fires only on exits | per-transition surprise of crossing modules | baseline; closed form |
-| Entropy rate $h_K$ | $-\log T_{ba}$ | minimum information per step | closed form; favours determinism, not modularity |
-| Entropy production $\sigma_K$ | $\log (J_{ba}/J_{ab}) - J_{ab}/J_{ba}$ | is entropy production (coarse-grained lower bound) | closed form; no modular pressure alone |
-| Cost-weighted map equation | map modulator $+ \lambda_E c_{ba}$ | explicit energy; $\lambda_E$ = metabolic state | closed form |
-| Markov stability | $-\mathbb{I}[b = a]$ at lag 1 | none | closed form; lag 1 gives exactly $G$ |
-| SBM description length | $\log \frac{1 - \omega_{ba}}{\omega_{ba}}$ at rewiring | none | gates structural plasticity |
-| Predictive dissipation | per-module pointwise $I_{mem} - I_{pred}$ | lower bound on dissipated work | estimator only |
-| Cross-module information flow | pointwise transfer entropy between modules | enters each module's entropy balance | estimator only |
+| Candidate | Modulator $g_{ba}$ for a step from module $a$ to module $b$ | As a state abstraction | Thermodynamic reading | Status |
+| --- | --- | --- | --- | --- |
+| Map equation | $M^{\ast}_a \mathbb{I}[b \ne a]$: fires only on exits | sticky, well-separated states | per-transition surprise of crossing modules | baseline; closed form |
+| Entropy rate $h_K$ | $-\log T_{ba}$ | deterministic transitions, not sticky states | minimum information per step | closed form; favours determinism, not modularity |
+| Entropy production $\sigma_K$ | $\log (J_{ba}/J_{ab}) - J_{ab}/J_{ba}$ | directed state sequences | is entropy production (coarse-grained lower bound) | closed form; no modular pressure alone |
+| Cost-weighted map equation | map modulator $+ \lambda_E c_{ba}$ | as map equation, avoiding costly transitions | explicit energy; $\lambda_E$ = metabolic state | closed form |
+| Markov stability | $-\mathbb{I}[b = a]$ at lag 1 | states persisting for $\tau$ steps | none | closed form; lag 1 gives exactly $G$ |
+| SBM description length | $\log \frac{1 - \omega_{ba}}{\omega_{ba}}$ at rewiring | block wiring under the states | none | gates structural plasticity |
+| Predictive dissipation | per-module pointwise $I_{mem} - I_{pred}$ | states keep only what predicts | lower bound on dissipated work | estimator only |
+| Cross-module information flow | pointwise transfer entropy between modules | states exchange little information | enters each module's entropy balance | estimator only |
+| **Proposal:** latent-chain entropy rate $h_{\mathcal L}$ | not yet derived | predictable latent dynamics (world model) | none | needs carry-over; `derivation.md` §5.9 |
 
 **How to decide.** Score each candidate on:
 
-1. task performance;
-2. whether modules emerge and match the columns (NMI);
-3. correlation with a simulated **energy proxy** (per-spike cost, plus a per-synaptic-event cost that scales with weight, plus a wiring-distance term);
-4. learning variance and speed of the 3-factor estimate relative to its exact-gradient baseline.
+1. task performance (episodic return);
+2. whether modules emerge and match the controller, latent and action roles (NMI);
+3. quality of the extracted state model: agreement between the policy from $T^K(\mathbf o)$ and the spiking readout, and, with carry-over, how well the latent chain predicts the next latent state;
+4. learning variance and speed of the three-factor estimate relative to its exact-gradient baseline;
+5. secondary: correlation with a simulated **energy proxy** (per-spike cost, plus a per-synaptic-event cost that scales with weight, plus a wiring-distance term).
 
 **Open:**
 
@@ -135,7 +162,7 @@ Constraints this places on every rule (see `derivation.md` §6):
 
 - **Updates** are pulse-coincidence STDP scaled per row by a broadcast signal: one phase per target-module column mask.
 - **No nonlinear function of an individual device's conductance** is allowed, and no access to the transposed element $W_{ji}$. This is why every modulator is defined at module level.
-- **Allowed reads.** Per-row sums come from $K + 1$ masked crossbar reads ($d_j$, $e_j$, module flows). Modulators and baselines are computed in peripheral logic from $K \times K$ statistics.
+- **Allowed reads.** Per-row sums come from $K + 1$ masked crossbar reads ($d_j$, $e_j$, module flows). The per-frame walk is $n$ ordinary reads. Modulators and baselines are computed in peripheral logic from $K \times K$ statistics.
 - **Per-synapse state.** The only per-synapse state beyond $W$ is the task eligibility trace. Volatile, diffusive memristors are one candidate for it.
 
 **Open:**
@@ -145,31 +172,46 @@ Constraints this places on every rule (see `derivation.md` §6):
 
 ## 8. Open questions carried from the derivation
 
-- **Partition $M$.** Static (SBM initialization) or periodically re-detected (Infomap, Leiden)? For fixed-output tasks, the columns probably pin $M$ for the output communities, and only the workspace would be re-detected.
+- **Partition $M$.** The controller and action communities are pinned, because they carry the input and the policy. Latent communities: static (SBM initialization) or periodically re-detected (Infomap, Leiden), which makes training an alternating minimisation (`derivation.md` §3.4).
+- **Number of latent communities** $\lvert \mathcal L \rvert$: a hyperparameter, or set by re-detection.
+- **World model.** The definition and estimator of the across-frame latent chain (`derivation.md` §2.4) are proposals, not yet checked in simulation.
 - **Structural plasticity.** Threshold pruning ($W_{ij} < \epsilon$) vs. top-$k$ per neuron.
 - **Initialization.** SBM (head start, bias) vs. Erdős–Rényi (neutral, slow).
 - **Locality convention.** The forward walk ties flow to firing and maps onto crossbar row sums. The backward, dendritically normalized walk has postsynaptic sums but loses that tie. See `derivation.md` §6.
 - **Lateral-inhibition variant.** The anti-Hebbian $\Delta I_{ij} = \eta\pi_i\pi_j$ is unbounded and treats co-active neurons as competitors, which conflicts with Hebbian STDP. It also ignores Dale's law. It needs a bounded, correctly signed rule, probably through interneuron populations.
 - **Mean-field validity.** Does $\pi \approx$ normalized firing rate, and do causal pairings occur at a rate proportional to $J_{ij}$ (`derivation.md` §2.2)? Theorem 3 depends on both. Measure them at M1.
 
-## 9. Metrics and ablations
+## 9. Metrics
 
-**Metrics:**
+- **Task:** episodic return, compared with a random policy and a standard RL baseline.
+- **Structure:** $L(M)$ and each §6 candidate over training; NMI between the Infomap-detected partition and the intended communities; mean exit fraction $\bar e$.
+- **State model:**
+  - KL divergence between the policy from $T^K(\mathbf o)$ (`derivation.md` Eq. 1d) and the spiking readout;
+  - error of the implicit walk vs. the spiking estimate of $\pi_f$;
+  - with carry-over, next-latent-state prediction accuracy.
+- **Energy (secondary):** firing rates and the energy proxy.
 
-- Task: accuracy, episodic return.
-- Structure: $L(M)$ and each §6 candidate over training; NMI between the Infomap-detected partition and the intended columns; mean exit fraction $\bar e$.
-- Energy: firing rates and the energy proxy.
+## 10. Ablations
 
-**Ablations:** STDP only · exact-gradient baseline (additive $G$) · cost-modulated rule per candidate · per-module vs. global modulator · per-neuron vs. per-module baseline · teleportation on/off · static vs. re-detected $M$.
+- STDP only
+- exact-gradient baseline (additive $G$)
+- cost-modulated rule per candidate
+- per-module vs. global modulator
+- per-neuron vs. per-module baseline
+- per-frame vs. running-average modulator table
+- implicit vs. spiking walk
+- carry-over on/off ($\rho$)
+- latent communities on/off
+- static vs. re-detected latent partition
 
-## 10. Milestones
+## 11. Milestones
 
 | ID | Milestone | Done when |
 | --- | --- | --- |
-| M0 | Docs: corrected derivation, spec, changelog | This commit |
-| M1 | Brian2 rule prototype on a small SBM graph (no task) | Online $\pi$ estimate matches power iteration; $L(M)$ decreases under both the cost-modulated rule and the exact-gradient baseline; mean-field and pairing-rate checks reported |
-| M2 | CartPole, 2 columns, closed loop | Beats random policy; modules persist |
-| M3 | MNIST as contextual bandit, 10 columns | Accuracy and NMI reported for all ablations |
-| M4 | LunarLander (4) and Imagenette with frozen encoder | Runs end to end; wall-clock informs the simulator decision |
-| M5 | Modulator comparison (§6): all eight candidates | Candidates scored on the four criteria |
-| M6 | Scale-up: ImageNet-1k, hierarchical/multilevel map equation, richer architectures | Open |
+| M0 | Docs: corrected derivation, spec, changelog; reformulated around communities as states | Done (2026-09-27, reformulated 2026-10-04) |
+| M1 | Brian2 rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking estimate agrees with it within a frame window; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; mean-field and pairing-rate checks reported |
+| M2 | CartPole, closed loop | Beats random policy; modules persist; policy from $T^K$ agrees with the spiking readout |
+| M3 | Acrobot, MountainCar, LunarLander | Runs end to end; returns reported for all ablations; wall-clock informs the simulator decision |
+| M4 | Partially observable task with latent communities and carry-over | Carry-over beats $\rho = 0$; latent chain predicts the next latent state |
+| M5 | Modulator comparison (§6): all candidates | Candidates scored on the five criteria |
+| M6 | Scale-up: hierarchical/multilevel map equation, richer architectures, deferred vision track | Open |
