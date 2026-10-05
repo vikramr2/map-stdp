@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path(__file__).resolve().parents[2]))
-ENV = Path.home() / ".conda" / "envs" / "map-stdp"
+# The project env: the active conda env (launch Claude from `conda activate map-stdp`).
+ENV = Path(os.environ.get("CONDA_PREFIX", "/nonexistent"))
 
 # Optional prefixes before the real command word: env assignments, sudo, a path.
 HEAD = r"^(?:\w+=\S*\s+)*(?:sudo\s+)?(?:\S*/)?"
@@ -76,7 +77,7 @@ def installs(event):
     env_active = os.environ.get("CONDA_DEFAULT_ENV") == "map-stdp"
     for seg in segments(cmd):
         # Accept the env path in any spelling (absolute, ~, $HOME); variables are not expanded here.
-        targets_env = "envs/map-stdp/" in seg or "-n map-stdp" in seg or "--name map-stdp" in seg
+        targets_env = "envs/map-stdp" in seg or "-n map-stdp" in seg or "--name map-stdp" in seg
         if re.match(HEAD + r"(pip3?|python3?(\.\d+)?\s+-m\s+pip)\s+install\b", seg):
             venv = re.search(r"(\.venv|venv)/bin/(pip|python)", seg)
             if "--user" in seg:

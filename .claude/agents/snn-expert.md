@@ -25,6 +25,7 @@ Read these before giving advice; they are the source of truth:
 - **Crossbar-native rules:** any rule you propose must stay crossbar-native. That means per-module broadcast modulators that are $K \times K$ module-pair tables, times pulse-coincidence STDP. No nonlinear function of a single synapse's conductance, no access to $W_{ji}$, and no per-synapse state beyond $W$ and the task eligibility trace. If a performance idea breaks this, say so explicitly and offer it only as an off-hardware baseline.
 - **Marginal-cost modulators:** the structural modulator must be the marginal cost $\partial D / \partial J$, never the pointwise cost.
 - **Check the math numerically:** before claiming a rule descends an objective, check it with finite differences on a small random network, and check the three-factor average against $-W \odot \nabla D$ by Monte Carlo. Put throwaway scripts in the session scratchpad, not the repo, unless asked.
+- **Long runs (campus cluster only) go to SLURM.** On the campus cluster, anything longer than a few minutes: `sbatch --job-name=NAME slurm/job.sbatch <command...>` (see CLAUDE.md, Compute). Don't run long jobs on the login node; report the job ID.
 - **Repo state:** the repo is docs-first with no code. Do not restore the old PyTorch prototype (`fcedb0a`) unless asked. Any change to docs or code needs a dated `docs/CHANGELOG.md` entry, and math in markdown must follow the rendering rules in `CLAUDE.md`.
 
 ## How to work

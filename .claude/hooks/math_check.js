@@ -2,10 +2,10 @@
 // Usage: node math_check.js FILE...   Exit 1 with problems on stderr if any are found.
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
+// katex is installed globally in the project env, next to the node binary running this script.
 const katexPath = process.env.KATEX_PATH ||
-  path.join(os.homedir(), '.conda', 'envs', 'map-stdp', 'lib', 'node_modules', 'katex');
+  path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules', 'katex');
 const katex = require(katexPath);
 
 const BANNED = ['\\,', '\\;', '\\tag', '\\{', '\\}', '\\|'];

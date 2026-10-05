@@ -1,23 +1,18 @@
+# Project env. Lives on scratch to stay off the /u file quota:
+#   CONDA_PKGS_DIRS=/scratch/vikramr2/conda/pkgs conda env create -p /scratch/vikramr2/conda/envs/map-stdp -f environment.yml
+#   then: npm install -g --cache /scratch/vikramr2/conda/npm-cache katex pyright @colbymchenry/codegraph@1.6.2
 name: map-stdp
 channels:
-  - pytorch
   - conda-forge
-  - defaults
 dependencies:
   - python=3.11
-  - pip
-  - pytorch
-  - torchvision
-  - "numpy<2"
+  - nodejs>=20
+  - numpy
   - scipy
+  - numba
+  - gymnasium
   - matplotlib
   - networkx
-  - pandas
-  - tqdm
+  - pip
   - pip:
-      - snntorch
-      - tonic
-      - pbr
-      - expelliarmus
-      - h5py
-      - importRosbag
+      - superneuromat==3.5.0

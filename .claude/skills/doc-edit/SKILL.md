@@ -42,5 +42,5 @@ description: House rules for editing docs/derivation.md, docs/SPEC.md and CLAUDE
 ## Final check
 
 ```bash
-~/.conda/envs/map-stdp/bin/node .claude/hooks/math_check.js docs/derivation.md docs/SPEC.md docs/CHANGELOG.md CLAUDE.md
+node .claude/hooks/math_check.js docs/derivation.md docs/SPEC.md docs/CHANGELOG.md CLAUDE.md
 ```

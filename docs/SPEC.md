@@ -1,6 +1,6 @@
 # Map-STDP Project Spec
 
-Status: ideation, with no code yet. The math lives in [`derivation.md`](derivation.md), and changes are logged in [`CHANGELOG.md`](CHANGELOG.md).
+Status: implementation. M1 is done (iteration 001); the current model is in [`model.md`](model.md), and iterations are logged in [`iterations/`](iterations/). The math lives in [`derivation.md`](derivation.md), and changes are logged in [`CHANGELOG.md`](CHANGELOG.md).
 
 Each consideration below states the user's direction first. Items marked **Proposal** are candidate approaches that have not been decided. **Open** items are unresolved.
 
@@ -53,7 +53,7 @@ Gaps and how they are handled:
 
 | Gap | Handling |
 | --- | --- |
-| Built-in STDP is global (`apos`/`aneg` vectors per lag) with no third factor. `aneg` is not acausal STDP: it depresses every non-coincident synapse on every step, which works as a decay (checked). | Turn built-in STDP off for Map-STDP. Each frame, compute causal-minus-acausal pairing counts from `ispikes`, plus the modulator table, the action-gated eligibility and the TD error, in numpy. The built-in STDP is kept only for the "STDP only" ablation. |
+| Built-in STDP is global (`apos`/`aneg` vectors per lag) with no third factor. `aneg` is not acausal STDP: it depresses every non-coincident synapse on every step, which works as a decay (checked). | Turn built-in STDP off for Map-STDP. Each frame, compute covariance pairing counts from `ispikes` (`derivation.md` §2.2), plus the modulator table, the action-gated eligibility and the TD error, in numpy. The built-in STDP is kept only for the "STDP only" ablation. |
 | Neurons are deterministic LIF with a subtractive linear leak, and there are no synaptic time constants. | Inject noise as random input spikes, or as random thresholds set from the frame loop or a per-step `callback`. |
 | `weight_mat()` is indexed `[pre, post]`, the transpose of our $W_{ij}$ (checked). | `W_snm = W.T` everywhere, as recorded in CLAUDE.md. |
 | Delays above 1 are built from hidden chains of neurons, which inflate $N$. | Use delay 1. |
@@ -95,7 +95,7 @@ Risks:
 | 3 | LunarLander | 4 | richer observation |
 | 4 | a partially observable task, e.g. a T-maze or MiniGrid memory task | 3–4 | latent communities with carry-over must hold hidden state |
 
-- **Observation encoding.** Continuous observations become $v(\mathbf o)$ over controller neurons, e.g. with Gaussian receptive fields per observation dimension. **Open**: the encoding and the controller size.
+- **Observation encoding (decided, iteration 001).** Use **conjunctive** Gaussian receptive fields. For CartPole, that is a 6×6 grid over $(\theta, \dot\theta)$, $\sigma = 0.4$ in normalised units, 36 controller neurons. Per-dimension fields cap the policy, because Eq. 1d averages their votes: even ideal votes reach only 84 steps, against 491 for conjunctive cells (flow-level). **Open:** how conjunctive grids scale to LunarLander's 8-D observation.
 - **Deferred: vision.** Image classification as a contextual bandit (one-step episodes, one community per class), MNIST and Imagenette with a frozen feature encoder. This is out of scope until the RL ladder works.
 
 ## 5. C3 + C7: Stimulus, frames and timescale
@@ -148,7 +148,7 @@ where:
 
 - $\delta$ is a global TD error from a module-level linear critic (`derivation.md` Eq. 4c);
 - $e_{ij}$ is a trace of $\kappa_{ij} (h_{m(i)} - \bar{h}_j)$, where the $K$-vector $h$ marks the chosen action (Eq. 4b). Its average is a weight-scaled policy-gradient score. It needs the chosen action broadcast to the action modules, like an efference copy;
-- $\kappa_{ij}$ is the pre→post coincidence, counted as causal minus acausal pairings in spiking, to cancel chance coincidences;
+- $\kappa_{ij}$ is the pre→post coincidence, counted in spiking as the covariance count (causal pairings minus the product of spike counts), to cancel chance coincidences (decided in iteration 001);
 - $g_{ij} = \partial D / \partial J_{ij}$ is the **marginal** description cost of the transition, a $K \times K$ module-pair table broadcast per module;
 - $\bar{g}_j$ is a per-neuron baseline.
 
@@ -162,7 +162,9 @@ Why this form:
 
 **Known conflict: structure starves routing** (`derivation.md` §4.5). Controller→action and controller→latent links are cross-module, so the map term alone drives the controller's exit flow to zero. The action communities starve, $M^{\ast}$ diverges, and the policy collapses.
 
-**Proposal: dual routing term.** Subtract $\mu$ from $g_{ba}$ on the routing module pairs, with $\mu$ set by dual ascent toward a target routing flow $q^{\ast}$ (Eq. 4a). The simplest variant exempts those pairs. Preliminary flow-level bandit results (4 seeds), P(correct):
+**Decision (iteration 001): routing exemption is the M2 default.** In the flow-level closed loop, the map term without protection collapsed CartPole learning (≈53 against ≈195 with $\lambda = 0$). With routing exempt, the structural term raised the return to ≈343 at $\lambda = 0.05$. The exemption has no free parameter.
+
+**Proposal: dual routing term** (an ablation for M2). Subtract $\mu$ from $g_{ba}$ on the routing module pairs, with $\mu$ set by dual ascent toward a target routing flow $q^{\ast}$ (Eq. 4a). The simplest variant exempts those pairs. Preliminary flow-level bandit results (4 seeds), P(correct):
 
 | Structural term | P(correct) |
 | --- | --- |
@@ -171,7 +173,7 @@ Why this form:
 | routing pairs exempt | 0.693 |
 | dual term | 0.762 |
 
-**Schedule.** Ramp $\lambda$ up only after return exceeds random.
+**Schedule.** Constant $\lambda = 0.05$ from frame 0 beat $\lambda = 0$ in the flow-level tests, so the ramp is an ablation.
 
 **Candidates** (`derivation.md` §5 has the modulator, pointwise cost and caveats for each):
 
@@ -229,7 +231,7 @@ Constraints this places on every rule (see `derivation.md` §6):
 - **Locality convention.** The forward walk ties flow to firing and maps onto crossbar row sums. The backward, dendritically normalized walk has postsynaptic sums but loses that tie. See `derivation.md` §6.
 - **Lateral-inhibition variant.** The anti-Hebbian $\Delta I_{ij} = \eta\pi_i\pi_j$ is unbounded and treats co-active neurons as competitors, which conflicts with Hebbian STDP. It also ignores Dale's law. It needs a bounded, correctly signed rule, probably through interneuron populations.
 - **Mean-field validity.** Does $\pi \approx$ normalized firing rate, and do causal pairings occur at a rate proportional to $J_{ij}$ (`derivation.md` §2.2)? Theorem 3 depends on both. It needs constant $d_j$, global normalisation by inhibition, and balanced pairing counts. A preliminary Poisson test found 85% chance pairings in a 20 ms window. Measure at M1, and derive $\mathbb{E}[\Delta W]$ including the residual chance term.
-- **Controller in $D$.** Should the controller be a map-equation module at all, or an input layer outside $D$?
+- **Controller in $D$.** Provisionally answered: under routing exemption, the controller's column of $g$ is zero, so it acts as an input layer outside the structural term. Neuroscience reading: a low-recurrence controller is relay-like, as in thalamus, not cortical.
 - **Routing target.** How to set $q^{\ast}$ for the dual term, and whether it should be learned from reward.
 - **Nonlinear carry-over.** Is a nonlinear latent carry-over compatible with the theory, given that the gradients assume a linear resolvent?
 - **Device behaviour.** Do memristors with state-dependent updates give the multiplicative ($\propto W$) form natively, or only as an expectation over pairings?
@@ -251,9 +253,11 @@ Constraints this places on every rule (see `derivation.md` §6):
 - STDP only
 - task term: action-gated vs. plain eligibility; TD vs. $R - \bar{R}$
 - routing: dual term vs. exemption vs. none
-- $\lambda$ schedule: ramped vs. constant
+- $\lambda$ schedule: constant (default) vs. ramped
+- presynaptic normalisation: output gain $1/d_j$ plus $d_j$ homeostasis (default) vs. homeostasis only
+- encoding: conjunctive (default) vs. per-dimension receptive fields
 - spiking readout: race vs. argmax
-- pairing count: causal-only vs. causal minus acausal
+- pairing count: covariance (default) vs. causal-only vs. balanced
 - exact-gradient baseline (additive $G$)
 - cost-modulated rule per candidate
 - per-module vs. global modulator
@@ -269,7 +273,7 @@ Constraints this places on every rule (see `derivation.md` §6):
 | ID | Milestone | Done when |
 | --- | --- | --- |
 | M0 | Docs: corrected derivation, spec, changelog; reformulated around communities as states | Done (2026-09-27, reformulated 2026-10-04) |
-| M1 | Numpy flow-level reference, plus SuperNeuroMAT rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking error against window length (in units of $\tau/\alpha$) reported; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; pairing counts regressed on $J_{ij}$ and $r_i r_j$; no silent or runaway runs |
+| M1 | **Done 2026-10-05** ([iteration 001](iterations/001-m1.md)). Numpy flow-level reference, plus SuperNeuroMAT rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking error against window length (in units of $\tau/\alpha$) reported; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; pairing counts regressed on $J_{ij}$ and $r_i r_j$; no silent or runaway runs |
 | M2 | CartPole, closed loop (numpy reference first, then SuperNeuroMAT) | Beats random policy; dual term vs. exemption vs. none compared; modules persist; policy from $T^K$ agrees with the spiking race readout |
 | M3 | Acrobot, MountainCar, LunarLander | Runs end to end; returns reported for all ablations; wall-clock informs the simulator decision |
 | M4 | Partially observable task with latent communities and carry-over | Carry-over beats $\rho = 0$; latent chain predicts the next latent state |

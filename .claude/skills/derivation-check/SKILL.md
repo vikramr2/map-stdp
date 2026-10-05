@@ -12,10 +12,10 @@ CLAUDE.md requires this before any change to a derivation:
 
 ## Tool
 
-`scripts/fdcheck.py` (numpy). Run it with the project env's python, `~/.conda/envs/map-stdp/bin/python`. First confirm that the reference still reproduces:
+`scripts/fdcheck.py` (numpy). Run it with the project env's python (`conda activate map-stdp`). First confirm that the reference still reproduces:
 
 ```bash
-~/.conda/envs/map-stdp/bin/python .claude/skills/derivation-check/scripts/fdcheck.py --selftest
+python .claude/skills/derivation-check/scripts/fdcheck.py --selftest
 ```
 
 You should get a map gradient error of at most `1e-8` and a Monte Carlo correlation of at least `0.999`.

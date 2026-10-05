@@ -29,7 +29,31 @@ Research question: can a spiking network's communities serve as its states, givi
 
 The planned spiking simulator is **SuperNeuroMAT** (ORNL; see SPEC §3), with a numpy flow-level reference run first. Brian2 is only a fallback. `docs/superneuro` is the SuperNeuro reference submodule (README and tutorials). `environment.yml` is stale: it still lists the old PyTorch/snntorch/tonic stack. Update it when implementation starts. Never install packages globally without asking; use a scratchpad `--target` or a venv for experiments.
 
-**Tooling.** The `map-stdp` conda env (`~/.conda/envs/map-stdp`, Python 3.11 and Node.js) holds the project's tools.
+**Machines.** Work moves between machines. Paths in the hooks and MCP config resolve from the active env, so any machine needs only:
+
+1. Clone the repo, then `git submodule update --init`.
+2. Create the `map-stdp` env from `environment.yml`, plus the npm tools listed at its top.
+3. Launch Claude from `conda activate map-stdp`.
+
+The SLURM notes below apply only to the campus cluster. On a machine without SLURM, run experiments directly.
+
+**Compute (SLURM, campus cluster only).** The login node is for editing, quick checks and short tests only. Anything longer than a few minutes goes to SLURM:
+
+- **Submitting.** Use `sbatch [--job-name=NAME] slurm/job.sbatch <command...>` from the repo root. The template activates `map-stdp` and runs the command.
+- **Partition: `secondary`** (the user's choice). Defaults are 1 node, 8 CPUs, 64 GB, 4 h.
+  - **4 h is the hard limit.**
+  - **Jobs can be preempted and requeued,** so long experiments must checkpoint and resume, or be split into jobs under 4 h, for example one per seed.
+- **Other partitions** need the user's OK:
+  - `zgdrasil` starts immediately, with 7 days and 2× A30 on 1 node;
+  - `IllinoisComputes` needs `-A chackoge-ic` and allows 3 days, on 128-core nodes.
+- **Logs.** They go to `logs/py_<jobid>.out` and `.err`; `logs/` is gitignored and must exist before submitting.
+- **Monitoring.** Check jobs with `squeue -u $USER`, or `sacct -j <id>` after they finish.
+- **Recording.** Put the job ID and the command in the iteration record in `docs/iterations/`.
+
+**Tooling.** The `map-stdp` conda env lives at `/scratch/vikramr2/conda/envs/map-stdp`, off `/u`, which has a 500k-file quota. It has Python 3.11, Node.js and the packages in `environment.yml`.
+
+- `conda activate map-stdp` resolves to it through `envs_dirs` in `~/.condarc`.
+- For installs, set `CONDA_PKGS_DIRS=/scratch/vikramr2/conda/pkgs`, and use `pip --no-cache-dir` and `npm --cache /scratch/vikramr2/conda/npm-cache`, so caches stay off `/u`.
 
 - **ponytail** (project-scope plugin, `.claude/settings.json`): a least-code skill. Its hooks run `node`, so run `conda activate map-stdp` before launching `claude`.
 - **CodeGraph** (project-scope MCP server, `.mcp.json`; telemetry off): a code-intelligence index. The index lives in `.codegraph/`, which is gitignored by its own `.gitignore`. Run `codegraph sync` after large changes.

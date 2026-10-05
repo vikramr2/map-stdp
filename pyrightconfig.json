@@ -1,0 +1,6 @@
+{
+  "venvPath": "/scratch/vikramr2/conda/envs",
+  "venv": "map-stdp",
+  "extraPaths": ["."],
+  "exclude": ["docs/superneuro", ".codegraph", "logs"]
+}

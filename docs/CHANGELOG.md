@@ -4,6 +4,50 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## 2026-10-05
 
+### Added (implementation, iteration 001: M1)
+
+- **Code:**
+  - `mapstdp/core.py`: numpy flow-level reference;
+  - `mapstdp/spiking.py`: SuperNeuroMAT backend;
+  - `experiments/m1.py`: the six M1 checks, with results in `experiments/results/m1.json`.
+
+  Both modules have assert-based self-checks. Built by `superneuro-expert`. `pyrightconfig.json` points pyright at the `map-stdp` env.
+- **`docs/model.md`:** the current model, versioned. v0 is the spec; v1 follows M1.
+- **`docs/iterations/001-m1.md`:** the M1 record, with build, results, reviews (`snn-expert`, `neuroscientist`) and decisions.
+
+### Added (iteration 002: M2, in progress)
+
+- **Code** (built by `superneuro-expert`; self-checks pass):
+  - `mapstdp/core.py`: the CartPole conjunctive encoder, $d_j$ homeostasis, and the action-gated eligibility (Eq. 4b);
+  - `mapstdp/spiking.py`: the race readout;
+  - `experiments/m2.py`: the closed-loop CLI and `--summary`.
+- **`docs/iterations/002-m2.md`:** status, run plan, preliminary numbers, and open problems:
+  - a $d_j$ ratchet from the task term;
+  - the race readout reading the early transient.
+- **No M2 results yet.** The SLURM jobs on `secondary` sat pending on priority for over 4 h and were cancelled on the user's instruction. M2 continues on a GPU machine that needs no SLURM.
+
+### Changed (portability)
+
+- **Paths:** the hooks, `.mcp.json` and the skills no longer hard-code `/scratch/vikramr2`.
+  - The hooks use the active env (`CONDA_PREFIX`).
+  - `math_check.js` finds katex next to the running `node`.
+  - CodeGraph and the skills resolve from `PATH`.
+
+  Launch Claude from `conda activate map-stdp` on any machine.
+
+### Changed (iteration 001 decisions)
+
+- **Decision: pairing count $\kappa$ is the covariance count** (derivation §2.2), replacing the balanced count. Cosine with $-W \odot \nabla D$: 0.992 covariance, 0.979 causal, 0.847 balanced, reproduced at 5k frames. References added: Sejnowski 1977 and Kempter et al. 1999.
+- **Decision: presynaptic normalisation** as an output gain $1/d_j$, plus $d_j$ homeostasis $\epsilon (d_j - 1)$ in the baseline (derivation §2.2).
+- **Decision: spiking uses branching mode,** with $k = 100$. Frame windows are stated in spikes per module (error ≈ $1.3 / \sqrt{S_{mod}}$). The $4 \tau / \alpha$ estimate in §2.3 was optimistic.
+- **Decision: conjunctive encoding** (SPEC §4, derivation §2.4). Per-dimension fields cap the CartPole policy at about 84 steps.
+- **Decision: routing exemption is the M2 default** (SPEC §6, derivation §4.5). In the flow-level closed loop, the map term without protection collapsed learning (≈53), while exempt routing at $\lambda = 0.05$ reached ≈343 against ≈195 for $\lambda = 0$. These numbers are preliminary. The dual term stays a Proposal and becomes an ablation. A constant $\lambda$ replaces the ramp, which becomes an ablation.
+- **SPEC:**
+  - M1 marked done;
+  - status line updated;
+  - ablations updated (pairing count, normalisation, encoding, schedule);
+  - "Controller in $D$" provisionally answered (input layer).
+
 ### Added
 
 - **`map-stdp` conda env** (`~/.conda/envs/map-stdp`): Python 3.11 and Node.js 26, so the tooling has Node without a system-wide install.
@@ -28,6 +72,16 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
   - **commit-commands**;
   - **hookify**.
 - **`map-stdp` env:** gained katex, pyright, numpy and scipy.
+- **SLURM template** (`slurm/job.sbatch`): the user's standard header (partition `zgdrasil`, 8 CPUs, 64 GB, 2 days). It activates `map-stdp` and runs the given command. `logs/` is gitignored.
+  - CLAUDE.md gains a "Compute (SLURM)" section: long runs go to `sbatch`, never the login node.
+  - The `snn-expert` and `superneuro-expert` agents point to it.
+  - **Decision:** jobs go to the `secondary` partition (4 h, preemptible), on the user's instruction. Installs run on the login node.
+- **Env moved to `/scratch/vikramr2/conda/envs/map-stdp`.** The `/u` home hit its 500k-file quota at 503k files (`~/.conda/pkgs` held ~224k).
+  - `conda clean --all` freed ~107k files.
+  - The env was rebuilt on scratch, with its package cache there too, and registered through `envs_dirs`. It now also has numba, gymnasium, matplotlib, networkx and superneuromat 3.5.0.
+  - Hooks, skills and `.mcp.json` point to the new path.
+  - `environment.yml` is rewritten to match; it had listed the old PyTorch stack.
+  - The old home env is removed once Claude is relaunched from the new env.
 
 ## 2026-10-04
 

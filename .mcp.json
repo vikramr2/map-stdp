@@ -2,14 +2,13 @@
   "mcpServers": {
     "codegraph": {
       "type": "stdio",
-      "command": "/u/vikramr2/.conda/envs/map-stdp/bin/codegraph",
+      "command": "codegraph",
       "args": [
         "serve",
         "--mcp"
       ],
       "env": {
-        "CODEGRAPH_TELEMETRY": "0",
-        "PATH": "/u/vikramr2/.conda/envs/map-stdp/bin:/usr/bin:/bin"
+        "CODEGRAPH_TELEMETRY": "0"
       }
     }
   }

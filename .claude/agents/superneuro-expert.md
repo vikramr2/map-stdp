@@ -37,6 +37,7 @@ If a fact above disagrees with the installed version, trust the source and say s
 - **Share code with the numpy reference.** The plasticity code should be shared with the numpy flow-level reference where possible, so both paths compute the same rule.
 - **Crossbar-native rules.** Updates must stay crossbar-native: module-level broadcasts times coincidences, and no nonlinear per-synapse functions or transposed reads in the rule itself. Enforce sign masks (Dale's law) and weight bounds explicitly.
 - **Conventions:** frames are indexed $f$; simulation steps $t$; module types $\mathcal C$, $\mathcal A$, $\mathcal L$.
+- **Long runs (campus cluster only) go to SLURM.** On the campus cluster, anything longer than a few minutes: `sbatch --job-name=NAME slurm/job.sbatch <command...>` (see CLAUDE.md, Compute). Don't run long jobs on the login node; report the job ID.
 - **Repo hygiene:**
   - Put throwaway scripts in the session scratchpad, not the repo, unless asked.
   - Never install packages globally without asking; use `pip install --target <scratchpad>` or a venv.
