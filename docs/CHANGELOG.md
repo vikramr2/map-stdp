@@ -12,6 +12,22 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
   - Telemetry is off, both by `codegraph telemetry off` and by `CODEGRAPH_TELEMETRY=0`.
   - The local index is in `.codegraph/`, which ignores itself.
   - The repo has no code yet, so the index is empty until implementation starts.
+- **Project hooks** (`.claude/hooks/project_hooks.py` and `math_check.js`, registered in `.claude/settings.json`), each tested with sample events:
+  - **Math check.** After any edit to `docs/*.md` or `CLAUDE.md`, KaTeX renders every math span in strict mode and banned macros (`\,` `\;` `\tag` `\{` `\}` `\|`) are flagged. Failures are fed back so they get fixed immediately.
+  - **Changelog guard.** Blocks `git commit` when changes are staged without `docs/CHANGELOG.md`. Override with "skip changelog" in the message.
+  - **No global installs.** Blocks pip, npm `-g` and conda installs that don't target the `map-stdp` env, a venv, or `--target`.
+  - **Environment check.** At session start, warns if the `map-stdp` env or `node` is missing.
+- **Project skills** (`.claude/skills/`):
+  - **`/derivation-check`** (`scripts/fdcheck.py`): the finite-difference and Monte Carlo checks CLAUDE.md requires. Its selftest reproduces a map-gradient error of 7e-10 and a three-factor correlation of 0.99994.
+  - **`/doc-edit`**: house rules for the docs.
+  - **`/expert-review`**: runs the expert agents in parallel and merges their findings.
+  - **`/changelog`**: drafts an entry in this file's style.
+- **Official plugins at project scope:**
+  - **math-proof**, for proofs of the derivation's theorems;
+  - **pyright-lsp**, with pyright 1.1.414 installed in the env rather than globally;
+  - **commit-commands**;
+  - **hookify**.
+- **`map-stdp` env:** gained katex, pyright, numpy and scipy.
 
 ## 2026-10-04
 

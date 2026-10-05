@@ -33,3 +33,10 @@ The planned spiking simulator is **SuperNeuroMAT** (ORNL; see SPEC §3), with a 
 
 - **ponytail** (project-scope plugin, `.claude/settings.json`): a least-code skill. Its hooks run `node`, so run `conda activate map-stdp` before launching `claude`.
 - **CodeGraph** (project-scope MCP server, `.mcp.json`; telemetry off): a code-intelligence index. The index lives in `.codegraph/`, which is gitignored by its own `.gitignore`. Run `codegraph sync` after large changes.
+- **Hooks** (`.claude/hooks/`):
+  - KaTeX math check after editing docs;
+  - commits blocked without a CHANGELOG entry ("skip changelog" overrides);
+  - installs blocked outside the env;
+  - an env warning at session start.
+- **Skills:** `/derivation-check` (run before any derivation math change), `/doc-edit`, `/expert-review`, `/changelog`.
+- **Plugins:** math-proof, pyright-lsp (pyright is in the env), commit-commands, hookify.
