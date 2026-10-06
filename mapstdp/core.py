@@ -57,10 +57,10 @@ def flow(W, v, alpha=0.2, n=None):
     T = W / W.sum(0)
     if n is None:
         return alpha * np.linalg.solve(np.eye(len(v)) - (1 - alpha) * T, v)
-    x = v.copy()
+    pi = v.copy()  # the iterates x_k of derivation §2.3 (Eq. 1a), converging to pi
     for _ in range(n):
-        x = (1 - alpha) * T @ x + alpha * v
-    return x
+        pi = (1 - alpha) * T @ pi + alpha * v
+    return pi
 
 
 def module_stats(W, pi, m, K):
@@ -82,6 +82,7 @@ def policy(p, roles, beta=1.0):
 
 
 def _plogp(x):
+    """x log2 x elementwise, with 0 log 0 = 0."""
     x = np.asarray(x, float)
     return np.where(x > 0, x * np.log2(np.where(x > 0, x, 1)), 0.0)
 
@@ -149,7 +150,8 @@ def eligibility_step(e, W, kappa, pi, m, roles, a, tau_e=3.0, beta=1.0):
 
 def homeostasis_update(W, mask, kappa, eps_h, wmin=1e-3, wmax=1.0):
     """d_j homeostasis as its own term on all plasticity (model v2): W -= eps_h (d_j - 1) kappa_ij. Its expectation
-    -eps_h (d_j - 1) pi_j W_ij / d_j rescales column j uniformly, so T, pi and D are unchanged."""
+    -eps_h (d_j - 1) pi_j W_ij / d_j rescales column j uniformly, so T, pi and D are unchanged.
+    Abstraction: presynaptic (outgoing) conservation, not postsynaptic synaptic scaling (docs/model.md)."""
     return clip_weights(W - eps_h * (W.sum(0) - 1) * kappa, mask, wmin, wmax)
 
 
@@ -188,7 +190,8 @@ if __name__ == "__main__":  # self-check: Eq. 1a bound, Eq. 7 vs finite differen
     L = lambda W_: map_equation(*module_stats(W_, pi, m, K)[:2], pi)  # noqa: E731 (pi held fixed)
     gr, h = grad_L(W, pi, m, K), 1e-6
     for i, j in zip(*np.nonzero(mask)):
-        E = np.zeros_like(W); E[i, j] = h
+        E = np.zeros_like(W)
+        E[i, j] = h
         assert abs((L(W + E) - L(W - E)) / (2 * h) - gr[i, j]) < 1e-6
     p, q, JK, _ = module_stats(W, pi, m, K)
     g = modulator(p, q, roles, clip=np.inf)
@@ -199,12 +202,13 @@ if __name__ == "__main__":  # self-check: Eq. 1a bound, Eq. 7 vs finite differen
     assert r > 0.99, r
     a = int(np.flatnonzero(roles == "A")[0])  # Eq. 4b: expected increment (kappa = J) = W * dlog P~/dW, pi fixed
     for beta in (1.0, 3.0):  # beta = 3: the sharpened score (Eq. 1e, Proposal)
-        def logP(W_):
+        def logP(W_, beta=beta):
             Jin = np.bincount(m, (W_ / W_.sum(0) * pi).sum(1), K)[roles == "A"] ** beta
             return np.log(Jin[0] / Jin.sum())
         inc = eligibility_step(0, W, J, pi, m, roles, a, tau_e=1.0, beta=beta)
         for i, j in zip(*np.nonzero(mask)):
-            E = np.zeros_like(W); E[i, j] = h
+            E = np.zeros_like(W)
+            E[i, j] = h
             assert abs(W[i, j] * (logP(W + E) - logP(W - E)) / (2 * h) - inc[i, j]) < 1e-6
     W2 = structural_update(W * 1.5, mask, 0 * g, np.ones_like(W), m, 0.1, eps=1.0)  # homeostasis pulls d_j to 1
     assert (np.abs(W2.sum(0) - 1) < np.abs(1.5 * W.sum(0) - 1)).all()

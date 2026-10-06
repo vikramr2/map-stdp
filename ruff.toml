@@ -1,0 +1,12 @@
+# Lint settings for mapstdp/, experiments/, tests/ and the skill and hook scripts (the codebase-cleaner runs these).
+# Rules are pinned because ruff's default set changes between releases. No `ruff format`: the project keeps its
+# compact, column-aligned numpy style, and a repo-wide reformat would bury real changes in the diff.
+line-length = 120
+target-version = "py311"
+extend-exclude = ["docs/superneuro", "experiments/results", "logs", "papers", ".codegraph"]
+
+[lint]
+select = ["E", "F", "W", "I", "B"]
+# B905 off: code relies on zip truncation (e.g. m2.Agent.evaluate zips 20 held-out stimuli with 100 policies),
+# so strict=True would raise.
+ignore = ["B905"]

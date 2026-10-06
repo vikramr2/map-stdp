@@ -8,6 +8,7 @@ Conventions follow the derivation: W[i, j] is the synapse pre j -> post i,
 T = W / d with d_j = sum_i W[i, j], J = pi_j T[i, j], modules m[i] in 0..K-1.
 """
 import argparse
+
 import numpy as np
 
 
@@ -48,7 +49,10 @@ def map_L(W, pi, m, K):
     T = T_of(W)
     ebar = (T * (m[:, None] != m[None, :])).sum(0)
     q, p = module_sums(pi * ebar, m, K), module_sums(pi, m, K)
-    xlx = lambda x: x * np.log(x)
+
+    def xlx(x):
+        return x * np.log(x)
+
     return xlx(q.sum()) - 2 * xlx(q).sum() - (pi * np.log(pi)).sum() + xlx(p + q).sum()
 
 

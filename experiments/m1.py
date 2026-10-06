@@ -22,6 +22,7 @@ rng = np.random.default_rng(SEED)
 
 
 def walk_check(W):
+    """n-hop flow (Eq. 1a) L1 error against the exact solve, and its bound 2 (1 - alpha)^n."""
     out = {}
     for n in (5, 10, 20, 40):
         errs = [np.abs(core.flow(W, v, ALPHA, n) - core.flow(W, v, ALPHA)).sum()
@@ -31,6 +32,7 @@ def walk_check(W):
 
 
 def p_exact(W, v):
+    """Exact module visit rates p for stimulus v."""
     return core.module_stats(W, core.flow(W, v, ALPHA), m, K)[0]
 
 
@@ -52,6 +54,7 @@ def calibrate(snn, W, leak):
 
 
 def spiking_error(snn, W, leak):
+    """Module- and neuron-level L1 error of the spike-share flow estimate against the exact flow, per window k."""
     rows = []
     for k in WINDOWS:
         e_mod, e_neu, t0 = [], [], time.perf_counter()
@@ -68,6 +71,7 @@ def spiking_error(snn, W, leak):
 
 
 def ols_r2(y, *xs):
+    """R^2 of the least-squares fit of y on an intercept and xs."""
     X = np.column_stack([np.ones_like(y), *xs])
     res = y - X @ np.linalg.lstsq(X, y, rcond=None)[0]
     return 1 - res @ res / ((y - y.mean()) @ (y - y.mean()))
@@ -99,17 +103,20 @@ def pairing_regression(snn, W, frames=300, k=100, lags=1):
                        "sum_ratio_to_J": float(cov.sum() / J.sum())},
         "acausal_over_causal": float(Csum.T[s].sum() / caus.sum()),
         "reciprocal_synapse_frac": float((MASK & MASK.T)[s].mean()),
-        "rates": {"mean": float(rate.mean()), "max": float(rate.max()), "silent_neuron_frac": float((counts == 0).mean()),
+        "rates": {"mean": float(rate.mean()), "max": float(rate.max()),
+                  "silent_neuron_frac": float((counts == 0).mean()),
                   "frames_no_action_spike_frac": act_silent / frames},
     }
 
 
 def evaluate(W):
+    """Flow-level metrics averaged over the TEST stimuli."""
     rows = []
     for v in TEST:
         pi = core.flow(W, v, ALPHA)
         p, q, JK, _ = core.module_stats(W, pi, m, K)
-        rows.append([core.map_equation(p, q, pi), q[C], p[roles == "A"].sum(), core.j_route(JK, roles), core.mstar(p, q)[C]])
+        rows.append([core.map_equation(p, q, pi), q[C], p[roles == "A"].sum(), core.j_route(JK, roles),
+                     core.mstar(p, q)[C]])
     return dict(zip(("D", "q_C", "p_A", "J_route", "Mstar_C"), np.mean(rows, 0).tolist()))
 
 
@@ -207,18 +214,21 @@ def summary(res):
         print(f"   n={n:>2}: {r['max_L1']:.2e} / {res['1_walk_trained'][n]['max_L1']:.2e}  bound {r['bound']:.2e}")
     print("2. spiking module-level L1 vs window k (k in units of tau/alpha):")
     for name, r in res["2_spiking_error"].items():
-        print(f"   {name}: tau={r['tau']:.0f} gain={r['gain']:.3f} alpha_hat={r['alpha_hat']:.3f} spont={r['spont_rate']:.4f}")
+        print(f"   {name}: tau={r['tau']:.0f} gain={r['gain']:.3f} alpha_hat={r['alpha_hat']:.3f} "
+              f"spont={r['spont_rate']:.4f}")
         print("     " + "  ".join(f"k{x['k']}({x['k_over_tau_alpha']:.1f}):{x['module_L1']:.3f}" for x in r["rows"]))
     print("3. learning (D bits | q_C | p_A | J_route | M*_C), start -> end:")
     for r in res["3_learning"]:
         s, e = r["start"], r["end"]
         print(f"   {r['kind']:>26} {r['routing']:>6}: D {s['D']:.3f}->{e['D']:.3f} q_C {s['q_C']:.3f}->{e['q_C']:.3f} "
               f"p_A {s['p_A']:.3f}->{e['p_A']:.3f} J_route {e['J_route']:.3f} M*_C {e['Mstar_C']:.2f} mu {e['mu']:.2f} "
-              f"d [{r['d_min']:.2f},{r['d_max']:.2f}] {r['ms_per_frame']:.2f} ms/f" + (f" rate {r['rates']}" if "rates" in r else ""))
+              f"d [{r['d_min']:.2f},{r['d_max']:.2f}] {r['ms_per_frame']:.2f} ms/f"
+              + (f" rate {r['rates']}" if "rates" in r else ""))
     print("4/5. pairing regression over synapses, rates:")
     for name, r in res["4_pairings"].items():
-        print(f"   {name} (lags {r['lags']}): causal {r['causal']}\n      balanced {r['balanced']}\n      covariance {r['covariance']}\n      acausal/causal "
-              f"{r['acausal_over_causal']:.3f} reciprocal {r['reciprocal_synapse_frac']:.2f} rates {r['rates']}")
+        print(f"   {name} (lags {r['lags']}): causal {r['causal']}\n      balanced {r['balanced']}\n"
+              f"      covariance {r['covariance']}\n      acausal/causal {r['acausal_over_causal']:.3f} "
+              f"reciprocal {r['reciprocal_synapse_frac']:.2f} rates {r['rates']}")
     print("6. ms per frame:", {k: round(v, 2) for k, v in res["6_timing_ms_per_frame"].items()})
 
 

@@ -1,7 +1,7 @@
 """Record one CartPole episode of a trained spiking Map-STDP agent (model v3) for the replay page.
 Run from the repo root:
-  python -m experiments.m2_viz train  --seed 3 --episodes 1500   -> experiments/results/m2_viz_W_s<seed>.npz
-  python -m experiments.m2_viz record --seed 3                   -> experiments/results/m2_viz_episode_s<seed>.json
+  python -m experiments.m2_viz train  --seed 3 --episodes 1500   -> experiments/results/viz_m2_W_s<seed>.npz
+  python -m experiments.m2_viz record --seed 3                   -> experiments/results/viz_m2_episode_s<seed>.json
   python -m experiments.m2_viz page --seed 3 --out replay.html   -> episode embedded in m2_viz_template.html
 Recording freezes the weights and the critic; every frame keeps its k x N spike raster, the race winner and the
 cart state, so the page can replay the per-frame walk next to the pole."""
@@ -12,13 +12,13 @@ import pathlib
 import gymnasium as gym
 import numpy as np
 
+from experiments import m2
 from mapstdp import core
 from mapstdp import spiking as sp
-from experiments import m2
 
 
 def path(kind, seed):
-    return m2.OUT / (f"m2_viz_W_s{seed}.npz" if kind == "W" else f"m2_viz_episode_s{seed}.json")
+    return m2.OUT / (f"viz_m2_W_s{seed}.npz" if kind == "W" else f"viz_m2_episode_s{seed}.json")
 
 
 def train(seed, episodes):
@@ -31,6 +31,7 @@ def train(seed, episodes):
 
 
 def first_race_step(S, groups, burn):
+    """Step of the first action spike at or after burn (where sp.race decides), -1 if none."""
     cnt = np.stack([S[burn:, g].sum(1) for g in groups], 1).sum(1)
     t = np.flatnonzero(cnt)
     return int(t[0]) + burn if len(t) else -1
@@ -51,7 +52,8 @@ def record(seed, tries=20):
             a = sp.race(S, agent.groups, agent.rng, agent.burn)
             a = int(agent.rng.integers(2)) if a is None else a
             p = core.module_stats(agent.W, core.flow(agent.W, v, m2.ALPHA, m2.N_HOPS), agent.m, agent.K)[0]
-            frames.append({"obs": [round(float(x), 4) for x in o], "a": a, "race_t": first_race_step(S, agent.groups, agent.burn),
+            frames.append({"obs": [round(float(x), 4) for x in o], "a": a,
+                           "race_t": first_race_step(S, agent.groups, agent.burn),
                            "P": [round(float(x), 3) for x in core.policy(p, agent.roles)],
                            "S": [np.flatnonzero(s).tolist() for s in S]})
             o, _, term, trunc, _ = env.step(a)
@@ -83,4 +85,5 @@ if __name__ == "__main__":
     ap.add_argument("--episodes", type=int, default=1500)
     ap.add_argument("--out", default="replay.html")
     a = ap.parse_args()
-    {"train": lambda: train(a.seed, a.episodes), "record": lambda: record(a.seed), "page": lambda: page(a.seed, a.out)}[a.cmd]()
+    {"train": lambda: train(a.seed, a.episodes), "record": lambda: record(a.seed),
+     "page": lambda: page(a.seed, a.out)}[a.cmd]()

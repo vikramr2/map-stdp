@@ -4,10 +4,72 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## 2026-10-05
 
+### Changed (expert review of the cleanup)
+
+- **Review:** `/expert-review` of the cleanup diff by `snn-expert`, `superneuro-expert` and `neuroscientist`. All three found the cleanup numerically safe; `superneuro-expert` ran 20 spiking episodes on the old and new code and got identical frames, identical weights and the same 3.3 ms per frame. Applied, all names, docstrings and comments only; `pytest` 9/9 bit-identical and `ruff` clean afterwards:
+  - **Renames in `experiments/m2.py`:** `local_plasticity` → `pre_td_updates` (all three reviewers: it is neither more local than the task term nor purely plasticity, and it mutates W and μ); `td_step` → `critic_step` (the task weight update stays in `episode`).
+  - **`experiments/m2.py` docstrings:**
+    - `pre_td_updates`: its update order, which the golden file locks;
+    - `episode`: the task update lands one walk late;
+    - `frame`: what κ and the action are in each backend;
+    - `Agent`: the dual and the annealing;
+    - `evaluate`: in spiking it consumes the training RNG.
+  - **`mapstdp/spiking.py`:**
+    - `pi_hat`: cited as the batch form of Eq. 2, replacing the bare §2.2 citation;
+    - `run_frame`: what `reset()` clears;
+    - `build` and `set_weights`: synapses are fixed at build time;
+    - `pairings`: now says `lag`.
+  - **`mapstdp/core.py`:**
+    - `homeostasis_update`: marked as presynaptic conservation, an abstraction;
+    - `flow`: a comment links `pi` to the iterates $x_k$.
+  - **Not applied:** a separate evaluation RNG. `evaluate()` in spiking draws from the training RNG, so the logging interval changes trajectories. Fixing that would change `tests/golden.json`, so it is documented and deferred.
+
+### Changed (docs aligned with the code; found by the codebase-cleaner)
+
+- **`docs/derivation.md`:**
+  - **Eq. 4c** now states the critic the code uses since iteration 001: $V = u \cdot \pi_{\mathcal{C}} / p_{\mathcal{C}}$ over controller neurons, with NLMS, reward −1 on termination and bootstrapping on truncation. The module-level critic is recorded as the weaker alternative (160 against 195, preliminary, iteration 001).
+  - **§6 table** and **§9 item 13** are updated to match.
+  - **§8 step 2:** the M2 frame is cold-started, $k = 100$ (was "about $4 \tau / \alpha$, warm-started").
+  - **§8 step 5:** reordered to match the code. The pairings are the covariance count (was "causal minus acausal"), and the TD error and the annealed $\eta_e$ step come after the next frame's walk.
+  - **§9 item 2:** the mean-field assumption needs the covariance count, not the balanced count. The note that it is untested in spiking is replaced by the M1 cosine of 0.992.
+- **`docs/SPEC.md`:** the C2 critic line is updated to match Eq. 4c.
+
+### Changed (code cleanup)
+
+- **Behaviour-preserving cleanup** by the `codebase-cleaner`, with no change to numerics, RNG-call order, CLI flags, result-file names or JSON keys. `pytest -q tests` passes before and after (9/9, `golden.json` untouched). `m2.summary()` output and a short `m2.run` (flow and spiking, results written to a scratch directory) are byte-identical to the baseline.
+  - **Lint:** `ruff check .` goes from 21 findings to 0. Long lines are wrapped (`m1.py` keeps the same AST), imports are sorted (`m2_viz.py`, `fdcheck.py`), `pairings` uses `lag` instead of `l`, the `core` self-check drops its semicolons and binds `beta` in `logP`, and `fdcheck.map_L` uses a `def` instead of a lambda.
+  - **Pyright:** 18 errors go down to 16, after an annotation on `m2.Agent.evaluate`'s output dict. The rest are inference limits on `sum()`/`0` accumulators and optional arguments, and are left alone.
+  - **Names:** `core.flow` names its iterate `pi` instead of `x`. `m2.Agent.C` becomes `Agent.ctrl`, since `C` means causal counts in `spiking`.
+  - **Structure:** `m2.Agent.episode` is split along derivation §8 into `pre_td_updates` (module statistics, Eq. 4b trace, Eq. 4, Eq. 4d, Eq. 4a dual) and `critic_step` (TD error and NLMS critic). These names come from the expert review below; the cleaner first called them `local_plasticity` and `td_step`. Operation order is unchanged. The dual-target fraction 0.75 is now `m2.Q_STAR_FRAC`. Nested conditional expressions in `Agent.__init__` and `summary()` are now `if` statements.
+  - **Docstrings:** added to functions that had none, with citations (`spiking.build`, `tau`, `pi_hat`, `run_frame`; `core._plogp`; `m2.Agent` and its methods, `random_return`, `run`, `summary`; `m1` helpers; `m2_viz.first_race_step`). The `m2.py` header now reads "models v1-v3".
+
+### Added (code hygiene)
+
+- **`.claude/agents/codebase-cleaner.md`:** adapted from another project for Map-STDP. Changes:
+  - **Scope and layout:** the scope, the forbidden paths, and this repo's layout and dependency direction.
+  - **Checks:** ruff, pytest and pyright in place of the original's tools.
+  - **Hard limits for this code:** numerics, RNG-call order, the $W$/`W_snm` orientation, the crossbar-native rules, CLI and result-file formats, and no `strict=` on zips.
+  - **Review:** it points to `/expert-review` instead of `design-guardian`, which doesn't exist here.
+- **`tests/test_regression.py` and `tests/golden.json`:** a behaviour lock. Checked:
+  - Fixed-seed runs are bit-identical across processes, spiking included.
+  - The suite covers five closed-loop configurations, the module self-checks, pairing counts with the race readout, and `m2.summary()`.
+  - Changing the weight floor by 0.01% fails all five closed-loop cases.
+- **`ruff.toml`:**
+  - **Rules pinned:** E, F, W, I and B, because ruff 0.16's defaults are much wider.
+  - **B905 off:** `m2.evaluate` relies on zip truncation.
+  - **No `ruff format`.**
+  - **Baseline:** 21 findings, left for the cleaner.
+- **`environment.yml`:** adds ruff and pytest; both are installed in the local env.
+
+### Fixed
+
+- **`m2.py --summary` crashed** on the replay recording, because its `m2_*.json` glob matched `m2_viz_episode_s3.json`. The viz outputs are renamed `viz_m2_*`.
+- **`pyrightconfig.json`** no longer hard-codes the cluster env path. Pyright and the IDE now resolve imports from the active interpreter on any machine.
+
 ### Added (visualisation)
 
 - **`experiments/m2_viz.py` and `experiments/m2_viz_template.html`:** a replay page of a trained spiking v3 agent. The left pane shows spikes and walk hops on the network, with the controller drawn as its 6×6 (θ, θ̇) grid and the race winner marked; the right pane shows CartPole. Commands:
-  - `train` saves the weights (`m2_viz_W_s<seed>.npz`; seeds 1–4 have last-100 returns of 193, 143, 207 and 192);
+  - `train` saves the weights (`viz_m2_W_s<seed>.npz`, renamed from `m2_viz_*` so `m2.py --summary` no longer picks them up; seeds 1–4 have last-100 returns of 193, 143, 207 and 192);
   - `record` keeps the best of 20 frozen-weight episodes (seed 3: 302 frames);
   - `page` embeds the recorded episode into the template.
 

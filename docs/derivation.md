@@ -412,13 +412,13 @@ $$
 
 Here $a^{\ast}$ is the chosen action. By the Lemma, the expected trace increment in a frame is $W_{ij} \partial \log \tilde{P}(a^{\ast} \mid \mathbf{o}) / \partial W_{ij}$. That is a weight-scaled policy-gradient score, with exactly the form of (4): a $K$-vector broadcast, a per-neuron baseline and a coincidence. The surrogate is close to the true policy. The cosine with $W \odot \nabla \log P$ computed through the resolvent was $0.997$ (Appendix A).
 
-**TD error as third factor.** The task update is $\Delta W_{ij} = \eta \delta_f e_{ij}$, with a global TD error from a module-level critic:
+**TD error as third factor.** The task update is $\Delta W_{ij} = \eta \delta_f e_{ij}$, with a global TD error from a linear critic on the controller's flow shares:
 
 $$
-\delta_f = r_f + \gamma V_{f+1} - V_f, \qquad V_f = \sum_b u_b p_b(f), \qquad u_b \leftarrow u_b + \eta_V \delta_f p_b(f) \qquad \text{(4c)}
+\delta_f = r_f + \gamma V_{f+1} - V_f, \qquad V_f = u \cdot x_f, \qquad x_f = \frac{\pi_{\mathcal{C}}(f)}{p_{\mathcal{C}}(f)}, \qquad u \leftarrow u + \eta_V \delta_f \frac{x_f}{\lVert x_f \rVert^2} \qquad \text{(4c)}
 $$
 
-The critic weights $u$ are a $K$-vector in the periphery, and $\delta$ is a global scalar, so the task term stays crossbar-native. A dedicated value population is the alternative. For one-step tasks (bandits), $\delta = R - \bar{R}(\mathbf{o})$.
+Here $\pi_{\mathcal{C}}$ is the flow on the controller neurons, so $x_f$ sums to 1. The update is normalised LMS. In CartPole the reward is $r_f = -1$ on termination and 0 otherwise. $V_{f+1} = 0$ on termination, and the critic bootstraps on truncation. The critic weights $u$ are a vector over controller neurons in the periphery, and $\delta$ is a global scalar, so the task term stays crossbar-native. The earlier module-level critic, $V_f = \sum_b u_b p_b(f)$, did worse in flow-level CartPole tests (160 against 195; preliminary, iteration 001). A dedicated value population is an untested alternative. For one-step tasks (bandits), $\delta = R - \bar{R}(\mathbf{o})$.
 
 **Biological cost.** The vector $h$ requires the identity of the chosen action to be broadcast to the action modules. In basal-ganglia terms, the selected channel is tagged by its own activity when dopamine arrives [Gurney et al. 2015], which is more natural than a separate efference copy. The $1/J^{in}$ factors read as divisive normalisation, an abstraction. $\bar{h}_j$, like $\bar{g}_j$, is a presynaptic baseline over $j$'s targets and is not available at the postsynaptic synapse (§6).
 
@@ -568,7 +568,7 @@ Target: $W$ stored as conductances in a crossbar, with rows = presynaptic neuron
 | Baseline $\bar{g}_j$ | per-row peripheral register: $\bar{g}_j = \sum_b T_{bj} g_{b, m(j)}$, from the masked reads |
 | Applying (4) | scale row-pulse amplitude by $-\lambda (g_{ba} - \bar{g}_j)$, one phase per target-module column mask. The map equation needs only 2 phases per module: exit columns and home columns |
 | Task eligibility $e_{ij}$ | the only per-synapse state; one option is volatile, diffusive memristors whose decay emulates a trace [Wang et al. 2017]. The action gating $h_{m(i)} - \bar{h}_j$ of (4b) is applied like (4): a $K$-vector by column mask, plus a per-row baseline |
-| TD error $\delta$, critic $u$ | a global scalar and a $K$-vector in the periphery (4c) |
+| TD error $\delta$, critic $u$ | a global scalar and a vector over controller neurons in the periphery (4c) |
 
 No step requires a nonlinear function of an individual device's conductance, or access to the transposed element $W_{ji}$. This is why every modulator is defined at module level.
 
@@ -606,15 +606,13 @@ Compared with lateral inhibition alone, as in Kohonen maps, which produces whate
 Training runs frame by frame. For each environment frame $f$:
 
 1. **Observe.** Read $\mathbf{o}_f$ and form the teleportation vector $v_f$, concentrated on the controller. With carry-over, mix in the previous frame's latent flow (1b).
-2. **Walk.** Run the $n$ hops of (1a). In software or on a crossbar this gives $\pi_f$ directly. In the spiking network, the neurons run for the frame window (about $4 \tau / \alpha$, warm-started) and (2) estimates $\hat{\pi}_f$.
+2. **Walk.** Run the $n$ hops of (1a). In software or on a crossbar this gives $\pi_f$ directly. In the spiking network, the neurons run for the frame window, $k = 100$ steps in M2, cold-started each frame (§2.3), and (2) estimates $\hat{\pi}_f$. A warm start would shorten the transient that the burn-in in step 3 skips.
 3. **Act.** Sample the action from (1d), or use the race readout in the spiking network, after a burn-in of about $\ln 0.1 / \ln(1 - \alpha)$ steps (§2.4).
 4. **Module statistics.** Compute $p_a$, $J_{ba}$ and $q_a$ for the frame. Update the modulator table $g_{ba}$ (per frame or as a running average, §3.4) and, if used, the routing dual $\mu$ (4a). Refresh the per-row baselines $\bar{g}_j$ and $\bar{h}_j$.
 5. **Plasticity.**
-   - Apply the structural term (4) to the frame's pairings (causal minus acausal in spiking).
    - Add the action-gated increments (4b) to the eligibility traces.
-   - Compute the TD error (4c) and apply $\eta \delta_f e_{ij}$.
-   - Apply the $d_j$ homeostasis (4d).
-   - Update the critic.
+   - Apply the structural term (4) and the $d_j$ homeostasis (4d) to the frame's pairings. In spiking, the pairings are the covariance count (§2.2).
+   - After the next frame's walk, compute the TD error (4c), update the critic, and apply $\eta_e \delta_f e_{ij}$ with the annealed rate $\eta_e$ (below).
 6. **Carry over.** Keep the latent flow $P_{\mathcal{L}} \pi_f$ for the next frame.
 
 **Stability measures.**
@@ -645,7 +643,7 @@ In biology, a frame of 100–250 ms sits between the walk relaxation (tens of ms
 ## 9. Assumptions and limitations
 
 1. **EM split.** $\pi$ and the module statistics are held fixed during updates.
-2. **Mean field.** Flow equals normalised firing rate, and causal pairings occur at a rate proportional to $J_{ij}$ (§2.2). Theorem 3 depends on both. It needs constant $d_j$, global normalisation and balanced (causal minus acausal) pairing counting, and it is untested in spiking.
+2. **Mean field.** Flow equals normalised firing rate, and causal pairings occur at a rate proportional to $J_{ij}$ (§2.2). Theorem 3 depends on both. It needs constant $d_j$, global normalisation and a pairing count that removes chance coincidences (the covariance count, §2.2). In spiking it held approximately: the covariance count's frame-averaged update had cosine 0.992 with $-W \odot \nabla D$ (M1).
 3. **Covariance rule.** (4) is exact only in expectation. Its variance grows with the number of synapses sharing a modulator, which is why modulators are per module and baselines per neuron.
 4. **Coarse-graining.** Module-level $\sigma_K$ lower-bounds the full $\sigma$ and misses irreversibility inside modules. In a test network it captured only 4% of $\sigma$ (0.018 vs. 0.41). $h_K$ has no general ordering with $h$.
 5. **Estimator candidates.** Predictive dissipation and information flow (§5.7–5.8) rely on peripheral estimators with unknown bias.
@@ -656,7 +654,7 @@ In biology, a frame of 100–250 ms sits between the walk relaxation (tens of ms
 10. **Carry-over.** $\rho$ is a free parameter. With $\pi_{f-1}$ held fixed, the gradient ignores the dependence through earlier frames (cosine $0.98$ with the full gradient in a test).
 11. **Number of latent modules.** $\lvert \mathcal{L} \rvert$ is a hyperparameter unless latent modules are re-detected.
 12. **Routing conflict.** The map term starves the controller's routing unless the dual (4a) or an exemption is used (§4.5). $q^{\ast}$ is a free parameter.
-13. **Surrogate policy gradient.** The action-gated eligibility (4b) follows the gradient of the one-step inflow surrogate, not of (1d) exactly (cosine $0.997$ in a test). The TD critic (4c) is linear in module visit rates.
+13. **Surrogate policy gradient.** The action-gated eligibility (4b) follows the gradient of the one-step inflow surrogate, not of (1d) exactly (cosine $0.997$ in a test). The TD critic (4c) is linear in the controller's flow shares.
 14. **Policy family.** (1d) has no temperature, and controller recurrence blurs it (§2.4). The sharpened family (1e) was unstable at the flow level without an entropy floor (M2).
 15. **Carry-over memory.** Linear carry-over forgets geometrically. Holding a cue needs the module-level nonlinearity proposed in §2.3.
 

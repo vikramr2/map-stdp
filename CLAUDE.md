@@ -63,4 +63,6 @@ The SLURM notes below apply only to the campus cluster. On a machine without SLU
   - installs blocked outside the env;
   - an env warning at session start.
 - **Skills:** `/derivation-check` (run before any derivation math change), `/doc-edit`, `/expert-review`, `/changelog`.
+- **Behaviour lock:** `pytest -q tests` runs the module self-checks and fixed-seed closed-loop runs that must match `tests/golden.json` bit for bit. Regenerate it (`python -m tests.test_regression --update`) only for an intended behaviour change, and log it in the CHANGELOG. Lint with `ruff check .` (rules pinned in `ruff.toml`; no `ruff format`).
+- **Agents:** `neuroscientist`, `snn-expert`, `superneuro-expert`, and `codebase-cleaner` (behaviour-preserving cleanup, gated by the behaviour lock).
 - **Plugins:** math-proof, pyright-lsp (pyright is in the env), commit-commands, hookify.

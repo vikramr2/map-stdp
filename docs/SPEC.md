@@ -146,7 +146,7 @@ $$
 
 where:
 
-- $\delta$ is a global TD error from a module-level linear critic (`derivation.md` Eq. 4c);
+- $\delta$ is a global TD error from a linear critic on the controller's flow shares (`derivation.md` Eq. 4c);
 - $e_{ij}$ is a trace of $\kappa_{ij} (h_{m(i)} - \bar{h}_j)$, where the $K$-vector $h$ marks the chosen action (Eq. 4b). Its average is a weight-scaled policy-gradient score. It needs the chosen action broadcast to the action modules, like an efference copy;
 - $\kappa_{ij}$ is the pre→post coincidence, counted in spiking as the covariance count (causal pairings minus the product of spike counts), to cancel chance coincidences (decided in iteration 001);
 - $g_{ij} = \partial D / \partial J_{ij}$ is the **marginal** description cost of the transition, a $K \times K$ module-pair table broadcast per module;
