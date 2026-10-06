@@ -267,7 +267,7 @@ Constraints this places on every rule (see `derivation.md` §6):
 - presynaptic normalisation: output gain $1/d_j$ plus $d_j$ homeostasis as its own term (default, Eq. 4d) vs. homeostasis only vs. inside the structural baseline (v1)
 - task rate: annealed (default) vs. constant
 - policy temperature: Eq. 1d (default) vs. sharpened Eq. 1e (Proposal)
-- exit floor on module sealing (Proposal, M4)
+- latent-output barrier, Eq. 4e (Proposal, M4), against none; the exit floor was rejected in iteration 003
 - encoding: conjunctive (default) vs. per-dimension receptive fields
 - spiking readout: race with burn-in (default) vs. race from step 0 vs. argmax
 - pairing count: covariance (default) vs. causal-only vs. balanced

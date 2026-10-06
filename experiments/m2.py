@@ -7,6 +7,7 @@ Model v2: d_j homeostasis as its own term (EPS_H, every frame), race burn-in BUR
 Model v3 (default): v2 with eta = 10 in both backends, annealed as eta / (1 + episode / ETA_TAU).
 --eta-tau T: task rate annealed as eta / (1 + episode / T) (ablation; 0 = constant).
 --beta: sharpened policy P ~ p_a^beta with the matched score (Eq. 1e, Proposal); flow backend only.
+--la-beta B: latent-output barrier (Eq. 4e, Proposal) subtracted from g on latent->action pairs; 0 (default) is off.
   python -m experiments.m2 --summary   -> results table over seeds (plus the random-policy return)
 Both backends share one frame update; they differ only in where pi, kappa and the action come from:
   flow:    pi = n-hop flow, kappa = J (expected pairings), action ~ Eq. 1d;
@@ -63,7 +64,7 @@ class Agent:
     """Closed-loop Map-STDP agent: structural (Eq. 4) with optional routing dual (Eq. 4a), d_j homeostasis (Eq. 4d)
     and TD task terms (Eqs. 4b, 4c; task rate annealed in v3)."""
 
-    def __init__(self, backend, routing, lam, seed, model="v3", beta=1.0, eta_tau=None):
+    def __init__(self, backend, routing, lam, seed, model="v3", beta=1.0, eta_tau=None, la_beta=0.0):
         self.W, self.m, self.roles, self.mask = core.build_network(SIZES, seed=seed)
         self.K, self.backend, self.routing, self.lam = len(self.roles), backend, routing, lam
         v2 = model in ("v2", "v3")
@@ -71,7 +72,7 @@ class Agent:
             eta_tau = ETA_TAU if model == "v3" else 0.0
         self.eps, self.eps_h, self.burn = (0.0, EPS_H, BURN) if v2 else (EPS, 0.0, 0)
         self.eta = ETA_SPK if model == "v2" and backend == "spiking" else ETA
-        self.beta, self.eta_tau, self.ep = beta, eta_tau, 0
+        self.beta, self.eta_tau, self.ep, self.la_beta = beta, eta_tau, 0, la_beta
         assert beta == 1.0 or backend == "flow", "the race readout has no matched sharpened policy"
         self.A = np.flatnonzero(self.roles == "A")
         self.ctrl = self.roles[self.m] == "C"
@@ -120,6 +121,8 @@ class Agent:
         e = core.eligibility_step(e, self.W, kappa, pi, self.m, self.roles, self.A[a], TAU_E, self.beta)
         if self.lam > 0:
             g = core.modulator(p, q, self.roles, routing=self.routing, mu=self.mu)
+            if self.la_beta > 0:
+                g = g - core.latent_output_barrier(p, JK, self.roles, self.la_beta)
             self.W = core.structural_update(self.W, self.mask, g, kappa, self.m, self.lam, self.eps)
         if self.eps_h > 0:
             self.W = core.homeostasis_update(self.W, self.mask, kappa, self.eps_h)
@@ -185,9 +188,9 @@ class Agent:
         return out
 
 
-def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=None, eta=None):
+def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=None, eta=None, la_beta=0.0):
     """Train for `episodes`, evaluating every LOG_EVERY, and write the m2_*.json result file."""
-    agent, env = Agent(backend, routing, lam, seed, model, beta, eta_tau), gym.make("CartPole-v1")
+    agent, env = Agent(backend, routing, lam, seed, model, beta, eta_tau, la_beta), gym.make("CartPole-v1")
     agent.eta = eta or agent.eta
     returns, evals, t0 = [], [{"episode": 0, **agent.evaluate()}], time.perf_counter()
     for ep in range(1, episodes + 1):
@@ -200,7 +203,7 @@ def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=Non
                   f"persist_LA {ev['persist_LA']:.3f} " + kl + f"{(time.perf_counter() - t0) / 60:.1f} min", flush=True)
     frames = sum(returns)
     res = {"backend": backend, "routing": routing, "lam": lam, "seed": seed, "episodes": episodes, "returns": returns,
-           "model": model, "beta": beta, "eta_tau": agent.eta_tau, "eta_task": agent.eta,
+           "model": model, "beta": beta, "eta_tau": agent.eta_tau, "eta_task": agent.eta, "la_beta": la_beta,
            "evals": evals, "frames": frames, "ms_per_frame": (time.perf_counter() - t0) / frames * 1e3,
            "silent_race_frames": agent.silent, "mu": agent.mu, "q_star": agent.q_star,
            "params": dict(alpha=ALPHA, n=N_HOPS, k=K_SPK, rate=RATE, theta=THETA, eta=ETA, tau_e=TAU_E, gamma=GAMMA,
@@ -209,6 +212,7 @@ def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=Non
     OUT.mkdir(exist_ok=True)
     b = (f"_b{beta:g}" if beta != 1 else "") + (f"_eta{eta:g}" if eta else "")
     b += f"_at{eta_tau:g}" if eta_tau is not None else ""
+    b += f"_lb{la_beta:g}" if la_beta else ""
     (OUT / f"m2_{backend}_{routing}_lam{lam:g}{b}_{model}_s{seed}.json").write_text(json.dumps(res))
     return res
 
@@ -220,7 +224,7 @@ def summary():
     groups = {}
     for f in sorted(glob.glob(str(OUT / "m2_*.json"))):
         r = json.loads(pathlib.Path(f).read_text())
-        var = f"b{r.get('beta', 1.0):g}"
+        var = f"b{r.get('beta', 1.0):g}" + (f",lb{r['la_beta']:g}" if r.get("la_beta") else "")
         if r.get("eta_tau") is not None and r["model"] != "v3":
             var += f",eta{r['eta_task']:g}" + (f",at{r['eta_tau']:g}" if r["eta_tau"] else "")
         groups.setdefault((r.get("model", "v1"), r["backend"], r["routing"], r["lam"], var), []).append(r)
@@ -250,11 +254,12 @@ def main():
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--eta", type=float, default=None, help="override the task rate")
     ap.add_argument("--eta-tau", type=float, default=None, help="override the annealing time constant (0 = constant)")
+    ap.add_argument("--la-beta", type=float, default=0.0, help="latent-output barrier (Eq. 4e, Proposal)")
     ap.add_argument("--summary", action="store_true")
     a = ap.parse_args()
     if a.summary:
         return summary()
-    r = run(a.backend, a.routing, a.lam, a.seed, a.episodes, a.model, a.beta, a.eta_tau, a.eta)
+    r = run(a.backend, a.routing, a.lam, a.seed, a.episodes, a.model, a.beta, a.eta_tau, a.eta, a.la_beta)
     print(f"done: last100 {np.mean(r['returns'][-100:]):.1f}, {r['frames']} frames, {r['ms_per_frame']:.2f} ms/frame")
 
 

@@ -2,6 +2,48 @@
 
 This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. The project is research, so entries are dated rather than versioned. Record decisions and reversals here as well as file changes.
 
+## 2026-10-06
+
+### Added (iteration 003: latent sinks)
+
+- **Finding:** in the trained v3 agent, latent modules are flow sinks. They keep 0.98 of their flow, pass 0.002 to the actions and hold about half the activity.
+  - **The task term causes the latent→action cut,** which also happens at $\lambda = 0$.
+  - **The map term seals latents against the controller and each other,** which is where its CartPole benefit comes from (184 with the map term on actions only, against 287).
+- **Proposal: latent-output barrier, Eq. 4e** (`mapstdp/core.py` `latent_output_barrier`; `experiments/m2.py --la-beta`, default 0).
+  - **Derivation check:** finite differences to 9e-10, Monte Carlo 0.9999. A new self-check covers it.
+  - **Cost on CartPole:** flow 274 ± 24 at $\beta$ 0.15 and 279 ± 22 at 0.3; spiking 171 ± 9 and 155 ± 9, against 287 and 184.
+  - **Effect:** the latent→action share goes from 0.002 to 0.012–0.029. It regrows from sealed weights, and cross-module traffic barely rises.
+  - **Confirmation:** the 20 runs through the repo CLI reproduce the prototype exactly. `pytest`: 9/9, v1–v3 bit-identical.
+- **`docs/derivation.md`:**
+  - **§4.5:** the diagnosis, (4e), the rejected alternatives, and why the (4a) dual diverged (its target was infeasible once modules seal).
+  - **Appendix A:** the checks.
+  - **Appendix B:** item 12.
+- **`docs/model.md`:** a "Latent output" row and the $\beta_{LA}$ parameter.
+- **`docs/SPEC.md`:** the ablations list.
+- **`docs/iterations/003-latent-sinks.md`:** the record.
+
+### Fixed (replay page)
+
+- **Walk hops were overdrawn.** The page drew a hop for every synapse whose pre spiked at $t - 1$ and whose post spiked at $t$. That gave 2.0 hops per spike, and 57% of spikes got several parents. Stimulus input spikes got spurious parents too. The cross-module share came out at 0.31, against a true value of about 0.22.
+  - **Fix:** `sp.run_frame(..., return_ext=True)` now returns which spikes were stimulus input. `m2_viz.walk_hops` gives every other spike exactly one parent, sampled in proportion to $T_{ij}$ among the spikes one step earlier. That is the exact cause posterior in branching mode.
+  - **Check:** input share 0.212 against $\alpha = 0.2$, 0.788 hops per spike, every spike accounted for, and a cross-module share of 0.220 against 0.215 at the flow level.
+- **The page now:**
+  - marks input spikes with a ring;
+  - draws every cross-module synapse with opacity proportional to $\sqrt{T}$, where before it showed only those with $T > 0.04$, which hid the weak latent→action links;
+  - counts each frame's hops: total, between modules, latent→action, and input.
+- **The replay uses the latent-output barrier** (`m2_viz --la-beta 0.3`; seed 4 is the best of 4, with last-100 training return 180). Its 366-frame episode has 3.7% of latent hops ending in an action module. Republished to the same artifact link.
+
+### Changed
+
+- **Decision reversal: the exit-floor Proposal is rejected.** Its dual enters a limit cycle, and its restored exit goes to the controller, not the actions (return 126–196).
+- **Also rejected:**
+  - the latent→action dual (limit cycle);
+  - exemptions into the action modules (no effect, cannot regrow);
+  - occupancy homeostasis (return 108);
+  - a fixed set of output neurons per latent (exits to the controller);
+  - an $M^{\ast}$ clip on latents.
+- **Carried to M4:** credit through the latents and nonlinear carry-over. A $\dot{\theta}$-hidden CartPole test was flat for every variant (44–52).
+
 ## 2026-10-05
 
 ### Changed (expert review of the cleanup)

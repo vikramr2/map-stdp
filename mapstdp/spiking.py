@@ -39,11 +39,12 @@ def tau(leak, theta=0.5):
     return 1 + theta / leak
 
 
-def run_frame(snn, v, k, rate, rng, theta=0.5, use="jit"):
+def run_frame(snn, v, k, rate, rng, theta=0.5, use="jit", return_ext=False):
     """Cold-start frame of k steps (one walk per frame, derivation §2.3 and §8 step 2): snn.reset() zeroes states and
     refractory counters and clears the spike train and queued inputs, then each neuron gets U(-theta, theta) escape
     noise plus amplitude-2 theta teleportation spikes with probability rate * v_i per step. Returns ispikes (exactly
-    this frame's k x N bool raster) and the number of external spikes."""
+    this frame's k x N bool raster) and the number of external spikes, or with return_ext the k x N bool raster of
+    external spikes (each one forces its neuron to spike: state > theta whatever the noise)."""
     N = snn.num_neurons
     ext = rng.random((k, N)) < rate * v
     inp = rng.uniform(-theta, theta, (k, N)) + 2 * theta * ext
@@ -51,7 +52,7 @@ def run_frame(snn, v, k, rate, rng, theta=0.5, use="jit"):
     nids = list(range(N))
     snn.input_spikes = {t: {"nids": nids, "values": inp[t].tolist()} for t in range(k)}
     snn.simulate(k, use=use)
-    return snn.ispikes, int(ext.sum())
+    return snn.ispikes, (ext if return_ext else int(ext.sum()))
 
 
 def pi_hat(S):

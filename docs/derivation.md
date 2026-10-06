@@ -391,9 +391,40 @@ So, once routing is protected, the structural term **helps**: it seals the actio
 | $\lambda = 0$ | 187 ± 15 | 77 ± 4 |
 | $\lambda = 0.05$, routing exempt | **287 ± 21** | **184 ± 13** |
 
-The structural term raises return in both backends. It also drives latent and action modules to near-complete sealing (persistence 0.996 at the flow level, 0.98 in spiking). That is far beyond the intrinsic share of cortical inputs, about 80% [Markov et al. 2011], and without an exit floor it is the map equation's optimum by construction, because leakage always costs bits (§3.3). On CartPole it costs no return. **Proposal: exit floor**, for tasks that need latent→action paths (M4). It is a per-module dual, $g_{ba} = (M^{\ast}_a - \nu_a) \mathbb{I}[b \ne a]$ with $\nu_a \leftarrow \max(0, \nu_a + \eta_\nu (q_{min} p_a - q_a))$. It is still a $K \times K$ table but needs `/derivation-check` before adoption.
+The structural term raises return in both backends. It also drives latent and action modules to near-complete sealing (persistence 0.996 at the flow level, 0.98 in spiking). That is far beyond the intrinsic share of cortical inputs, about 80% [Markov et al. 2011], and without an exit floor it is the map equation's optimum by construction, because leakage always costs bits (§3.3). On CartPole it costs no return.
 
-**Dual (4a) in the closed loop.** With $q^{\ast} = 0.75 J_{route}(W_0)$, $\mu$ never settles: it ends at 2600–8400, because the map term keeps $J_{route}$ just below $q^{\ast}$. The dual then acts as strong routing potentiation, not as a constraint at its target. It was within one sd of the exemption in v1 (276 ± 26 vs. 258 ± 21), and worse in v2 (240 ± 52 vs. 261 ± 21).
+**Latent modules become sinks (iteration 003).** The latents hold about half the flow but pass almost none to the actions: in the trained network, the share of a latent module's flow going to the action modules is 0.002, against 0.105 at initialisation. The sealing has two sources (preliminary, flow level, 5 seeds):
+
+- **The task term removes latent→action flow,** even at $\lambda = 0$, where the share falls to 0.002 within 50 episodes. Latent flow does not depend on the stimulus, so it only dilutes (1d), and the policy gradient prunes it.
+- **The map term seals latents against other latents and the controller.** That is where the structural term's benefit comes from. At $\lambda = 0$ latents send 0.19 of their flow back into the controller and blur its stimulus code. With the map term applied to action modules only, return falls to the $\lambda = 0$ level (184 vs. 187).
+
+**Proposal: latent-output barrier.** A directed fix keeps that sealing and gives each latent module a path to the actions:
+
+$$
+D_\beta = D - \beta \sum_{\ell \in \mathcal{L}} \mathbb{E}_f \left[ p_\ell \ln J_{\mathcal{A} \ell} \right], \qquad g_{ba} = M^{\ast}_a \mathbb{I}[b \ne a] - \beta \frac{p_a}{J_{\mathcal{A} a}} \mathbb{I}[a \in \mathcal{L}, b \in \mathcal{A}] \qquad \text{(4e)}
+$$
+
+Here $J_{\mathcal{A} \ell} = \sum_{b \in \mathcal{A}} J_{b \ell}$. The modulator is still a $K \times K$ table, and (5) and Theorem 3 apply to $D_\beta$ unchanged (Appendix A). It has no dual variable. Its marginal cost grows like $1 / J_{\mathcal{A} \ell}$, while $M^{\ast}$ grows only like $\log (1 / q)$, so an interior fixed point always exists. The growing modulator also cancels the vanishing pairing rate, so the barrier regrows latent→action synapses from an already sealed network (share 0.006 → 0.029 in 500 episodes at $\beta = 0.3$).
+
+Rejected alternatives (preliminary, flow return against 287 ± 21):
+
+- **Per-module exit floor** (a dual $\nu_a$ on each module's exit rate): the dual entered a limit cycle, and the restored exit went to the controller and other latents rather than the actions (return 126–196).
+- **A dual on $J_{\mathcal{A} \ell}$:** also a limit cycle (161–192).
+- **A log-barrier on each latent's total exit:** no dual, but undirected. Its exit went to the controller (285 at strength 0.5; 170 at 1.5).
+- **Exempting latent→action pairs, or all inputs to action modules:** no effect. The share stayed at 0.002, because the exempt synapses cannot regrow.
+- **Per-module occupancy homeostasis** (108) and **a fixed set of output neurons per latent module** (254, exits to the controller).
+
+On CartPole, latent→action flow carries no stimulus information, so (4e) trades return for latent output:
+
+| $\beta$ | Latent→action share | Flow | Spiking |
+| --- | --- | --- | --- |
+| 0 | 0.002 | 287 ± 21 | 184 ± 13 |
+| 0.15 | 0.012 | 274 ± 24 | 171 ± 9 |
+| 0.3 | 0.029 | 279 ± 22 | 155 ± 9 |
+
+Cross-module flow stays near its sealed level (0.208 at $\beta = 0.3$, against 0.195 at $\beta = 0$ and 0.474 at $\lambda = 0$). (4e) is a Proposal for M4. It is necessary there, not sufficient. In a CartPole test with $\dot{\theta}$ hidden and carry-over $\rho = 0.5$ (1b), every variant stayed at 44–52. The fixed-flow score (4b) gives no credit to controller→latent or latent→latent synapses, and linear carry-over forgets (§2.3).
+
+**Dual (4a) in the closed loop.** With $q^{\ast} = 0.75 J_{route}(W_0)$, $\mu$ never settles: it ends at 2600–8400. The target is infeasible: once latents and actions are sealed, $J_{route}$ can be at most about $p_{\mathcal{C}} \approx 0.20$, below $q^{\ast} = 0.207$ (iteration 003). The dual then acts as strong routing potentiation, not as a constraint at its target. It was within one sd of the exemption in v1 (276 ± 26 vs. 258 ± 21), and worse in v2 (240 ± 52 vs. 261 ± 21).
 
 **Schedule.** In these tests a constant $\lambda$ from frame 0 beat $\lambda = 0$, so the ramp is now an ablation.
 
@@ -760,6 +791,16 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
 - the sharpened score of (1e) with $\beta = 3$: the expected eligibility increment ($\kappa = J$) equals $W \odot \partial \log \tilde{P}_\beta / \partial W$ by finite differences to $\le 10^{-6}$ on every synapse, as for $\beta = 1$ (80-neuron network);
 - homeostasis (4d): in a spiking Monte Carlo (2000 frames, $d_j$ spread over $[0.6, 2]$), the average update has cosine 0.992 with its expectation $-\epsilon_h (d_j - 1) \pi_j W_{ij} / d_j$. The fitted per-column factor correlates 0.995 with the prediction (preliminary; `snn-expert`).
 
+**Numerical checks for the latent-output barrier (4e) and the rejected alternatives** (iteration 003; `fdcheck.py`, random 16-node network: a controller of 4 and 2 latent and 2 action modules of 3; $\alpha = 0.2$; 6 stimuli; Monte Carlo of $4000$ frames of $200$ sampled pairings):
+
+- **(4e):**
+  - Eq. 5 matches finite differences of $D_\beta$ to $\le 9 \times 10^{-10}$.
+  - The three-factor Monte Carlo correlates $0.9999$ with $-W \odot \nabla D_\beta$, against $0.92$ with the plain map gradient.
+  - The cosine of the fixed-flow gradient with the full-resolvent gradient is $0.934$ at $\beta = 0.3$ and $0.816$ at $\beta = 1$, because $p_\ell$ depends on $W$ through $\pi$.
+  - The `mapstdp/core.py` self-check repeats the finite-difference check at $\beta = 0.3$ on the 80-neuron network.
+- **Rejected alternatives** (the exit floor, the dual on $J_{\mathcal{A} \ell}$, and a log-barrier on each latent's total exit): Eq. 5 matches to $\le 8 \times 10^{-10}$, and the Monte Carlo correlation is $\ge 0.9998$.
+- **The routing exemption, as implemented with $M^{\ast}$ from the full $q$, is not an exact gradient:** maximum error $7 \times 10^{-3}$, cosine $0.985$. It is exact when $M^{\ast}$ uses exit rates that exclude the exempt pairs.
+
 ## Appendix B: Corrections to the earlier derivation
 
 1. **Sign error.** The earlier version expanded $L(M)$ with $+$ on its second and third terms; both are negative. The gradient's log factor becomes $M^{\ast}_m = \log \frac{q_{\curvearrowright}(p_m+q_m)}{q_m^2} \ge 0$, not $\log \frac{q_{\curvearrowright}}{p_m+q_m} \le 0$.
@@ -794,6 +835,11 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
     - **Annealed task rate** (§8).
     - **M2 results, sealing caveat, exit-floor Proposal, and dual behaviour** (§4.5).
     - **Biology.** Notes on $\bar{h}_j$ locality and on the $\tau_e$ timescale (§4.6).
+12. **Iteration 003, latent sinks (2026-10-06).**
+    - **Diagnosis.** Latent modules became flow sinks. The task term cuts latent→action flow, and the map term seals latents against the controller and other latents (§4.5).
+    - **Proposal: the latent-output barrier (4e).** It replaces the exit-floor Proposal, which was rejected because its dual does not converge and its exit is not directed to the actions.
+    - **Dual (4a).** Its target was infeasible once modules seal (§4.5).
+    - **Exemptions.** The routing exemption is a heuristic, not an exact gradient (Appendix A).
 
 
 ## References

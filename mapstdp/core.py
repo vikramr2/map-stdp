@@ -110,6 +110,15 @@ def modulator(p, q, roles, clip=20.0, routing="none", mu=0.0):
     return g
 
 
+def latent_output_barrier(p, JK, roles, beta):
+    """Latent-output barrier (Eq. 4e, Proposal): K x K table with beta p_a / J_{A a} on pairs a in L, b in A, else 0.
+    Subtracted from g, it is the marginal cost of -beta sum_{l in L} p_l log J_{A l} (pi fixed), so a latent module's
+    flow into the action modules is pushed up as it nears 0 and never reaches it."""
+    L, A = roles == "L", roles == "A"
+    b = np.where(L, beta * p / np.maximum(JK[A].sum(0), 1e-12), 0.0)
+    return A[:, None] * b[None, :]
+
+
 def j_route(JK, roles):
     """Controller routing flow J_route = sum over b in A, L of J_{bC} (Eq. 4a)."""
     return float(JK[route_pairs(roles)].sum())
@@ -210,6 +219,15 @@ if __name__ == "__main__":  # self-check: Eq. 1a bound, Eq. 7 vs finite differen
             E = np.zeros_like(W)
             E[i, j] = h
             assert abs(W[i, j] * (logP(W + E) - logP(W - E)) / (2 * h) - inc[i, j]) < 1e-6
+    def D_lb(W_, beta=0.3):  # Eq. 4e: L - beta sum_L p_l ln J_{A l}, pi fixed; Eq. 5 with g - latent_output_barrier
+        p_, q_, JK_, _ = module_stats(W_, pi, m, K)
+        return L(W_) - beta * (p_ * np.log(np.maximum(JK_[roles == "A"].sum(0), 1e-300)))[roles == "L"].sum()
+    gl = modulator(p, q, roles, clip=np.inf) - latent_output_barrier(p, JK, roles, 0.3)
+    glb = centered(gl, W, m) * pi / W.sum(0)
+    for i, j in zip(*np.nonzero(mask)):
+        E = np.zeros_like(W)
+        E[i, j] = h
+        assert abs((D_lb(W + E) - D_lb(W - E)) / (2 * h) - glb[i, j]) < 1e-6
     W2 = structural_update(W * 1.5, mask, 0 * g, np.ones_like(W), m, 0.1, eps=1.0)  # homeostasis pulls d_j to 1
     assert (np.abs(W2.sum(0) - 1) < np.abs(1.5 * W.sum(0) - 1)).all()
     W3 = homeostasis_update(W * 1.5, mask, np.ones_like(W), 0.1)

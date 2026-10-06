@@ -43,7 +43,8 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 
 | Item | Current form | Status |
 | --- | --- | --- |
-| Structural modulator | Map equation, $g_{ba} = M^{\ast}_a \mathbb{I}[b \ne a]$, with $M^{\ast}$ clipped at 20. $\lambda = 0.05$, constant from frame 0. In spiking, $\lambda$ is divided by the spikes per frame, keeping the per-count $\lambda \lesssim 5 \times 10^{-4}$. It seals latent and action modules (persistence 0.98–0.996) at no cost to CartPole return; an exit floor is a Proposal for M4 (derivation §4.5). | impl (M2) |
+| Structural modulator | Map equation, $g_{ba} = M^{\ast}_a \mathbb{I}[b \ne a]$, with $M^{\ast}$ clipped at 20. $\lambda = 0.05$, constant from frame 0. In spiking, $\lambda$ is divided by the spikes per frame, keeping the per-count $\lambda \lesssim 5 \times 10^{-4}$. It seals latent and action modules (persistence 0.98–0.996) at no cost to CartPole return. Latents become flow sinks: the task term cuts latent→action flow and the map term seals latents against the controller (iteration 003). | impl (M2) |
+| Latent output | Barrier (Eq. 4e), $-\beta_{LA} p_a / J_{\mathcal{A} a}$ subtracted from $g$ on latent→action pairs; `--la-beta`, off by default. On CartPole at $\beta_{LA} = 0.3$ it raises the latent→action share from 0.002 to 0.029, with flow return 279 ± 22 and spiking 155 ± 9. Candidates for M4 are 0.15 and 0.3. It replaces the exit-floor Proposal, which was rejected: its dual does not converge and its exit is not directed to the actions. | Proposal |
 | Routing protection | **Exempt** (default): $g = 0$ on controller→latent/action pairs, so the controller acts as an input layer. Ablations: none (collapses learning in the closed loop) and dual (Eq. 4a, $q^{\ast} = 0.75 J_{route}(W_0)$, $\eta_\mu = 2$; $\mu$ diverges, see iteration 002). | impl (M2) |
 | $d_j$ homeostasis | **Its own term** (Eq. 4d), $-\epsilon_h (d_j - 1) \kappa_{ij}$ with $\epsilon_h = 5$, every frame, independent of $\lambda$. Its expectation is a uniform column rescaling, so $T$ and $D$ are unchanged. It holds $d_{max} \le 1.04$ in v3 (v1: up to 19). Abstraction: fast heterosynaptic plasticity; the biological evidence is for postsynaptic, not presynaptic, conservation. | impl (M2) |
 | Task eligibility | $e_{ij} \leftarrow (1 - 1/\tau_e) e_{ij} + \kappa_{ij} (h_{m(i)} - \bar{h}_j)$ (Eq. 4b), $\tau_e = 3$ frames. | impl (M2) |
@@ -58,6 +59,7 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 | $\lambda$, $\epsilon_h$ | structural rate, $d_j$ homeostasis rate | 0.05, 5 |
 | $\eta$, $\tau_\eta$, $\tau_e$ | task rate, its annealing time constant (episodes), eligibility time constant (frames) | 10, 300, 3 |
 | $b$ | race burn-in (steps) | 10 |
+| $\beta_{LA}$ | latent-output barrier (Eq. 4e, Proposal) | 0 (off) |
 | $\gamma$, $\eta_V$ | discount, critic rate (NLMS) | 0.99, 0.1 |
 | $\theta$, input rate, $k$ | spiking noise, input rate, frame window | 0.5, 1.0, 100 |
 | $w_{min}$, $w_{max}$, $M^{\ast}$ clip | bounds | $10^{-3}$, 1, 20 |
