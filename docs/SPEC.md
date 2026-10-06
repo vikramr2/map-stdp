@@ -1,6 +1,6 @@
 # Map-STDP Project Spec
 
-Status: implementation. M1 is done (iteration 001); the current model is in [`model.md`](model.md), and iterations are logged in [`iterations/`](iterations/). The math lives in [`derivation.md`](derivation.md), and changes are logged in [`CHANGELOG.md`](CHANGELOG.md).
+Status: implementation. M1 and M2 are done (iterations 001 and 002); the current model is in [`model.md`](model.md), and iterations are logged in [`iterations/`](iterations/). The math lives in [`derivation.md`](derivation.md), and changes are logged in [`CHANGELOG.md`](CHANGELOG.md).
 
 Each consideration below states the user's direction first. Items marked **Proposal** are candidate approaches that have not been decided. **Open** items are unresolved.
 
@@ -173,7 +173,17 @@ Why this form:
 | routing pairs exempt | 0.693 |
 | dual term | 0.762 |
 
-**Schedule.** Constant $\lambda = 0.05$ from frame 0 beat $\lambda = 0$ in the flow-level tests, so the ramp is an ablation.
+**M2 result (iteration 002, model v3, 5 seeds, flow level), mean of the last 100 of 1500 episodes:**
+
+| Routing | Return |
+| --- | --- |
+| none | 39 ± 11 |
+| exempt (default) | 287 ± 21 |
+| dual | 327 ± 46 |
+
+$\lambda = 0$ gives 187 ± 15. The dual's $\mu$ never settles (2600–8900), so it acts as routing potentiation rather than a constraint. Its lead over the exemption is about one sd and was reversed in v2. Exemption stays the default; the dual stays a Proposal until $q^{\ast}$ is learned or $\mu$ converges.
+
+**Schedule.** Constant $\lambda = 0.05$ from frame 0 beat $\lambda = 0$ in the flow-level tests, so the ramp is an ablation. The task rate $\eta$ is annealed (model v3).
 
 **Candidates** (`derivation.md` §5 has the modulator, pointwise cost and caveats for each):
 
@@ -254,9 +264,12 @@ Constraints this places on every rule (see `derivation.md` §6):
 - task term: action-gated vs. plain eligibility; TD vs. $R - \bar{R}$
 - routing: dual term vs. exemption vs. none
 - $\lambda$ schedule: constant (default) vs. ramped
-- presynaptic normalisation: output gain $1/d_j$ plus $d_j$ homeostasis (default) vs. homeostasis only
+- presynaptic normalisation: output gain $1/d_j$ plus $d_j$ homeostasis as its own term (default, Eq. 4d) vs. homeostasis only vs. inside the structural baseline (v1)
+- task rate: annealed (default) vs. constant
+- policy temperature: Eq. 1d (default) vs. sharpened Eq. 1e (Proposal)
+- exit floor on module sealing (Proposal, M4)
 - encoding: conjunctive (default) vs. per-dimension receptive fields
-- spiking readout: race vs. argmax
+- spiking readout: race with burn-in (default) vs. race from step 0 vs. argmax
 - pairing count: covariance (default) vs. causal-only vs. balanced
 - exact-gradient baseline (additive $G$)
 - cost-modulated rule per candidate
@@ -274,7 +287,7 @@ Constraints this places on every rule (see `derivation.md` §6):
 | --- | --- | --- |
 | M0 | Docs: corrected derivation, spec, changelog; reformulated around communities as states | Done (2026-09-27, reformulated 2026-10-04) |
 | M1 | **Done 2026-10-05** ([iteration 001](iterations/001-m1.md)). Numpy flow-level reference, plus SuperNeuroMAT rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking error against window length (in units of $\tau/\alpha$) reported; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; pairing counts regressed on $J_{ij}$ and $r_i r_j$; no silent or runaway runs |
-| M2 | CartPole, closed loop (numpy reference first, then SuperNeuroMAT) | Beats random policy; dual term vs. exemption vs. none compared; modules persist; policy from $T^K$ agrees with the spiking race readout |
+| M2 | **Done 2026-10-05** ([iteration 002](iterations/002-m2.md); model v3: flow 287 ± 21, spiking 184 ± 13, random 22). CartPole, closed loop (numpy reference first, then SuperNeuroMAT) | Beats random policy; dual term vs. exemption vs. none compared; modules persist; policy from $T^K$ agrees with the spiking race readout |
 | M3 | Acrobot, MountainCar, LunarLander | Runs end to end; returns reported for all ablations; wall-clock informs the simulator decision |
 | M4 | Partially observable task with latent communities and carry-over | Carry-over beats $\rho = 0$; latent chain predicts the next latent state |
 | M5 | Modulator comparison (§6): all candidates | Candidates scored on the five criteria |

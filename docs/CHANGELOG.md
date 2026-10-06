@@ -4,6 +4,59 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## 2026-10-05
 
+### Added (visualisation)
+
+- **`experiments/m2_viz.py` and `experiments/m2_viz_template.html`:** a replay page of a trained spiking v3 agent. The left pane shows spikes and walk hops on the network, with the controller drawn as its 6×6 (θ, θ̇) grid and the race winner marked; the right pane shows CartPole. Commands:
+  - `train` saves the weights (`m2_viz_W_s<seed>.npz`; seeds 1–4 have last-100 returns of 193, 143, 207 and 192);
+  - `record` keeps the best of 20 frozen-weight episodes (seed 3: 302 frames);
+  - `page` embeds the recorded episode into the template.
+
+### Changed (environment)
+
+- **Local workstation env:** Miniforge in `~/miniforge3`, with the `map-stdp` env created from `environment.yml` plus katex, pyright and CodeGraph 1.6.2 (telemetry off). The math hook, the self-checks and the CodeGraph index (148 nodes) work there. The M2 runs used a scratchpad venv with the same packages before this env existed.
+- **`CLAUDE.md` and `environment.yml`:** the "environment.yml is stale" note is removed; the file already lists the current stack. The setup comments now cover any machine as well as the cluster.
+
+### Added (iteration 002: M2 done)
+
+- **M2 results.** 110 runs, 5 seeds × 1500 episodes each, run locally on a 72-core workstation with no SLURM; results are in `experiments/results/m2_*_{v1,v2,v3}_s*.json`. Model v3, mean of the last 100 episodes, against a random policy of 22:
+  - **Flow:** exempt 287 ± 21, dual 327 ± 46, none 39 ± 11, $\lambda = 0$ 187 ± 15.
+  - **Spiking:** exempt 184 ± 13, $\lambda = 0$ 77 ± 4.
+  - **Race vs. Eq. 1d:** KL 0.010, against a sampling floor of 0.010.
+
+  All M2 criteria are met; SPEC §11 marks M2 done. Full record: `docs/iterations/002-m2.md` (v1 baseline, reviews, v2, annealing test, v3, outcome).
+- **Reviews** by `snn-expert` (spiking diagnostics) and `neuroscientist` (plausibility), merged in the iteration record.
+- **Code:**
+  - `mapstdp/core.py`:
+    - `homeostasis_update` (Eq. 4d);
+    - `beta` in `policy`, `action_score` and `eligibility_step`, for the sharpened policy (Eq. 1e). The self-check now verifies the $\beta = 3$ score against finite differences.
+  - `mapstdp/spiking.py`: `race(..., burn)`, with a self-check.
+  - `experiments/m2.py`:
+    - `--model {v1,v2,v3}` (default v3), `--beta`, `--eta`, `--eta-tau`;
+    - the variant goes into the result filename;
+    - `--summary` groups by model and variant.
+
+  The v1 result files were renamed with a `_v1` suffix.
+- **`docs/derivation.md`:**
+  - **§2.2:** homeostasis as its own term (4d); weak-synapse rectification does not depend on the floor value; soft bounds (**Proposal**).
+  - **§2.4:** the race equals (1d) only after relaxation, so a burn-in is adopted; sharpened policy (1e) (**Proposal**).
+  - **§4.5:** M2 numbers; sealing caveat (persistence 0.996 against about 80% intrinsic input in cortex); exit-floor dual (**Proposal**, M4); the dual's $\mu$ diverges.
+  - **§4.6:** $\bar{h}_j$ is presynaptic; the $\tau_e$ timescale.
+  - **§8:** burn-in, (4d) and annealing in the training loop.
+  - **§9, item 14:** updated.
+  - **Appendix A:** iteration-002 checks.
+  - **Appendix B:** item 11.
+  - **References** (each checked by the `neuroscientist`): Chistiakova et al. 2014, Frank 2006, Gold & Shadlen 2007, Gurney et al. 2015, Markov et al. 2011, Royer & Paré 2003, Turrigiano et al. 1998, van Rossum et al. 2000, Zenke & Gerstner 2017.
+
+### Changed (model v1 → v3, `docs/model.md`)
+
+- **Decision: $d_j$ homeostasis is its own term on all plasticity** (Eq. 4d, $\epsilon_h = 5$, independent of $\lambda$), not part of the structural baseline. Inside $\lambda$ it was about 100× too weak, and it vanished at $\lambda = 0$. The task term ratcheted $d_{max}$ to 13 (flow) and 19 (spiking). Now $d_{max} \le 1.04$. Its expectation is still a column rescaling: spiking Monte Carlo cosine 0.992 (preliminary).
+- **Decision: race burn-in of 10 steps.** Without it, the race read the cold-start transient (KL 0.022 against a floor of 0.010). With it, KL is at the floor.
+- **Decision: anneal the task rate,** $\eta = 10$ decayed as $\eta / (1 + e/300)$ over episodes, in both backends (v3). v2 used a constant rate with spiking $\eta = 5$, and its return fell: spiking 140 → 120, flow at $\lambda = 0$ 210 → 145. The v1 ratchet had acted as hidden annealing. Constant $\eta = 10$ gives spiking 88, annealed gives 184.
+- **Decision: routing exemption stays the default.** The dual is within about one sd ($t = 1.6$, $p = 0.15$), its order relative to the exemption flipped between v2 and v3, and its $\mu$ never converges.
+- **Rejected for now: the sharpened policy (Eq. 1e).** At the flow level it collapsed on 3 of 5 seeds at $\beta = 4$ and on 1 of 5 at $\beta = 2$. It stays a **Proposal**, needing an entropy floor and a matched spiking readout.
+- **Deferred: the exit floor on module sealing.** Sealing costs no return on CartPole (`snn-expert`), but it is implausible as anatomy (`neuroscientist`). Revisit at M4.
+- **`docs/SPEC.md`:** status line, M2 marked done, the M2 routing results, and ablations (homeostasis placement, task-rate schedule, temperature, exit floor, race burn-in).
+
 ### Added (implementation, iteration 001: M1)
 
 - **Code:**

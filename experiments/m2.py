@@ -1,7 +1,12 @@
 """M2 (docs/SPEC.md §11): CartPole in closed loop with Map-STDP, model v1 (docs/model.md).
 Run from the repo root:
   python -m experiments.m2 --backend {flow,spiking} --routing {exempt,none,dual} --lam 0.05 --seed 0 --episodes 1500
-    -> experiments/results/m2_<backend>_<routing>_lam<lam>_s<seed>.json
+    [--model {v1,v2,v3}] [--beta B]   -> experiments/results/m2_<backend>_<routing>_lam<lam>[_b<B>]_<model>_s<seed>.json
+Model v1 (iteration 002 baseline): eps inside lambda, race from step 0, eta = 10.
+Model v2: d_j homeostasis as its own term (EPS_H, every frame), race burn-in BURN steps, spiking eta = 5.
+Model v3 (default): v2 with eta = 10 in both backends, annealed as eta / (1 + episode / ETA_TAU).
+--eta-tau T: task rate annealed as eta / (1 + episode / T) (ablation; 0 = constant).
+--beta: sharpened policy P ~ p_a^beta with the matched score (Eq. 1e, Proposal); flow backend only.
   python -m experiments.m2 --summary   -> results table over seeds (plus the random-policy return)
 Both backends share one frame update; they differ only in where pi, kappa and the action come from:
   flow:    pi = n-hop flow, kappa = J (expected pairings), action ~ Eq. 1d;
@@ -21,6 +26,8 @@ from mapstdp import spiking as sp
 
 ALPHA, N_HOPS, K_SPK, RATE, THETA = 0.2, 20, 100, 1.0, 0.5
 ETA, TAU_E, GAMMA, ETA_V, EPS, ETA_MU = 10.0, 3.0, 0.99, 0.1, 1.0, 2.0
+ETA_SPK, EPS_H, BURN = 5.0, 5.0, 10  # v2: spiking task rate, d_j homeostasis rate (own term), race burn-in (steps)
+ETA_TAU = 300.0  # v3: task-rate annealing time constant (episodes)
 SIZES, LOG_EVERY = (36, 16, 16, 16, 16), 50
 OUT = pathlib.Path(__file__).parent / "results"
 
@@ -51,9 +58,15 @@ def random_return(episodes=1000, seed=0):
 
 
 class Agent:
-    def __init__(self, backend, routing, lam, seed):
+    def __init__(self, backend, routing, lam, seed, model="v3", beta=1.0, eta_tau=None):
         self.W, self.m, self.roles, self.mask = core.build_network(SIZES, seed=seed)
         self.K, self.backend, self.routing, self.lam = len(self.roles), backend, routing, lam
+        v2 = model in ("v2", "v3")
+        eta_tau = (ETA_TAU if model == "v3" else 0.0) if eta_tau is None else eta_tau
+        self.eps, self.eps_h, self.burn = (0.0, EPS_H, BURN) if v2 else (EPS, 0.0, 0)
+        self.eta = ETA_SPK if model == "v2" and backend == "spiking" else ETA
+        self.beta, self.eta_tau, self.ep = beta, eta_tau, 0
+        assert beta == 1.0 or backend == "flow", "the race readout has no matched sharpened policy"
         self.A = np.flatnonzero(self.roles == "A")
         self.C = self.roles[self.m] == "C"
         self.groups = [np.flatnonzero(self.m == a) for a in self.A]
@@ -73,9 +86,9 @@ class Agent:
         if self.backend == "flow":
             pi = core.flow(W, v, ALPHA, N_HOPS)
             p = np.bincount(self.m, pi, self.K)
-            return pi, W / W.sum(0) * pi, int(self.rng.choice(len(self.A), p=core.policy(p, self.roles)))
+            return pi, W / W.sum(0) * pi, int(self.rng.choice(len(self.A), p=core.policy(p, self.roles, self.beta)))
         S = self.spike_frame(v)
-        a = sp.race(S, self.groups, self.rng)
+        a = sp.race(S, self.groups, self.rng, self.burn)
         if a is None:
             self.silent, a = self.silent + 1, int(self.rng.integers(len(self.A)))
         return sp.pi_hat(S), sp.pairings(S)[2] / max(S.sum(), 1), a
@@ -93,10 +106,12 @@ class Agent:
         x, e, R, done = self.feats(pi), 0.0, 0, False
         while not done:
             p, q, JK, _ = core.module_stats(self.W, pi, self.m, self.K)
-            e = core.eligibility_step(e, self.W, kappa, pi, self.m, self.roles, self.A[a], TAU_E)
+            e = core.eligibility_step(e, self.W, kappa, pi, self.m, self.roles, self.A[a], TAU_E, self.beta)
             if self.lam > 0:
                 g = core.modulator(p, q, self.roles, routing=self.routing, mu=self.mu)
-                self.W = core.structural_update(self.W, self.mask, g, kappa, self.m, self.lam, EPS)
+                self.W = core.structural_update(self.W, self.mask, g, kappa, self.m, self.lam, self.eps)
+            if self.eps_h > 0:
+                self.W = core.homeostasis_update(self.W, self.mask, kappa, self.eps_h)
             if self.routing == "dual":
                 self.mu = max(0.0, self.mu + ETA_MU * (self.q_star - core.j_route(JK, self.roles)))
             o, r, term, trunc, _ = env.step(a)
@@ -105,8 +120,10 @@ class Agent:
             x2 = self.feats(pi)
             delta = (-1.0 if term else 0.0) + (0.0 if term else GAMMA * self.u @ x2) - self.u @ x
             self.u += ETA_V * delta * x / (x @ x)  # NLMS
-            self.W = core.clip_weights(self.W + ETA * delta * e, self.mask)
+            eta = self.eta / (1 + self.ep / self.eta_tau) if self.eta_tau else self.eta
+            self.W = core.clip_weights(self.W + eta * delta * e, self.mask)
             x = x2
+        self.ep += 1
         return R
 
     def evaluate(self, kl_obs=20, kl_reps=50):
@@ -119,7 +136,7 @@ class Agent:
             pi = core.flow(W, v, ALPHA, N_HOPS)
             p, q, JK, _ = core.module_stats(W, pi, m, self.K)
             rows.append([core.map_equation(p, q, pi), q[self.roles == "C"][0], p[self.A].sum(), core.j_route(JK, self.roles)])
-            P1d.append(core.policy(p, self.roles))
+            P1d.append(core.policy(p, self.roles, self.beta))
         out = dict(zip(("D", "q_C", "p_A", "J_route"), np.mean(rows, 0).tolist()))
         out.update(persist_C=float(persist[self.roles == "C"].mean()), persist_LA=float(persist[self.roles != "C"].mean()),
                    persist=persist.tolist(), d_max=float(W.sum(0).max()), P1d_mean_right=float(np.mean(P1d, 0)[1]))
@@ -127,7 +144,7 @@ class Agent:
             kl, l1, floor = [], [], []
             smooth = lambda n: (n + 0.5) / (kl_reps + 1)  # noqa: E731 (add-1/2 estimate of the race policy)
             for v, P in zip(self.held[:kl_obs], P1d):
-                races = [sp.race(self.spike_frame(v), self.groups, self.rng) for _ in range(kl_reps)]
+                races = [sp.race(self.spike_frame(v), self.groups, self.rng, self.burn) for _ in range(kl_reps)]
                 Q = smooth(np.bincount([r for r in races if r is not None], minlength=len(self.A)))
                 kl.append(float((P * np.log(P / Q)).sum()))
                 l1.append(float(np.abs(P - Q).sum()))
@@ -137,8 +154,9 @@ class Agent:
         return out
 
 
-def run(backend, routing, lam, seed, episodes):
-    agent, env = Agent(backend, routing, lam, seed), gym.make("CartPole-v1")
+def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=None, eta=None):
+    agent, env = Agent(backend, routing, lam, seed, model, beta, eta_tau), gym.make("CartPole-v1")
+    agent.eta = eta or agent.eta
     returns, evals, t0 = [], [{"episode": 0, **agent.evaluate()}], time.perf_counter()
     for ep in range(1, episodes + 1):
         returns.append(agent.episode(env))
@@ -149,12 +167,15 @@ def run(backend, routing, lam, seed, episodes):
                   + f"{(time.perf_counter() - t0) / 60:.1f} min", flush=True)
     frames = sum(returns)
     res = {"backend": backend, "routing": routing, "lam": lam, "seed": seed, "episodes": episodes, "returns": returns,
+           "model": model, "beta": beta, "eta_tau": agent.eta_tau, "eta_task": agent.eta,
            "evals": evals, "frames": frames, "ms_per_frame": (time.perf_counter() - t0) / frames * 1e3,
            "silent_race_frames": agent.silent, "mu": agent.mu, "q_star": agent.q_star,
            "params": dict(alpha=ALPHA, n=N_HOPS, k=K_SPK, rate=RATE, theta=THETA, eta=ETA, tau_e=TAU_E, gamma=GAMMA,
-                          eta_v=ETA_V, eps=EPS, eta_mu=ETA_MU, sizes=SIZES)}
+                          eta_v=ETA_V, eps=agent.eps, eps_h=agent.eps_h, burn=agent.burn, eta_task=agent.eta,
+                          beta=beta, eta_tau=agent.eta_tau, eta_mu=ETA_MU, sizes=SIZES)}
     OUT.mkdir(exist_ok=True)
-    (OUT / f"m2_{backend}_{routing}_lam{lam:g}_s{seed}.json").write_text(json.dumps(res))
+    b = (f"_b{beta:g}" if beta != 1 else "") + (f"_eta{eta:g}" if eta else "") + (f"_at{eta_tau:g}" if eta_tau is not None else "")
+    (OUT / f"m2_{backend}_{routing}_lam{lam:g}{b}_{model}_s{seed}.json").write_text(json.dumps(res))
     return res
 
 
@@ -164,14 +185,16 @@ def summary():
     groups = {}
     for f in sorted(glob.glob(str(OUT / "m2_*.json"))):
         r = json.loads(pathlib.Path(f).read_text())
-        groups.setdefault((r["backend"], r["routing"], r["lam"]), []).append(r)
+        var = f"b{r.get('beta', 1.0):g}" + ("" if r.get("eta_tau") is None or r["model"] == "v3" else
+                                             f",eta{r['eta_task']:g}" + (f",at{r['eta_tau']:g}" if r["eta_tau"] else ""))
+        groups.setdefault((r.get("model", "v1"), r["backend"], r["routing"], r["lam"], var), []).append(r)
     cols = ("D", "J_route", "p_A", "persist_LA", "persist_C", "d_max", "KL_1d_race", "KL_floor")
     print("return: mean +- sd over seeds of per-seed mean return; metrics: seed-mean at episode 0 > final eval (sd)")
-    print(f"{'backend':8} {'routing':7} {'lam':>5} {'n':>2} {'epis':>5} {'ret first100':>13} {'ret last100':>13} "
+    print(f"{'model':5} {'backend':8} {'routing':7} {'lam':>5} {'variant':>14} {'n':>2} {'epis':>5} {'ret first100':>13} {'ret last100':>13} "
           + " ".join(f"{c:>18}" for c in cols))
     ms = lambda x: f"{np.mean(x):6.1f}+-{np.std(x):5.1f}"  # noqa: E731
-    for (b, ro, lam), rs in sorted(groups.items()):
-        line = f"{b:8} {ro:7} {lam:5g} {len(rs):2} {min(r['episodes'] for r in rs):5} " \
+    for (mo, b, ro, lam, be), rs in sorted(groups.items()):
+        line = f"{mo:5} {b:8} {ro:7} {lam:5g} {be:>14} {len(rs):2} {min(r['episodes'] for r in rs):5} " \
                f"{ms([np.mean(r['returns'][:100]) for r in rs])} {ms([np.mean(r['returns'][-100:]) for r in rs])}"
         for c in cols:
             if c in rs[0]["evals"][-1]:
@@ -187,11 +210,15 @@ def main():
     ap.add_argument("--lam", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--episodes", type=int, default=1500)
+    ap.add_argument("--model", choices=("v1", "v2", "v3"), default="v3")
+    ap.add_argument("--beta", type=float, default=1.0)
+    ap.add_argument("--eta", type=float, default=None, help="override the task rate")
+    ap.add_argument("--eta-tau", type=float, default=None, help="override the annealing time constant (0 = constant)")
     ap.add_argument("--summary", action="store_true")
     a = ap.parse_args()
     if a.summary:
         return summary()
-    r = run(a.backend, a.routing, a.lam, a.seed, a.episodes)
+    r = run(a.backend, a.routing, a.lam, a.seed, a.episodes, a.model, a.beta, a.eta_tau, a.eta)
     print(f"done: last100 {np.mean(r['returns'][-100:]):.1f}, {r['frames']} frames, {r['ms_per_frame']:.2f} ms/frame")
 
 

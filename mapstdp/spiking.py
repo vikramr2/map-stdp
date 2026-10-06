@@ -51,10 +51,11 @@ def pi_hat(S):
     return c / max(c.sum(), 1.0)
 
 
-def race(S, groups, rng):
+def race(S, groups, rng, burn=0):
     """Race readout (derivation §2.4): index of the group (list of neuron-index arrays) that spikes first in the
-    frame; ties within a step split in proportion to that step's spike counts. None if no group spikes."""
-    cnt = np.stack([S[:, g].sum(1) for g in groups], 1)
+    frame at or after step `burn` (skips the cold-start transient, so the race matches Eq. 1d); ties within a step
+    split in proportion to that step's spike counts. None if no group spikes."""
+    cnt = np.stack([S[burn:, g].sum(1) for g in groups], 1)
     t = np.flatnonzero(cnt.sum(1))
     if not len(t):
         return None
@@ -84,4 +85,5 @@ if __name__ == "__main__":  # self-check: W_snm orientation and lag-1 causal cou
     assert C[1, 0] == 9 and B[1, 0] == 9 - C[0, 1] and np.isclose(V[1, 0], 9 - 10 * 9 * 9 / 100)
     r = race(np.array([[0, 0, 0], [0, 0, 1], [1, 1, 0]], bool), [[0, 1], [2]], np.random.default_rng(0))
     assert r == 1 and race(np.zeros((3, 3), bool), [[0], [1]], None) is None
+    assert race(np.array([[0, 0, 1], [0, 0, 1], [1, 1, 0]], bool), [[0, 1], [2]], np.random.default_rng(0), burn=2) == 0
     print("spiking self-check ok")

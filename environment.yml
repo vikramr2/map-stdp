@@ -1,6 +1,9 @@
-# Project env. Lives on scratch to stay off the /u file quota:
-#   CONDA_PKGS_DIRS=/scratch/vikramr2/conda/pkgs conda env create -p /scratch/vikramr2/conda/envs/map-stdp -f environment.yml
-#   then: npm install -g --cache /scratch/vikramr2/conda/npm-cache katex pyright @colbymchenry/codegraph@1.6.2
+# Project env.
+#   Any machine:    conda env create -f environment.yml && conda activate map-stdp
+#   Campus cluster (stay off the /u file quota):
+#     CONDA_PKGS_DIRS=/scratch/vikramr2/conda/pkgs conda env create -p /scratch/vikramr2/conda/envs/map-stdp -f environment.yml
+#   Then, with the env active: npm install -g katex pyright @colbymchenry/codegraph@1.6.2 && codegraph telemetry off
+#   (on the cluster add --cache /scratch/vikramr2/conda/npm-cache)
 name: map-stdp
 channels:
   - conda-forge

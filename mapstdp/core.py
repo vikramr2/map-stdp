@@ -75,9 +75,9 @@ def module_stats(W, pi, m, K):
     return p, q, JK, TK
 
 
-def policy(p, roles):
-    """Eq. 1d: action-module flow shares."""
-    pa = p[roles == "A"]
+def policy(p, roles, beta=1.0):
+    """Eq. 1d: action-module flow shares; beta != 1 is the sharpened policy p_a^beta / sum p^beta (Proposal, Eq. 1e)."""
+    pa = p[roles == "A"] ** beta
     return pa / pa.sum()
 
 
@@ -129,19 +129,28 @@ def structural_update(W, mask, g, kappa, m, lam, eps=0.0, wmin=1e-3, wmax=1.0):
     return clip_weights(W - lam * (centered(g, W, m) + eps * (W.sum(0) - 1)) * kappa, mask, wmin, wmax)
 
 
-def action_score(W, pi, m, roles, a):
-    """h_b of Eq. 4b (score of the surrogate policy J^in_a / sum_A J^in) for chosen action module a, as a
+def action_score(W, pi, m, roles, a, beta=1.0):
+    """h_b of Eq. 4b (score of the surrogate policy (J^in_a)^beta / sum_A (J^in)^beta) for chosen action module a:
+    h_b = beta (I[b = a] - P_beta(b)) / J^in_b on action modules, 0 elsewhere; beta = 1 is Eq. 4b. Returned as a
     K x K table tab[b, a'] = h_b, ready for centered()."""
-    K = len(roles)
+    K, A = len(roles), roles == "A"
     Jin = np.bincount(m, (W / W.sum(0) * pi).sum(1), K)
-    h = np.where(roles == "A", -1 / Jin[roles == "A"].sum(), 0.0)
-    h[a] += 1 / Jin[a]
+    P = np.zeros(K)
+    P[A] = Jin[A] ** beta / (Jin[A] ** beta).sum()
+    h = np.where(A, -beta * P / np.where(A, Jin, 1.0), 0.0)
+    h[a] += beta / Jin[a]
     return np.repeat(h[:, None], K, 1)
 
 
-def eligibility_step(e, W, kappa, pi, m, roles, a, tau_e=3.0):
+def eligibility_step(e, W, kappa, pi, m, roles, a, tau_e=3.0, beta=1.0):
     """Eq. 4b: e <- (1 - 1/tau_e) e + kappa_ij (h_m(i) - hbar_j)."""
-    return (1 - 1 / tau_e) * e + kappa * centered(action_score(W, pi, m, roles, a), W, m)
+    return (1 - 1 / tau_e) * e + kappa * centered(action_score(W, pi, m, roles, a, beta), W, m)
+
+
+def homeostasis_update(W, mask, kappa, eps_h, wmin=1e-3, wmax=1.0):
+    """d_j homeostasis as its own term on all plasticity (model v2): W -= eps_h (d_j - 1) kappa_ij. Its expectation
+    -eps_h (d_j - 1) pi_j W_ij / d_j rescales column j uniformly, so T, pi and D are unchanged."""
+    return clip_weights(W - eps_h * (W.sum(0) - 1) * kappa, mask, wmin, wmax)
 
 
 def additive_G_update(W, mask, m, roles, eta, routing="none"):
@@ -189,15 +198,18 @@ if __name__ == "__main__":  # self-check: Eq. 1a bound, Eq. 7 vs finite differen
     r = np.corrcoef(mean_dW[mask], (-W * gr * 500)[mask])[0, 1]
     assert r > 0.99, r
     a = int(np.flatnonzero(roles == "A")[0])  # Eq. 4b: expected increment (kappa = J) = W * dlog P~/dW, pi fixed
-    def logP(W_):
-        Jin = np.bincount(m, (W_ / W_.sum(0) * pi).sum(1), K)
-        return np.log(Jin[a] / Jin[roles == "A"].sum())
-    inc = eligibility_step(0, W, J, pi, m, roles, a, tau_e=1.0)
-    for i, j in zip(*np.nonzero(mask)):
-        E = np.zeros_like(W); E[i, j] = h
-        assert abs(W[i, j] * (logP(W + E) - logP(W - E)) / (2 * h) - inc[i, j]) < 1e-6
+    for beta in (1.0, 3.0):  # beta = 3: the sharpened score (Eq. 1e, Proposal)
+        def logP(W_):
+            Jin = np.bincount(m, (W_ / W_.sum(0) * pi).sum(1), K)[roles == "A"] ** beta
+            return np.log(Jin[0] / Jin.sum())
+        inc = eligibility_step(0, W, J, pi, m, roles, a, tau_e=1.0, beta=beta)
+        for i, j in zip(*np.nonzero(mask)):
+            E = np.zeros_like(W); E[i, j] = h
+            assert abs(W[i, j] * (logP(W + E) - logP(W - E)) / (2 * h) - inc[i, j]) < 1e-6
     W2 = structural_update(W * 1.5, mask, 0 * g, np.ones_like(W), m, 0.1, eps=1.0)  # homeostasis pulls d_j to 1
     assert (np.abs(W2.sum(0) - 1) < np.abs(1.5 * W.sum(0) - 1)).all()
+    W3 = homeostasis_update(W * 1.5, mask, np.ones_like(W), 0.1)
+    assert (np.abs(W3.sum(0) - 1) < np.abs(1.5 * W.sum(0) - 1)).all()
     Wc, mc, rc, _ = build_network((36, 4, 4), "CLA")
     vc = cartpole_stimulus([0, 0, 0.21, -3.5], mc, rc)  # theta at +max, theta_dot at -max: grid cell (5, 0)
     assert np.isclose(vc.sum(), 1) and vc.argmax() == 30

@@ -27,7 +27,7 @@ Research question: can a spiking network's communities serve as its states, givi
 
 ## Environment
 
-The planned spiking simulator is **SuperNeuroMAT** (ORNL; see SPEC §3), with a numpy flow-level reference run first. Brian2 is only a fallback. `docs/superneuro` is the SuperNeuro reference submodule (README and tutorials). `environment.yml` is stale: it still lists the old PyTorch/snntorch/tonic stack. Update it when implementation starts. Never install packages globally without asking; use a scratchpad `--target` or a venv for experiments.
+The planned spiking simulator is **SuperNeuroMAT** (ORNL; see SPEC §3), with a numpy flow-level reference run first. Brian2 is only a fallback. `docs/superneuro` is the SuperNeuro reference submodule (README and tutorials). `environment.yml` lists the current stack (numpy, scipy, numba, gymnasium, superneuromat 3.5.0, Node.js); the npm tools are listed at its top. Never install packages globally without asking; use a scratchpad `--target` or a venv for experiments.
 
 **Machines.** Work moves between machines. Paths in the hooks and MCP config resolve from the active env, so any machine needs only:
 
@@ -50,10 +50,10 @@ The SLURM notes below apply only to the campus cluster. On a machine without SLU
 - **Monitoring.** Check jobs with `squeue -u $USER`, or `sacct -j <id>` after they finish.
 - **Recording.** Put the job ID and the command in the iteration record in `docs/iterations/`.
 
-**Tooling.** The `map-stdp` conda env lives at `/scratch/vikramr2/conda/envs/map-stdp`, off `/u`, which has a 500k-file quota. It has Python 3.11, Node.js and the packages in `environment.yml`.
+**Tooling.** The `map-stdp` conda env has Python 3.11, Node.js and the packages in `environment.yml`. On the campus cluster it lives at `/scratch/vikramr2/conda/envs/map-stdp`, off `/u`, which has a 500k-file quota. On the local workstation it is `~/miniforge3/envs/map-stdp` (Miniforge in the home directory).
 
-- `conda activate map-stdp` resolves to it through `envs_dirs` in `~/.condarc`.
-- For installs, set `CONDA_PKGS_DIRS=/scratch/vikramr2/conda/pkgs`, and use `pip --no-cache-dir` and `npm --cache /scratch/vikramr2/conda/npm-cache`, so caches stay off `/u`.
+- On the cluster, `conda activate map-stdp` resolves to it through `envs_dirs` in `~/.condarc`.
+- On the cluster, for installs, set `CONDA_PKGS_DIRS=/scratch/vikramr2/conda/pkgs`, and use `pip --no-cache-dir` and `npm --cache /scratch/vikramr2/conda/npm-cache`, so caches stay off `/u`.
 
 - **ponytail** (project-scope plugin, `.claude/settings.json`): a least-code skill. Its hooks run `node`, so run `conda activate map-stdp` before launching `claude`.
 - **CodeGraph** (project-scope MCP server, `.mcp.json`; telemetry off): a code-intelligence index. The index lives in `.codegraph/`, which is gitignored by its own `.gitignore`. Run `codegraph sync` after large changes.
