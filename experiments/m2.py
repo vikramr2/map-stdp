@@ -14,6 +14,7 @@ Both backends share one frame update; they differ only in where pi, kappa and th
   spiking: pi = spike shares, kappa = covariance count / spikes in the frame, action = race readout.
 Dividing kappa by the frame's spike count is the 1/(spikes per frame) scaling of lambda and eta (model.md §4)."""
 import argparse
+import dataclasses
 import glob
 import json
 import pathlib
@@ -30,6 +31,9 @@ ALPHA, N_HOPS, K_SPK, RATE, THETA = 0.2, 20, 100, 1.0, 0.5
 ETA, TAU_E, GAMMA, ETA_V, EPS, ETA_MU = 10.0, 3.0, 0.99, 0.1, 1.0, 2.0
 ETA_SPK, EPS_H, BURN = 5.0, 5.0, 10  # v2: spiking task rate, d_j homeostasis rate (own term), race burn-in (steps)
 ETA_TAU = 300.0  # v3: task-rate annealing time constant (episodes)
+TD_TAU = 1000.0  # --td-norm (Proposal): time constant (frames) of the running mean square of delta
+RICH_N = 256  # ablation critic='rich': RFs on the full observation (tasks 'pool' encoder)
+RICH_MR = (np.zeros(RICH_N, int), np.array(["C"]))  # module labels / roles for a stand-alone RF layer
 Q_STAR_FRAC = 0.75  # dual routing target q* as a fraction of the held-out mean J_route at W_0 (Eq. 4a)
 LOG_EVERY = 50  # module sizes are per task (tasks.Task.sizes; CartPole 36, 16, 16, 16, 16)
 OUT = pathlib.Path(__file__).parent / "results"
@@ -53,14 +57,24 @@ def random_return(episodes=1000, seed=0, task=TASKS["CartPole"]):
     return float(np.mean(R)), float(np.std(R))
 
 
+def rich_critic(task):
+    """A 'pool' encoder with RICH_N centers over the task's full observation (critic='rich' ablation)."""
+    return dataclasses.replace(task, n_ctrl=RICH_N, encoder="pool", enc={})
+
+
 class Agent:
     """Closed-loop Map-STDP agent: structural (Eq. 4) with optional routing dual (Eq. 4a), d_j homeostasis (Eq. 4d)
     and TD task terms (Eqs. 4b, 4c; task rate annealed in v3). task: a tasks.TASKS key (M3); heads: H parallel
     spiking replicas on shared W whose spikes are pooled for pi, kappa and the race (Proposal, spiking only)."""
 
     def __init__(self, backend, routing, lam, seed, model="v3", beta=1.0, eta_tau=None, la_beta=0.0,
-                 task="CartPole", heads=1, engine="snm"):
+                 task="CartPole", heads=1, engine="snm", td_norm=0.0, ablate=None):
         self.task, self.heads, self.engine = TASKS[task], heads, engine
+        ab = dict(wmin=1e-3, tau_e=TAU_E, critic="ctrl") | (ablate or {})  # M3 learning-rule ablations (iteration 005)
+        self.ablate, self.wmin, self.tau_e = ab, ab["wmin"], ab["tau_e"]
+        self.rich = rich_critic(self.task) if ab["critic"] == "rich" else None
+        self.td_norm, self.td_ms, self.frames = td_norm, td_norm ** 2, 0  # td_ms starts at the reference: no rescale
+        self.stats = dict(n=0, td_abs=0.0, td_sq=0.0, td_task_abs=0.0, V_min=np.inf, V_max=-np.inf)
         assert heads == 1 or backend == "spiking", "heads are spiking replicas"
         assert engine in ("snm", "numpy"), "numpy: sp.run_heads, the batched branching step (same raster as snm)"
         self.W, self.m, self.roles, self.mask = core.build_network(self.task.sizes, self.task.roles, seed=seed)
@@ -77,7 +91,7 @@ class Agent:
         self.groups = [np.flatnonzero(self.m == a) for a in self.A]
         self.race_groups = sp.head_groups(self.groups, heads, len(self.m))
         self.rng = np.random.default_rng(seed)
-        self.u, self.mu, self.silent = np.zeros(self.ctrl.sum()), 0.0, 0
+        self.u, self.mu, self.silent = np.zeros(self.ctrl.sum() if self.rich is None else RICH_N), 0.0, 0
         self.held = [self.stim(o) for o in held_out_obs(task=self.task)]
         self.snn, self.live = None, False  # live after q_star, so this evaluate() runs no races, draws nothing from rng
         self.q_star = Q_STAR_FRAC * self.evaluate()["J_route"]  # ponytail: fixed, learn it if dual matters
@@ -113,8 +127,11 @@ class Agent:
         sp.set_weights(self.snn, sp.tile_heads(self.W, self.heads), 1 - ALPHA)  # output gain (1 - alpha) / d_j
         return sp.run_frame(self.snn, np.tile(v, self.heads), K_SPK, RATE, self.rng, THETA)[0]
 
-    def feats(self, pi):
-        """Critic features x = pi_C / p_C (controller flow shares), so V = u . x."""
+    def feats(self, pi, o=None):
+        """Critic features x = pi_C / p_C (controller flow shares), so V = u . x. Ablation critic='rich': RICH_N
+        Gaussian RFs on the full observation, outside the network (diagnostic only: is the critic the bottleneck?)."""
+        if self.rich is not None:
+            return self.rich.stim(o, *RICH_MR)[:RICH_N]
         return pi[self.ctrl] / max(pi[self.ctrl].sum(), 1e-12)
 
     def pre_td_updates(self, pi, kappa, a, e):
@@ -123,14 +140,14 @@ class Agent:
         structural term (Eq. 4); d_j homeostasis (Eq. 4d); routing dual mu (Eq. 4a, from the pre-update JK).
         Mutates self.W and self.mu; returns the updated trace e."""
         p, q, JK, _ = core.module_stats(self.W, pi, self.m, self.K)
-        e = core.eligibility_step(e, self.W, kappa, pi, self.m, self.roles, self.A[a], TAU_E, self.beta)
+        e = core.eligibility_step(e, self.W, kappa, pi, self.m, self.roles, self.A[a], self.tau_e, self.beta)
         if self.lam > 0:
             g = core.modulator(p, q, self.roles, routing=self.routing, mu=self.mu)
             if self.la_beta > 0:
                 g = g - core.latent_output_barrier(p, JK, self.roles, self.la_beta)
-            self.W = core.structural_update(self.W, self.mask, g, kappa, self.m, self.lam, self.eps)
+            self.W = core.structural_update(self.W, self.mask, g, kappa, self.m, self.lam, self.eps, self.wmin)
         if self.eps_h > 0:
-            self.W = core.homeostasis_update(self.W, self.mask, kappa, self.eps_h)
+            self.W = core.homeostasis_update(self.W, self.mask, kappa, self.eps_h, self.wmin)
         if self.routing == "dual":
             self.mu = max(0.0, self.mu + ETA_MU * (self.q_star - core.j_route(JK, self.roles)))
         return e
@@ -149,19 +166,50 @@ class Agent:
         each walk)."""
         o, _ = env.reset(seed=int(self.rng.integers(1 << 30)))
         pi, kappa, a = self.frame(self.stim(o))
-        x, e, R, done = self.feats(pi), 0.0, 0, False
+        x, e, R, done = self.feats(pi, o), 0.0, 0, False
         while not done:
             e = self.pre_td_updates(pi, kappa, a, e)
             o, r, term, trunc, _ = env.step(a)
             R, done = R + r, term or trunc
             pi, kappa, a = self.frame(self.stim(o))
-            x2 = self.feats(pi)
+            x2 = self.feats(pi, o)
+            V = self.u @ x
             delta = self.critic_step(x, x2, term, r)
+            d_task = self.td_scale(delta)
             eta = self.eta / (1 + self.ep / self.eta_tau) if self.eta_tau else self.eta
-            self.W = core.clip_weights(self.W + eta * delta * e, self.mask)
+            self.W = core.clip_weights(self.W + eta * d_task * e, self.mask, self.wmin)
             x = x2
+            self.frames += 1
+            st = self.stats
+            st["n"], st["td_abs"], st["td_sq"] = st["n"] + 1, st["td_abs"] + abs(delta), st["td_sq"] + delta ** 2
+            st["td_task_abs"] += abs(d_task)
+            st["V_min"], st["V_max"] = min(st["V_min"], V), max(st["V_max"], V)
         self.ep += 1
         return R
+
+    def td_scale(self, delta):
+        """Task-term TD error. --td-norm s (Proposal): delta * s / RMS(delta), the RMS a running mean square over
+        TD_TAU frames, so the task update has RMS s on every task (s = CartPole's RMS keeps eta's M2 calibration).
+        One scalar gain on the broadcast modulator; the critic still learns from the raw delta. 0 = off (M2)."""
+        if not self.td_norm:
+            return delta
+        self.td_ms += (delta ** 2 - self.td_ms) / TD_TAU
+        return delta * self.td_norm / np.sqrt(self.td_ms)
+
+    def diagnostics(self):
+        """Training and policy diagnostics since the last call (never touches rng or W): TD error |delta| and RMS, the
+        task-term |delta|, critic V range, share of synapses at the weight bounds, and on the held-out stimuli the
+        mean Eq. 1d policy, its mean entropy (bits) and the mean largest action probability."""
+        st, n = self.stats, max(self.stats["n"], 1)
+        P = np.array([core.policy(np.bincount(self.m, core.flow(self.W, v, ALPHA, N_HOPS), self.K), self.roles,
+                                  self.beta) for v in self.held])
+        w = self.W[self.mask]
+        out = dict(td_abs=st["td_abs"] / n, td_rms=float(np.sqrt(st["td_sq"] / n)), td_task_abs=st["td_task_abs"] / n,
+                   V_min=float(st["V_min"]), V_max=float(st["V_max"]), frac_wmin=float((w <= 1e-3 + 1e-12).mean()),
+                   frac_wmax=float((w >= 1 - 1e-12).mean()), P_mean=P.mean(0).tolist(),
+                   P_entropy=float(-(P * np.log2(P)).sum(1).mean()), P_max=float(P.max(1).mean()))
+        self.stats = dict(n=0, td_abs=0.0, td_sq=0.0, td_task_abs=0.0, V_min=np.inf, V_max=-np.inf)
+        return out
 
     def evaluate(self, kl_obs=20, kl_reps=50):
         """Flow-level metrics on held-out stimuli; spiking adds KL(Eq. 1d || race) on kl_obs held-out stimuli.
@@ -195,23 +243,26 @@ class Agent:
 
 
 def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=None, eta=None, la_beta=0.0,
-        task="CartPole", heads=1, name=None, engine="snm"):
-    """Train for `episodes`, evaluating every LOG_EVERY, and write the result file (default name m2_*.json)."""
-    agent = Agent(backend, routing, lam, seed, model, beta, eta_tau, la_beta, task, heads, engine)
+        task="CartPole", heads=1, name=None, engine="snm", td_norm=0.0, ablate=None):
+    """Train for `episodes`, evaluating every LOG_EVERY (evaluate() plus diagnostics()), and write the result file
+    (default name m2_*.json)."""
+    agent = Agent(backend, routing, lam, seed, model, beta, eta_tau, la_beta, task, heads, engine, td_norm, ablate)
     env = gym.make(agent.task.env_id)
     agent.eta = eta or agent.eta
-    returns, evals, t0 = [], [{"episode": 0, **agent.evaluate()}], time.perf_counter()
+    returns, evals, t0 = [], [{"episode": 0, **agent.evaluate(), **agent.diagnostics()}], time.perf_counter()
     for ep in range(1, episodes + 1):
         returns.append(agent.episode(env))
         if ep % LOG_EVERY == 0:
-            evals.append({"episode": ep, **agent.evaluate()})
+            evals.append({"episode": ep, **agent.evaluate(), **agent.diagnostics()})
             ev = evals[-1]
             kl = f"KL {ev['KL_1d_race']:.3f} " if backend == "spiking" else ""
             print(f"ep {ep} last50 {np.mean(returns[-50:]):.1f} D {ev['D']:.3f} p_A {ev['p_A']:.3f} "
-                  f"persist_LA {ev['persist_LA']:.3f} " + kl + f"{(time.perf_counter() - t0) / 60:.1f} min", flush=True)
-    frames = sum(returns)
+                  f"persist_LA {ev['persist_LA']:.3f} H(P) {ev['P_entropy']:.2f} |td| {ev['td_abs']:.3f} "
+                  f"d_max {ev['d_max']:.2f} " + kl + f"{(time.perf_counter() - t0) / 60:.1f} min", flush=True)
+    frames = agent.frames
     res = {"backend": backend, "routing": routing, "lam": lam, "seed": seed, "episodes": episodes, "returns": returns,
            "model": model, "beta": beta, "eta_tau": agent.eta_tau, "eta_task": agent.eta, "la_beta": la_beta,
+           "td_norm": td_norm, "ablate": ablate or {},
            "evals": evals, "frames": frames, "ms_per_frame": (time.perf_counter() - t0) / frames * 1e3,
            "silent_race_frames": agent.silent, "mu": agent.mu, "q_star": agent.q_star,
            "params": dict(alpha=ALPHA, n=N_HOPS, k=K_SPK, rate=RATE, theta=THETA, eta=ETA, tau_e=TAU_E, gamma=GAMMA,

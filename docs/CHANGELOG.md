@@ -2,6 +2,32 @@
 
 This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. The project is research, so entries are dated rather than versioned. Record decisions and reversals here as well as file changes.
 
+## 2026-10-20
+
+### Added (iteration 005: M3 tasks, spiking heads, learner limits)
+
+- **M3 tasks:** `experiments/tasks.py` registry (CartPole, MountainCar, Acrobot, LunarLander): module sizes, encoder, reward, episodes. `core.rbf_stimulus` (stable conjunctive RFs at arbitrary centers). CartPole encoder and reward are bit-identical to M2.
+- **`experiments/m3.py`:** per-task runs on either backend, `--summary`, `--fidelity`, `--ablations`; flags `--heads`, `--engine`, `--td-norm`, `--eta-tau`, `--wmin`, `--tau-e`, `--critic`.
+- **Proposal: parallel spiking heads** (`spiking.tile_heads`, `head_groups`, `pooled`; `m2.Agent(heads=H)`): H replicas on shared W, spikes pooled for $\hat{\pi}$, $\kappa$ and one race. $\hat{\pi}$ error against flow falls as $1/\sqrt{H}$ (0.35 → 0.089 at H = 16, CartPole). The return sweep has not been run.
+- **Batched spiking engine** `spiking.run_heads`: raster-identical to SuperNeuroMAT (new self-check), 7–13× faster at H = 16. M3 default; M2 stays on SuperNeuroMAT. `spiking.set_inputs` writes SuperNeuroMAT's input array directly; `build` pins `sparse = False` (the jit backend is dense-only).
+- **Proposal: TD normalisation** `--td-norm s`. At $s = 0.04$ it fixes the Acrobot collapse (−374 ± 156 → −128 ± 7); neutral on CartPole, MountainCar, LunarLander.
+- **`Agent.diagnostics()`** logged with every eval (TD error, critic range, weights at bounds, policy entropy and sharpness). `Agent(ablate=...)` for learning-rule ablations.
+- **`experiments/ceiling.py`:** policy-class ceiling by CEM. Free $R$ with Eq. 1d reaches CartPole 465, MountainCar −150, Acrobot −90 against learned 205, −183, −133 (seed 0); sharp readouts add more.
+- **Results:** `experiments/results/m3_*.json` (flow, all tasks, ± `--td-norm`, CartPole and Acrobot ablations), `ceiling_*.json`, `m3_fidelity.json`.
+- **Environment:** `box2d-py`, `pygame` in `environment.yml` and the `map-stdp` env.
+- **Docs:** `docs/iterations/005-m3-tasks-heads.md`; `docs/model.md` rows (M3 stimulus, heads, engine, M3 reward, TD normalisation) and history; CLAUDE.md code and commands; SPEC M3 row.
+
+### Fixed
+
+- **Frame count in `m2.run`** was `sum(returns)`, wrong for negative-reward tasks; now counted per frame. CartPole results unchanged.
+
+### Changed (decisions)
+
+- **Diagnosis:** Map-STDP converges to a poor $R$ (the actions × controller matrix of the flow policy); the network can express much sharper votes, and Eq. 1d's stochasticity is a second cap. Latent memory is not the bottleneck on these fully observed tasks.
+- **Rejected as fixes** (CartPole, Acrobot, 5 seeds): constant or slower task-rate annealing, a higher weight floor (it hurts: pruning to the floor is how the policy sharpens), longer eligibility, a richer critic.
+- **Next:** an ideal actor-critic on $R$ with the same signals, then the spiking heads sweep.
+- **Known issue:** `tests/golden.json` fails on the Mac workstation even at a clean HEAD (last-bit BLAS differences against the cluster); not regenerated. This iteration was checked against fingerprints of HEAD generated on the same machine: bit-identical.
+
 ## 2026-10-06
 
 ### Added (iteration 003: latent sinks)

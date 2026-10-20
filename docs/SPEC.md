@@ -288,7 +288,7 @@ Constraints this places on every rule (see `derivation.md` §6):
 | M0 | Docs: corrected derivation, spec, changelog; reformulated around communities as states | Done (2026-09-27, reformulated 2026-10-04) |
 | M1 | **Done 2026-10-05** ([iteration 001](iterations/001-m1.md)). Numpy flow-level reference, plus SuperNeuroMAT rule prototype on a small graph with controller, latent and action modules (no task) | Implicit per-frame walk matches power iteration; spiking error against window length (in units of $\tau/\alpha$) reported; $L(M)$ decreases under the cost-modulated rule and the exact-gradient baseline; pairing counts regressed on $J_{ij}$ and $r_i r_j$; no silent or runaway runs |
 | M2 | **Done 2026-10-05** ([iteration 002](iterations/002-m2.md); model v3: flow 287 ± 21, spiking 184 ± 13, random 22). CartPole, closed loop (numpy reference first, then SuperNeuroMAT) | Beats random policy; dual term vs. exemption vs. none compared; modules persist; policy from $T^K$ agrees with the spiking race readout |
-| M3 | Acrobot, MountainCar, LunarLander | Runs end to end; returns reported for all ablations; wall-clock informs the simulator decision |
+| M3 | **In progress** ([iteration 005](iterations/005-m3-tasks-heads.md)). Acrobot, MountainCar, LunarLander; parallel spiking heads (Proposal) | Runs end to end; returns reported for all ablations; wall-clock informs the simulator decision |
 | M4 | Partially observable task with latent communities and carry-over | Carry-over beats $\rho = 0$; latent chain predicts the next latent state |
 | M5 | Modulator comparison (§6): all candidates | Candidates scored on the five criteria |
 | M6 | Scale-up: hierarchical/multilevel map equation, richer architectures, deferred vision track | Open |

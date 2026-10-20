@@ -17,6 +17,7 @@ Status tags:
 | Weights | $W_{ij} \ge 0$, pre $j$ → post $i$, bounded in $[10^{-3}, 1]$. $T = W/d$. In SuperNeuroMAT, `W_snm = (1-α)·(W/d).T`, so the output gain is $1/d_j$. | impl (M1) |
 | Initialisation | SBM: $p_{same} = 0.5$, controller recurrence $p_{cc} = 0.1$, controller→latent/action routing $p_{route} = 0.3$, other cross links $p_{cross} = 0.05$. Initial $d_j = 1$. | impl (M1) |
 | Stimulus | **Conjunctive** Gaussian receptive fields. For CartPole: a 6×6 grid over $(\theta/0.21, \dot{\theta}/3.5)$, clipped to $[-1, 1]$, $\sigma = 0.4$, $v$ normalised. Per-dimension fields cap the policy at about 84 steps. Abstraction: choosing $(\theta, \dot{\theta})$ is designer feature selection, and a full grid scales exponentially; random sparse conjunctive fields are the scaling path. | impl (M2) |
+| Stimulus (M3 tasks) | `experiments/tasks.py`. MountainCar: 6×6 grid over (position, velocity) normalised by the bounds, $\sigma = 0.4$. Acrobot, LunarLander: 64 conjunctive RFs at centers drawn from 20000 random-policy states, observation z-scored by that pool, $\sigma$ the median nearest-center distance (the random sparse conjunctive fields above). One action module of 16 per action; two latents of 16. | Proposal |
 | Excitation/inhibition | Excitatory only. **No plausibility claim** until per-module inhibitory (PV-like) pools with inhibitory STDP replace the software normalisation (derivation §7). | abstraction |
 
 ## 2. Per-frame flow (one walk per frame)
@@ -27,6 +28,8 @@ Status tags:
 | Carry-over | Eq. 1b, $\rho = 0$. | Proposal |
 | Spiking mode | **Branching:** `leak=inf`, uniform threshold noise $U(-\theta, \theta)$ with $\theta = 0.5$, so $P(\text{spike}) = u/(2\theta)$ is linear. Teleportation is Bernoulli input at rate $1.0 \cdot v_i$. Mean rate ≈0.057 per neuron per step. Abstraction: one step ≈ 3–10 ms, valid at ≤0.05 spikes per neuron per step. The branching ratio $1-\alpha = 0.8$ is much more subcritical than cortex (≈0.98). | impl (M1) |
 | Frame window | $k = 100$ steps. Module error ≈ $1.3 / \sqrt{S_{mod}}$, with $S_{mod}$ the spikes per module per frame; about 170 spikes per module give 0.1. Finite leak has a 0.09–0.15 error floor and is not used. | impl (M1) |
+| Parallel heads | $H$ independent spiking replicas on the shared W (`--heads`). Spikes are pooled: $\hat{\pi}$ from summed counts, $\kappa$ the sum of per-head covariance counts over total spikes, one race over all heads (still Eq. 1d). One update per frame. $\hat{\pi}$ error falls as $1/\sqrt{H}$ (iteration 005); effect on return not yet measured. | Proposal |
+| Spiking engine | SuperNeuroMAT (default, M2), or `sp.run_heads`: the branching-mode step batched over heads, raster-identical to SuperNeuroMAT (self-check), 7–13× faster. M3 default. | impl |
 | Pairings $\kappa$ | **Covariance count** $C_{ij} - c_i c_j (k-1)/k^2$: lag-1 causal pairings minus the product of spike counts. It correlates 0.91 with $J$, and its average update has cosine 0.992 with $-W \odot \nabla D$. Causal-only is an ablation; balanced is dropped (cosine 0.847). Biological variant (Proposal): subtract slow pre/post traces online. | impl (M1) |
 
 ## 3. Readout and state model
@@ -49,6 +52,8 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 | $d_j$ homeostasis | **Its own term** (Eq. 4d), $-\epsilon_h (d_j - 1) \kappa_{ij}$ with $\epsilon_h = 5$, every frame, independent of $\lambda$. Its expectation is a uniform column rescaling, so $T$ and $D$ are unchanged. It holds $d_{max} \le 1.04$ in v3 (v1: up to 19). Abstraction: fast heterosynaptic plasticity; the biological evidence is for postsynaptic, not presynaptic, conservation. | impl (M2) |
 | Task eligibility | $e_{ij} \leftarrow (1 - 1/\tau_e) e_{ij} + \kappa_{ij} (h_{m(i)} - \bar{h}_j)$ (Eq. 4b), $\tau_e = 3$ frames. | impl (M2) |
 | Task modulator | TD error $\delta_f = r_f + \gamma V_{f+1} - V_f$, $\gamma = 0.99$. Critic $V = u \cdot \pi_{\mathcal{C}} / p_{\mathcal{C}}$, a readout of controller flow shares, trained by NLMS with $\eta_V = 0.1$. Reward −1 on termination, 0 otherwise, bootstrapping on truncation. | impl (M2) |
+| Task reward (M3) | CartPole −1 on termination; MountainCar and Acrobot $0.1 r$; LunarLander $0.01 r$ (environment reward $r$). | Proposal |
+| TD normalisation | `--td-norm s`: the task term uses $\delta s / \mathrm{RMS}(\delta)$, running mean square over 1000 frames; the critic learns from the raw $\delta$. $s = 0.04$ is CartPole's RMS $\delta$. Fixes the Acrobot collapse (−374 ± 156 → −128 ± 7), neutral on the other tasks. Candidate M3 default. | Proposal |
 | Task rate | $\eta = 10$ in both backends, **annealed** as $\eta / (1 + e / 300)$ over episodes $e$. A constant rate stalls (spiking 88 at $\eta = 10$, 120 at $\eta = 5$; annealed 184). | impl (M2) |
 
 ## 5. Parameters
@@ -64,6 +69,7 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 | $\theta$, input rate, $k$ | spiking noise, input rate, frame window | 0.5, 1.0, 100 |
 | $w_{min}$, $w_{max}$, $M^{\ast}$ clip | bounds | $10^{-3}$, 1, 20 |
 | seeds, episodes | M2 runs | 0–4, 1500 |
+| $H$, $s$ | spiking heads, TD-normalisation target RMS (Proposals) | 1, 0 (off; M3 candidate 0.04) |
 
 ## Version history
 
@@ -73,3 +79,4 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 | v1 | 2026-10-05 | M1 implemented. Changes: covariance $\kappa$; output gain $1/d_j$ and $d_j$ homeostasis; branching spiking mode with $k = 100$; conjunctive encoding; routing exempt by default; constant $\lambda$; task-term parameters from flow-level CartPole tests. | [001](iterations/001-m1.md) |
 | v2 | 2026-10-05 | M2 fixes: $d_j$ homeostasis as its own term (Eq. 4d, $\epsilon_h = 5$); race burn-in $b = 10$; spiking $\eta = 5$. Fixes the ratchet and the race bias, but return falls (spiking 140 → 120). | [002](iterations/002-m2.md) |
 | v3 | 2026-10-05 | Task rate $\eta = 10$ annealed as $\eta / (1 + e/300)$ in both backends; the v1 ratchet had been hidden annealing. Spiking return 184 ± 13, flow 287 ± 21. | [002](iterations/002-m2.md) |
+| v3 | 2026-10-20 | Defaults unchanged. Added: M3 task encoders and rewards, parallel spiking heads, TD normalisation (Proposals); the batched spiking engine. | [005](iterations/005-m3-tasks-heads.md) |

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-The project is research, and the docs lead the code. M1 (flow reference against SuperNeuroMAT) and M2 (CartPole closed loop, model v3) are done; M3 (more Gymnasium tasks) and M4 (partial observability, carry-over) are next (SPEC §11). The earlier PyTorch prototype was deleted on purpose; it is in git history at `fcedb0a` if you need it for reference. Do not restore it unless asked.
+The project is research, and the docs lead the code. M1 (flow reference against SuperNeuroMAT) and M2 (CartPole closed loop, model v3) are done; M3 (MountainCar, Acrobot, LunarLander, plus parallel spiking heads) is in progress (iteration 005), and M4 (partial observability, carry-over) is next (SPEC §11). The earlier PyTorch prototype was deleted on purpose; it is in git history at `fcedb0a` if you need it for reference. Do not restore it unless asked.
 
 Research question: can a spiking network's communities serve as its states, giving it a state-space abstraction that solves RL tasks? **Map-STDP** inverts minimum description length: community detection finds the partition that minimises a walk's description length (the map equation, or one of seven alternatives) for a given graph, while Map-STDP fixes the partition and learns the weights. It is a three-factor rule. TD-modulated STDP with an action-gated eligibility trace learns the task. Cost-modulated STDP, whose per-module neuromodulator broadcasts the marginal description cost of each transition, makes the given partition the minimum-description-length one. The communities are a central controller (receives the stimulus), one action community per action, and latent communities. The coarse-grained module chain $T^K(\mathbf o)$ is the extracted, stimulus-conditioned Markov model. Each environment frame is one implicit random walk. Side hypothesis, secondary: description length tracks metabolic/thermodynamic cost.
 
@@ -23,6 +23,8 @@ Research question: can a spiking network's communities serve as its states, givi
 - `mapstdp/core.py`: the numpy flow-level reference. It builds the SBM network, computes the stimulus $v(\mathbf o)$, the n-hop flow, the module tables ($p$, $q$, $J^K$), the map equation and its gradient, the modulator $g$, and the structural, homeostasis and eligibility updates. Module tables are $K \times K$, indexed `[b, a]` = (post module, pre module). Logs are base 2.
 - `mapstdp/spiking.py`: the SuperNeuroMAT backend. It runs in branching mode (`leak=inf`, uniform threshold noise, so one step is one hop), and teleportation is Bernoulli input spikes. `run_frame` returns the frame's spike raster, from which `pi_hat` (spike shares), `pairings` (the covariance count $\kappa$) and `race` (the action readout) are computed.
 - `experiments/m2.py`: `Agent` is the closed-loop CartPole agent. **Both backends share one frame update** and differ only in where $\pi$, $\kappa$ and the action come from (flow: n-hop flow, $J$, Eq. 1d; spiking: spike shares, covariance count divided by the frame's spike count, race readout). Model versions v1–v3 and Proposal flags (`--beta`, `--la-beta`) are CLI options, so older results stay reproducible. Results go to `experiments/results/m2_<backend>_<routing>_lam<lam>[...]_<model>_s<seed>.json`, which are committed.
+  `Agent` also takes `task` (a key of `experiments/tasks.py`), `heads` (parallel spiking replicas on shared W, pooled), `engine` (`snm` or `numpy` = `spiking.run_heads`, raster-identical and much faster), `td_norm` and `ablate`; all defaults reproduce M2.
+- `experiments/tasks.py`: the M3 task registry (sizes, encoder, reward, episodes). `experiments/m3.py`: per-task runs and summaries, results in `experiments/results/m3_<task>_<backend>[_h<H>]_lb<β>[_tn<s>][_<variant>]_s<seed>.json`. `experiments/ceiling.py`: the policy-class ceiling (CEM over the flow policy's actions × controller matrix).
 - `experiments/m2_viz.py` + `m2_viz_template.html`: train → record → page pipeline for the replay page (`replay.html`).
 - Each `mapstdp` module has a `__main__` self-check (Eq. 1a bound, finite-difference gradient, Monte Carlo three-factor average, `W_snm` orientation). Extend it when you add a rule.
 
@@ -35,6 +37,9 @@ python -m mapstdp.core                     # self-checks (likewise mapstdp.spiki
 python -m experiments.m1                   # M1 checks -> experiments/results/m1.json
 python -m experiments.m2 --backend flow --routing exempt --lam 0.05 --seed 0 --episodes 1500   # one M2 run
 python -m experiments.m2 --summary         # results table over seeds, plus the random-policy return
+python -m experiments.m3 --task Acrobot --backend flow --td-norm 0.04 --seed 0           # one M3 run (spiking: --heads H)
+python -m experiments.m3 --summary         # per task: random, flow, spiking per H  (--ablations, --fidelity)
+python -m experiments.ceiling --task CartPole --level 1 --readout 1d                     # policy-class ceiling
 pytest -q tests                            # behaviour lock (see Tooling)
 pytest -q tests -k "flow-exempt"           # one case, e.g. one golden fingerprint
 ruff check .
