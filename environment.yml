@@ -14,6 +14,8 @@ dependencies:
   - scipy
   - numba
   - gymnasium
+  - box2d-py  # LunarLander (M3)
+  - pygame  # imported by gymnasium.envs.box2d
   - matplotlib
   - networkx
   - ruff

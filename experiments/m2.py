@@ -22,6 +22,7 @@ import time
 import gymnasium as gym
 import numpy as np
 
+from experiments.tasks import TASKS, random_states
 from mapstdp import core
 from mapstdp import spiking as sp
 
@@ -30,31 +31,23 @@ ETA, TAU_E, GAMMA, ETA_V, EPS, ETA_MU = 10.0, 3.0, 0.99, 0.1, 1.0, 2.0
 ETA_SPK, EPS_H, BURN = 5.0, 5.0, 10  # v2: spiking task rate, d_j homeostasis rate (own term), race burn-in (steps)
 ETA_TAU = 300.0  # v3: task-rate annealing time constant (episodes)
 Q_STAR_FRAC = 0.75  # dual routing target q* as a fraction of the held-out mean J_route at W_0 (Eq. 4a)
-SIZES, LOG_EVERY = (36, 16, 16, 16, 16), 50
+LOG_EVERY = 50  # module sizes are per task (tasks.Task.sizes; CartPole 36, 16, 16, 16, 16)
 OUT = pathlib.Path(__file__).parent / "results"
 
 
-def held_out_obs(n=100, seed=12345):
+def held_out_obs(n=100, seed=12345, task=TASKS["CartPole"]):
     """Fixed evaluation observations: states visited by a random policy."""
-    env, rng, obs = gym.make("CartPole-v1"), np.random.default_rng(seed), []
-    while len(obs) < n:
-        o, _ = env.reset(seed=int(rng.integers(1 << 30)))
-        done = False
-        while not done:
-            obs.append(o)
-            o, _, term, trunc, _ = env.step(int(rng.integers(2)))
-            done = term or trunc
-    return np.array(obs[:n])
+    return random_states(task.env_id, task.n_actions, n, seed)
 
 
-def random_return(episodes=1000, seed=0):
+def random_return(episodes=1000, seed=0, task=TASKS["CartPole"]):
     """Mean and sd of the uniform-random-policy return (the --summary baseline)."""
-    env, rng, R = gym.make("CartPole-v1"), np.random.default_rng(seed), []
+    env, rng, R = gym.make(task.env_id), np.random.default_rng(seed), []
     for _ in range(episodes):
         env.reset(seed=int(rng.integers(1 << 30)))
         n, done = 0, False
         while not done:
-            _, r, term, trunc, _ = env.step(int(rng.integers(2)))
+            _, r, term, trunc, _ = env.step(int(rng.integers(task.n_actions)))
             n, done = n + r, term or trunc
         R.append(n)
     return float(np.mean(R)), float(np.std(R))
@@ -62,10 +55,15 @@ def random_return(episodes=1000, seed=0):
 
 class Agent:
     """Closed-loop Map-STDP agent: structural (Eq. 4) with optional routing dual (Eq. 4a), d_j homeostasis (Eq. 4d)
-    and TD task terms (Eqs. 4b, 4c; task rate annealed in v3)."""
+    and TD task terms (Eqs. 4b, 4c; task rate annealed in v3). task: a tasks.TASKS key (M3); heads: H parallel
+    spiking replicas on shared W whose spikes are pooled for pi, kappa and the race (Proposal, spiking only)."""
 
-    def __init__(self, backend, routing, lam, seed, model="v3", beta=1.0, eta_tau=None, la_beta=0.0):
-        self.W, self.m, self.roles, self.mask = core.build_network(SIZES, seed=seed)
+    def __init__(self, backend, routing, lam, seed, model="v3", beta=1.0, eta_tau=None, la_beta=0.0,
+                 task="CartPole", heads=1, engine="snm"):
+        self.task, self.heads, self.engine = TASKS[task], heads, engine
+        assert heads == 1 or backend == "spiking", "heads are spiking replicas"
+        assert engine in ("snm", "numpy"), "numpy: sp.run_heads, the batched branching step (same raster as snm)"
+        self.W, self.m, self.roles, self.mask = core.build_network(self.task.sizes, self.task.roles, seed=seed)
         self.K, self.backend, self.routing, self.lam = len(self.roles), backend, routing, lam
         v2 = model in ("v2", "v3")
         if eta_tau is None:
@@ -77,16 +75,20 @@ class Agent:
         self.A = np.flatnonzero(self.roles == "A")
         self.ctrl = self.roles[self.m] == "C"
         self.groups = [np.flatnonzero(self.m == a) for a in self.A]
+        self.race_groups = sp.head_groups(self.groups, heads, len(self.m))
         self.rng = np.random.default_rng(seed)
         self.u, self.mu, self.silent = np.zeros(self.ctrl.sum()), 0.0, 0
-        self.held = [self.stim(o) for o in held_out_obs()]
-        self.snn = None  # built after q_star, so this evaluate() runs no races and draws nothing from rng
+        self.held = [self.stim(o) for o in held_out_obs(task=self.task)]
+        self.snn, self.live = None, False  # live after q_star, so this evaluate() runs no races, draws nothing from rng
         self.q_star = Q_STAR_FRAC * self.evaluate()["J_route"]  # ponytail: fixed, learn it if dual matters
-        self.snn = sp.build(self.W, 1 - ALPHA, theta=THETA) if backend == "spiking" else None
+        if backend == "spiking":
+            self.live = True
+            if engine == "snm":
+                self.snn = sp.build(sp.tile_heads(self.W, heads), 1 - ALPHA, theta=THETA)
 
     def stim(self, o):
-        """v(o): CartPole encoder over the controller (core.cartpole_stimulus)."""
-        return core.cartpole_stimulus(o, self.m, self.roles)
+        """v(o): the task's encoder over the controller (tasks.Task.stim; CartPole: core.cartpole_stimulus)."""
+        return self.task.stim(o, self.m, self.roles)
 
     def frame(self, v):
         """Walk and act for one frame (derivation §8 steps 2-3; spiking is cold-started, pi from spike shares).
@@ -98,15 +100,18 @@ class Agent:
             p = np.bincount(self.m, pi, self.K)
             return pi, W / W.sum(0) * pi, int(self.rng.choice(len(self.A), p=core.policy(p, self.roles, self.beta)))
         S = self.spike_frame(v)
-        a = sp.race(S, self.groups, self.rng, self.burn)
+        a = sp.race(S, self.race_groups, self.rng, self.burn)
         if a is None:
             self.silent, a = self.silent + 1, int(self.rng.integers(len(self.A)))
-        return sp.pi_hat(S), sp.pairings(S)[2] / max(S.sum(), 1), a
+        pi, kappa, n = sp.pooled(S, self.heads)
+        return pi, kappa / max(n, 1), a
 
     def spike_frame(self, v):
-        """Spike raster of one frame on the current weights."""
-        sp.set_weights(self.snn, self.W, 1 - ALPHA)  # output gain (1 - alpha) / d_j
-        return sp.run_frame(self.snn, v, K_SPK, RATE, self.rng, THETA)[0]
+        """Spike raster of one frame on the current weights, k x (heads N), head h in columns h N .. (h + 1) N - 1."""
+        if self.engine == "numpy":
+            return sp.run_heads(self.W, v, self.heads, K_SPK, RATE, self.rng, THETA, 1 - ALPHA)
+        sp.set_weights(self.snn, sp.tile_heads(self.W, self.heads), 1 - ALPHA)  # output gain (1 - alpha) / d_j
+        return sp.run_frame(self.snn, np.tile(v, self.heads), K_SPK, RATE, self.rng, THETA)[0]
 
     def feats(self, pi):
         """Critic features x = pi_C / p_C (controller flow shares), so V = u . x."""
@@ -130,10 +135,11 @@ class Agent:
             self.mu = max(0.0, self.mu + ETA_MU * (self.q_star - core.j_route(JK, self.roles)))
         return e
 
-    def critic_step(self, x, x2, term):
-        """TD error delta_f (Eq. 4c: reward -1 on termination, 0 otherwise; bootstraps on truncation; V = u . x),
-        computed before the NLMS critic update of u. Returns delta; the caller applies the task update eta_e delta e."""
-        delta = (-1.0 if term else 0.0) + (0.0 if term else GAMMA * self.u @ x2) - self.u @ x
+    def critic_step(self, x, x2, term, r=0.0):
+        """TD error delta_f (Eq. 4c: reward r_f = task.reward(r, term), for CartPole -1 on termination, 0 otherwise;
+        bootstraps on truncation; V = u . x), computed before the NLMS critic update of u. Returns delta; the caller
+        applies the task update eta_e delta e."""
+        delta = self.task.reward(r, term) + (0.0 if term else GAMMA * self.u @ x2) - self.u @ x
         self.u += ETA_V * delta * x / (x @ x)  # NLMS
         return delta
 
@@ -150,7 +156,7 @@ class Agent:
             R, done = R + r, term or trunc
             pi, kappa, a = self.frame(self.stim(o))
             x2 = self.feats(pi)
-            delta = self.critic_step(x, x2, term)
+            delta = self.critic_step(x, x2, term, r)
             eta = self.eta / (1 + self.ep / self.eta_tau) if self.eta_tau else self.eta
             self.W = core.clip_weights(self.W + eta * delta * e, self.mask)
             x = x2
@@ -174,11 +180,11 @@ class Agent:
         out.update(persist_C=float(persist[self.roles == "C"].mean()),
                    persist_LA=float(persist[self.roles != "C"].mean()), persist=persist.tolist(),
                    d_max=float(W.sum(0).max()), P1d_mean_right=float(np.mean(P1d, 0)[1]))
-        if self.snn is not None:
+        if self.live:
             kl, l1, floor = [], [], []
             smooth = lambda n: (n + 0.5) / (kl_reps + 1)  # noqa: E731 (add-1/2 estimate of the race policy)
             for v, P in zip(self.held[:kl_obs], P1d):
-                races = [sp.race(self.spike_frame(v), self.groups, self.rng, self.burn) for _ in range(kl_reps)]
+                races = [sp.race(self.spike_frame(v), self.race_groups, self.rng, self.burn) for _ in range(kl_reps)]
                 Q = smooth(np.bincount([r for r in races if r is not None], minlength=len(self.A)))
                 kl.append(float((P * np.log(P / Q)).sum()))
                 l1.append(float(np.abs(P - Q).sum()))
@@ -188,9 +194,11 @@ class Agent:
         return out
 
 
-def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=None, eta=None, la_beta=0.0):
-    """Train for `episodes`, evaluating every LOG_EVERY, and write the m2_*.json result file."""
-    agent, env = Agent(backend, routing, lam, seed, model, beta, eta_tau, la_beta), gym.make("CartPole-v1")
+def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=None, eta=None, la_beta=0.0,
+        task="CartPole", heads=1, name=None, engine="snm"):
+    """Train for `episodes`, evaluating every LOG_EVERY, and write the result file (default name m2_*.json)."""
+    agent = Agent(backend, routing, lam, seed, model, beta, eta_tau, la_beta, task, heads, engine)
+    env = gym.make(agent.task.env_id)
     agent.eta = eta or agent.eta
     returns, evals, t0 = [], [{"episode": 0, **agent.evaluate()}], time.perf_counter()
     for ep in range(1, episodes + 1):
@@ -208,12 +216,16 @@ def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=Non
            "silent_race_frames": agent.silent, "mu": agent.mu, "q_star": agent.q_star,
            "params": dict(alpha=ALPHA, n=N_HOPS, k=K_SPK, rate=RATE, theta=THETA, eta=ETA, tau_e=TAU_E, gamma=GAMMA,
                           eta_v=ETA_V, eps=agent.eps, eps_h=agent.eps_h, burn=agent.burn, eta_task=agent.eta,
-                          beta=beta, eta_tau=agent.eta_tau, eta_mu=ETA_MU, sizes=SIZES)}
+                          beta=beta, eta_tau=agent.eta_tau, eta_mu=ETA_MU, sizes=agent.task.sizes)}
+    if (task, heads) != ("CartPole", 1):
+        res.update(task=task, heads=heads, engine=engine, encoder=agent.task.encoder, n_ctrl=agent.task.n_ctrl)
     OUT.mkdir(exist_ok=True)
-    b = (f"_b{beta:g}" if beta != 1 else "") + (f"_eta{eta:g}" if eta else "")
-    b += f"_at{eta_tau:g}" if eta_tau is not None else ""
-    b += f"_lb{la_beta:g}" if la_beta else ""
-    (OUT / f"m2_{backend}_{routing}_lam{lam:g}{b}_{model}_s{seed}.json").write_text(json.dumps(res))
+    if name is None:
+        b = (f"_b{beta:g}" if beta != 1 else "") + (f"_eta{eta:g}" if eta else "")
+        b += f"_at{eta_tau:g}" if eta_tau is not None else ""
+        b += f"_lb{la_beta:g}" if la_beta else ""
+        name = f"m2_{backend}_{routing}_lam{lam:g}{b}_{model}_s{seed}"
+    (OUT / f"{name}.json").write_text(json.dumps(res))
     return res
 
 

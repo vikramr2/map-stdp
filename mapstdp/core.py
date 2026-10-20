@@ -52,6 +52,17 @@ def cartpole_stimulus(o, m, roles, n=6, sigma=0.4, scale=(0.21, 3.5)):
     return v
 
 
+def rbf_stimulus(x, centers, sigma, m, roles):
+    """Conjunctive Gaussian RFs at arbitrary centers (one controller neuron per row of centers), x already
+    normalised; the exponent is shifted by its minimum so far-from-every-center inputs in high dimension stay finite.
+    v sums to 1. cartpole_stimulus is the 6 x 6 grid case (kept separate: it is bit-locked by tests/golden.json)."""
+    d2 = ((centers - x) ** 2).sum(1)
+    b = np.exp(-(d2 - d2.min()) / (2 * sigma ** 2))
+    v = np.zeros(len(m))
+    v[roles[m] == "C"] = b / b.sum()
+    return v
+
+
 def flow(W, v, alpha=0.2, n=None):
     """Per-frame flow (Eq. 1). n=None: exact solve; else n hops of power iteration from v (Eq. 1a)."""
     T = W / W.sum(0)

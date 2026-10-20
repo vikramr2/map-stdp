@@ -19,6 +19,7 @@ def build(W, gain=0.8, leak=np.inf, theta=0.5):
     before running."""
     snn = snm.SNN()
     snn.stdp = False
+    snn.sparse = False  # 'auto' turns sparse above ~150 neurons, and the jit backend is dense-only
     for _ in range(len(W)):
         snn.create_neuron(threshold=theta, leak=leak, reset_state=0.0, refractory_period=0)
     for i, j in zip(*np.nonzero(W)):
@@ -39,6 +40,33 @@ def tau(leak, theta=0.5):
     return 1 + theta / leak
 
 
+def set_inputs(snn, inp):
+    """Queue a k x N input array for the next simulate(k): the array SuperNeuroMAT 3.5.0's setup_input_spikes would
+    build from an input_spikes dict with every neuron listed at every step (that pure-Python loop was half the frame
+    time). Overrides setup_input_spikes on this instance only; the queued dict stays empty."""
+    snn.input_spikes = {}
+    arr = np.vstack([inp, np.zeros((1, inp.shape[1]))]).astype(snn.dd)  # row k: nothing queued after the frame
+    snn.setup_input_spikes = lambda time_steps: setattr(snn, "_input_spikes", arr)
+
+
+def tile_heads(W, H):
+    """Block-diagonal W for H heads: independent spiking replicas of one network on shared weights (Proposal). Head h
+    is neurons h N .. (h + 1) N - 1; the heads' noise and teleportation draws are independent."""
+    return W if H == 1 else np.kron(np.eye(H), W)
+
+
+def head_groups(groups, H, N):
+    """Neuron groups pooled over H heads, so race() runs one race over all heads' spikes (still Eq. 1d, §2.4)."""
+    return [np.concatenate([np.asarray(g) + h * N for h in range(H)]) for g in groups]
+
+
+def pooled(S, H):
+    """Frame readouts pooled over H heads of a k x (H N) raster: (pi_hat of the summed counts, the sum of per-head
+    covariance counts, total spikes). Cross-head coincidences are excluded: heads share weights, not synapses."""
+    Sh = S.reshape(len(S), H, -1)
+    return pi_hat(Sh.sum(1)), sum(pairings(Sh[:, h])[2] for h in range(H)), int(S.sum())
+
+
 def run_frame(snn, v, k, rate, rng, theta=0.5, use="jit", return_ext=False):
     """Cold-start frame of k steps (one walk per frame, derivation §2.3 and §8 step 2): snn.reset() zeroes states and
     refractory counters and clears the spike train and queued inputs, then each neuron gets U(-theta, theta) escape
@@ -49,10 +77,24 @@ def run_frame(snn, v, k, rate, rng, theta=0.5, use="jit", return_ext=False):
     ext = rng.random((k, N)) < rate * v
     inp = rng.uniform(-theta, theta, (k, N)) + 2 * theta * ext
     snn.reset()
-    nids = list(range(N))
-    snn.input_spikes = {t: {"nids": nids, "values": inp[t].tolist()} for t in range(k)}
+    set_inputs(snn, inp)
     snn.simulate(k, use=use)
     return snn.ispikes, (ext if return_ext else int(ext.sum()))
+
+
+def run_heads(W, v, H, k, rate, rng, theta=0.5, gain=0.8):
+    """run_frame on build(tile_heads(W, H)) + set_weights, without SuperNeuroMAT: in branching mode (leak = inf,
+    refractory 0) its LIF step is z_t = [inp_t + z_{t-1} W_snm > theta], so all heads share one N x N product per step
+    instead of a dense (H N)^2 one. Same rng draws as run_frame, and the self-check requires the same raster."""
+    N = len(W)
+    Wsnm = gain * (W / np.maximum(W.sum(0), 1e-12)).T  # [pre, post], as set_weights writes it
+    ext = rng.random((k, H * N)) < rate * np.tile(v, H)
+    inp = (rng.uniform(-theta, theta, (k, H * N)) + 2 * theta * ext).reshape(k, H, N)
+    S, z = np.zeros((k, H, N), bool), np.zeros((H, N))
+    for t in range(k):
+        S[t] = (inp[t] + z @ Wsnm) > theta
+        z = S[t].astype(float)
+    return S.reshape(k, H * N)
 
 
 def pi_hat(S):
@@ -97,4 +139,13 @@ if __name__ == "__main__":  # self-check: W_snm orientation and lag-1 causal cou
     r = race(np.array([[0, 0, 0], [0, 0, 1], [1, 1, 0]], bool), [[0, 1], [2]], np.random.default_rng(0))
     assert r == 1 and race(np.zeros((3, 3), bool), [[0], [1]], None) is None
     assert race(np.array([[0, 0, 1], [0, 0, 1], [1, 1, 0]], bool), [[0, 1], [2]], np.random.default_rng(0), burn=2) == 0
-    print("spiking self-check ok")
+    from mapstdp import core  # heads: the numpy engine reproduces SuperNeuroMAT's raster spike for spike
+    Wc, mc, rc, _ = core.build_network((12, 8, 8, 8), "CLAA", seed=1)
+    vc, H = core.stimulus(0.4, mc, rc), 3
+    snn = build(tile_heads(Wc, H))
+    for s in range(5):
+        set_weights(snn, tile_heads(Wc, H))
+        S1 = run_frame(snn, np.tile(vc, H), 100, 1.0, np.random.default_rng(s))[0]
+        S2 = run_heads(Wc, vc, H, 100, 1.0, np.random.default_rng(s))
+        assert S1.shape == S2.shape and (S1 == S2).all() and S1.sum() > 0
+    print("spiking self-check ok (incl. run_heads == SuperNeuroMAT raster)")
