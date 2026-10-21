@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project state
 
-The project is research, and the docs lead the code. M1 (flow reference against SuperNeuroMAT) and M2 (CartPole closed loop, model v3) are done; M3 (MountainCar, Acrobot, LunarLander, plus parallel spiking heads) is in progress (iteration 005), and M4 (partial observability, carry-over) is next (SPEC §11). The earlier PyTorch prototype was deleted on purpose; it is in git history at `fcedb0a` if you need it for reference. Do not restore it unless asked.
+The project is research, and the docs lead the code. M1 (flow reference against SuperNeuroMAT) and M2 (CartPole closed loop, model v3) are done; M3 (MountainCar, Acrobot, LunarLander, plus parallel spiking heads) is in progress (iterations 005–006; model v4 is a flag configuration of the M3 runs, and the code defaults still reproduce v3), and M4 (partial observability, carry-over) is next (SPEC §11). The unmerged branch `m4-tmaze` holds an M4 prototype on a T-maze: carry-over with a module-level winner-take-all, Eqs. 1f/4f/4g, `experiments/m4.py` and `docs/iterations/004-m4.md`. Its iteration number collides with `main`'s `004-map-term-ablation.md`, so renumber it on merge. The earlier PyTorch prototype was deleted on purpose; it is in git history at `fcedb0a` if you need it for reference. Do not restore it unless asked.
 
 Research question: can a spiking network's communities serve as its states, giving it a state-space abstraction that solves RL tasks? **Map-STDP** inverts minimum description length: community detection finds the partition that minimises a walk's description length (the map equation, or one of seven alternatives) for a given graph, while Map-STDP fixes the partition and learns the weights. It is a three-factor rule. TD-modulated STDP with an action-gated eligibility trace learns the task. Cost-modulated STDP, whose per-module neuromodulator broadcasts the marginal description cost of each transition, makes the given partition the minimum-description-length one. The communities are a central controller (receives the stimulus), one action community per action, and latent communities. The coarse-grained module chain $T^K(\mathbf o)$ is the extracted, stimulus-conditioned Markov model. Each environment frame is one implicit random walk. Side hypothesis, secondary: description length tracks metabolic/thermodynamic cost.
 
@@ -28,6 +28,13 @@ Research question: can a spiking network's communities serve as its states, givi
 - `experiments/m2_viz.py` + `m2_viz_template.html`: train → record → page pipeline for the replay page (`replay.html`).
 - Each `mapstdp` module has a `__main__` self-check (Eq. 1a bound, finite-difference gradient, Monte Carlo three-factor average, `W_snm` orientation). Extend it when you add a rule.
 
+**Traps** (each has cost time before):
+
+- **RNG order defines every trajectory.** The golden tests are bit-identical, so moving, merging or skipping an `rng` call breaks `tests/golden.json`, even if the code reads the same. Put new features behind flags whose default path draws nothing extra.
+- **Never add `zip(..., strict=True)`.** `m2.Agent.evaluate` relies on truncation (20 held-out stimuli zipped with 100 policies), which is why ruff's B905 is off in `ruff.toml`.
+- **Result-file prefixes are namespaces.** `m2.summary()` globs `experiments/results/m2_*.json`, and the test suite reads every match, so other outputs must not start with `m2_`. The replay files use `viz_m2_*` for this reason.
+- **Silent modules in spiking.** A sealed or winner-take-all module can emit no spikes in a frame. `module_stats` then has 0/0 columns, so guard any new ratio or credit computed from spike shares.
+
 ## Commands
 
 Run everything from the repo root, as modules:
@@ -38,6 +45,7 @@ python -m experiments.m1                   # M1 checks -> experiments/results/m1
 python -m experiments.m2 --backend flow --routing exempt --lam 0.05 --seed 0 --episodes 1500   # one M2 run
 python -m experiments.m2 --summary         # results table over seeds, plus the random-policy return
 python -m experiments.m3 --task Acrobot --backend flow --td-norm 0.04 --seed 0           # one M3 run (spiking: --heads H)
+python -m experiments.m3 --task LunarLander --td-norm 0.04 --p-cc 0 --beta-kappa 0.01 --beta-max 16 --eta 5 --seed 0   # model v4 (flow)
 python -m experiments.m3 --summary         # per task: random, flow, spiking per H  (--ablations, --fidelity)
 python -m experiments.ceiling --task CartPole --level 1 --readout 1d                     # policy-class ceiling
 pytest -q tests                            # behaviour lock (see Tooling)
@@ -88,6 +96,7 @@ The SLURM notes below apply only to the campus cluster. On a machine without SLU
 - On the cluster, `conda activate map-stdp` resolves to it through `envs_dirs` in `~/.condarc`.
 - On the cluster, for installs, set `CONDA_PKGS_DIRS=/scratch/vikramr2/conda/pkgs`, and use `pip --no-cache-dir` and `npm --cache /scratch/vikramr2/conda/npm-cache`, so caches stay off `/u`.
 
+- **Launched outside the env,** the KaTeX hook finds a Node without katex and errors after every doc edit, and CodeGraph does not connect. Relaunch from the env, or run `node .claude/hooks/math_check.js <files>` with the env's `bin` on `PATH`.
 - **ponytail** (project-scope plugin, `.claude/settings.json`): a least-code skill. Its hooks run `node`, so run `conda activate map-stdp` before launching `claude`.
 - **CodeGraph** (project-scope MCP server, `.mcp.json`; telemetry off): a code-intelligence index. The index lives in `.codegraph/`, which is gitignored by its own `.gitignore`. Run `codegraph sync` after large changes.
 - **Hooks** (`.claude/hooks/`):

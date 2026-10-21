@@ -80,3 +80,6 @@ TASKS = {t.env_id.split("-")[0]: t for t in (
     Task("Acrobot-v1", 3, 64, 1000, lambda r, term: 0.1 * r, "pool"),
     Task("LunarLander-v3", 4, 64, 1000, lambda r, term: 0.01 * r, "pool"),
 )}
+# CartPole with the 'pool' encoder over all four observations (iteration 006): the M2 encoder sees only theta and
+# theta_dot, so neither the policy nor a network-activity critic can see the cart position that ends sharp-policy runs.
+TASKS["CartPoleFull"] = Task("CartPole-v1", 2, 64, 1500, TASKS["CartPole"].reward, "pool")

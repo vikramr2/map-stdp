@@ -2,6 +2,11 @@
 MountainCar, Acrobot and LunarLander, flow against spiking with H parallel heads (Proposal). Run from the repo root:
   python -m experiments.m3 --task {CartPole,MountainCar,Acrobot,LunarLander} --backend {flow,spiking} [--heads H]
     --seed 0 [--episodes E]   -> experiments/results/m3_<task>_<backend>[_h<H>]_lb<beta_LA>_s<seed>.json
+  Variants (iteration 006, flow): --p-cc P (controller recurrence, default 0.1), --beta B [--beta-end B2 --beta-ramp R]
+    (sharpened policy Eq. 1e; --beta-end/--beta-ramp ramp B -> B2 over R episodes: an ORACLE reference ablation that
+    needs the run length, never a default or a recommended setting), --eta E (task rate); file-name tokens
+    pcc<P>, b<B>[-<B2>r<R>], eta<E> after the ablation tokens; --beta-kappa k [--beta-max B] (causal adaptive beta,
+    token bk<k>m<B>), --score-unit (Eq. 4b increment / beta, token su), --critic net (network-activity critic).
   python -m experiments.m3 --summary    -> per task: random, flow and spiking per H (last-100 return over seeds)
   python -m experiments.m3 --fidelity   -> per task and H: error of the pooled pi-hat and kappa against the flow
 Heads: H independent spiking replicas of the network on the same W (tasks share one block-diagonal SuperNeuroMAT
@@ -48,6 +53,23 @@ def fidelity(task, Hs=HEADS, reps=20, n_obs=10, seed=0):
     return rows
 
 
+def nondefault(r):
+    """True for an iteration-006 variant (lam, p_cc, beta or its ramp, or the task rate off their M3 defaults)."""
+    eta0 = m2.ETA if r["backend"] == "flow" else r["params"]["eta_task"]
+    return r.get("lam", 0.05) != 0.05 or r.get("p_cc", 0.1) != 0.1 or r.get("beta", 1.0) != 1.0 or \
+        r.get("beta_end") is not None or \
+        r.get("eta_task", eta0) != eta0 or bool(r.get("beta_kappa")) or bool(r.get("score_unit"))
+
+
+def variant_tokens(a):
+    """File-name tokens of the iteration-006 variants, empty on the defaults."""
+    t = ([f"lam{a.lam:g}"] if a.lam != 0.05 else []) + ([f"pcc{a.p_cc:g}"] if a.p_cc != 0.1 else [])
+    if a.beta != 1.0 or a.beta_end is not None:
+        t.append(f"b{a.beta:g}" + (f"-{a.beta_end:g}r{a.beta_ramp:g}" if a.beta_end is not None else ""))
+    t += [f"bk{a.beta_kappa:g}m{a.beta_max:g}"] if a.beta_kappa else []
+    return t + ([f"eta{a.eta:g}"] if a.eta is not None else []) + (["su"] if a.score_unit else [])
+
+
 def summary():
     """Per task: random-policy return, then flow and spiking per H as mean +- sd over seeds of the last-100 return,
     and the share of the flow-over-spiking(H = 1) gap that H heads close."""
@@ -57,8 +79,8 @@ def summary():
         runs = {}
         for f in sorted(glob.glob(str(m2.OUT / f"m3_{task}_*.json"))):
             r = json.loads(pathlib.Path(f).read_text())
-            if r.get("ablate") or r.get("eta_tau", 300.0) != 300.0:
-                continue  # learning-rule ablations: see ablation_summary()
+            if r.get("ablate") or r.get("eta_tau", 300.0) != 300.0 or nondefault(r):
+                continue  # learning-rule ablations and variants: see ablation_summary()
             runs.setdefault((r["backend"], r.get("heads", 1), r["la_beta"], r.get("td_norm", 0.0)), []).append(r)
         if not runs:
             continue
@@ -104,7 +126,19 @@ def main():
     ap.add_argument("--eta-tau", type=float, default=None, help="ablation: task-rate annealing (0 = constant)")
     ap.add_argument("--wmin", type=float, default=None, help="ablation: weight floor (default 1e-3)")
     ap.add_argument("--tau-e", type=float, default=None, help="ablation: eligibility time constant (default 3)")
-    ap.add_argument("--critic", choices=("ctrl", "rich"), default=None, help="ablation: rich = RFs on the full obs")
+    ap.add_argument("--critic", choices=("ctrl", "rich", "net"), default=None,
+                    help="ablation: rich = RFs on the full obs (abstraction); net = controller + latent flow shares")
+    ap.add_argument("--lam", type=float, default=0.05, help="structural (map) term rate; 0 = map-term ablation")
+    ap.add_argument("--p-cc", type=float, default=0.1, help="controller->controller connection probability")
+    ap.add_argument("--beta", type=float, default=1.0, help="sharpened policy exponent (Eq. 1e, Proposal; flow)")
+    ap.add_argument("--beta-end", type=float, default=None,
+                    help="ORACLE reference ablation, not part of the model: ramp beta linearly to this value (flow)")
+    ap.add_argument("--beta-ramp", type=float, default=None,
+                    help="ORACLE reference ablation: ramp length in episodes (default: half the run)")
+    ap.add_argument("--eta", type=float, default=None, help="task rate (default: model v3's)")
+    ap.add_argument("--beta-kappa", type=float, default=0.0, help="causal adaptive beta gain (0 = off)")
+    ap.add_argument("--beta-max", type=float, default=4.0, help="upper bound of the adaptive beta")
+    ap.add_argument("--score-unit", action="store_true", help="ablation: Eq. 4b increment divided by beta")
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--ablations", action="store_true", help="summary of the flow learning-rule ablations")
     ap.add_argument("--fidelity", action="store_true")
@@ -123,9 +157,14 @@ def main():
     ablate = {k: v for k, v in (("wmin", a.wmin), ("tau_e", a.tau_e), ("critic", a.critic)) if v is not None}
     variant = "_".join(f"{k}{v:g}" if isinstance(v, float) else f"{k}-{v}" for k, v in ablate.items())
     variant += (("_" if variant else "") + f"at{a.eta_tau:g}") if a.eta_tau is not None else ""
-    r = m2.run(a.backend, "exempt", 0.05, a.seed, episodes, eta_tau=a.eta_tau, la_beta=a.la_beta, task=a.task,
-               heads=a.heads, name=name(a.task, a.backend, a.heads, a.la_beta, a.seed, a.td_norm, variant),
-               engine=a.engine, td_norm=a.td_norm, ablate=ablate)
+    if a.beta_end is not None and a.beta_ramp is None:
+        a.beta_ramp = episodes / 2
+    variant = "_".join(([variant] if variant else []) + variant_tokens(a))
+    r = m2.run(a.backend, "exempt", a.lam, a.seed, episodes, beta=a.beta, eta_tau=a.eta_tau, eta=a.eta,
+               la_beta=a.la_beta, task=a.task, heads=a.heads,
+               name=name(a.task, a.backend, a.heads, a.la_beta, a.seed, a.td_norm, variant), engine=a.engine,
+               td_norm=a.td_norm, ablate=ablate, p_cc=a.p_cc, beta_end=a.beta_end, beta_ramp=a.beta_ramp,
+               beta_kappa=a.beta_kappa, beta_max=a.beta_max, score_unit=a.score_unit)
     print(f"done: last100 {np.mean(r['returns'][-100:]):.1f}, {r['frames']} frames, {r['ms_per_frame']:.2f} ms/frame")
 
 

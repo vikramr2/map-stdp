@@ -1,6 +1,6 @@
 # Map-STDP model: current form
 
-**Version:** v3 (2026-10-05). It is the model after iteration 002 (M2). The specification is in [`derivation.md`](derivation.md) and [`SPEC.md`](SPEC.md). Iterations are logged in [`iterations/`](iterations/), and every change to this file is listed in the version history at the end.
+**Version:** v4 (2026-10-21). It is the model after iteration 006 (M3 reward). v4 is a configuration of flags (`--p-cc 0 --beta-kappa 0.01 --beta-max 16 --eta 5`, with `--td-norm 0.04` and `--la-beta 0.3`); the code defaults still reproduce v3, so earlier results and `tests/golden.json` are unchanged. The specification is in [`derivation.md`](derivation.md) and [`SPEC.md`](SPEC.md). Iterations are logged in [`iterations/`](iterations/), and every change to this file is listed in the version history at the end.
 
 Status tags:
 
@@ -15,7 +15,7 @@ Status tags:
 | --- | --- | --- |
 | Neurons | Modules C, L, L, A, A, all excitatory. M1 used 16 neurons per module (80 total). For CartPole the controller has 36 neurons (§1, Stimulus). | impl (M1) |
 | Weights | $W_{ij} \ge 0$, pre $j$ → post $i$, bounded in $[10^{-3}, 1]$. $T = W/d$. In SuperNeuroMAT, `W_snm = (1-α)·(W/d).T`, so the output gain is $1/d_j$. | impl (M1) |
-| Initialisation | SBM: $p_{same} = 0.5$, controller recurrence $p_{cc} = 0.1$, controller→latent/action routing $p_{route} = 0.3$, other cross links $p_{cross} = 0.05$. Initial $d_j = 1$. | impl (M1) |
+| Initialisation | SBM: $p_{same} = 0.5$, controller recurrence $p_{cc} = 0$ in v4 (`--p-cc`; 0.1 in v1–v3), controller→latent/action routing $p_{route} = 0.3$, other cross links $p_{cross} = 0.05$. Initial $d_j = 1$. With $p_{cc} = 0$ the controller is a feed-forward encoder: the module-level task term cannot credit controller→controller synapses (derivation §2.4), and removing them raised flow return on every M3 task (iteration 006). Abstraction: a thalamic-relay or cerebellar-granule-like input layer, not cortex. | impl (v4) |
 | Stimulus | **Conjunctive** Gaussian receptive fields. For CartPole: a 6×6 grid over $(\theta/0.21, \dot{\theta}/3.5)$, clipped to $[-1, 1]$, $\sigma = 0.4$, $v$ normalised. Per-dimension fields cap the policy at about 84 steps. Abstraction: choosing $(\theta, \dot{\theta})$ is designer feature selection, and a full grid scales exponentially; random sparse conjunctive fields are the scaling path. | impl (M2) |
 | Stimulus (M3 tasks) | `experiments/tasks.py`. MountainCar: 6×6 grid over (position, velocity) normalised by the bounds, $\sigma = 0.4$. Acrobot, LunarLander: 64 conjunctive RFs at centers drawn from 20000 random-policy states, observation z-scored by that pool, $\sigma$ the median nearest-center distance (the random sparse conjunctive fields above). One action module of 16 per action; two latents of 16. | Proposal |
 | Excitation/inhibition | Excitatory only. **No plausibility claim** until per-module inhibitory (PV-like) pools with inhibitory STDP replace the software normalisation (derivation §7). | abstraction |
@@ -38,7 +38,8 @@ Status tags:
 | --- | --- | --- |
 | Module chain | $T^K_{ba}(\mathbf{o}) = J_{ba} / p_a$ (Eq. 1c). | impl (M1) |
 | Policy | $P(a \mid \mathbf{o}) = p_a / \sum_{a'} p_{a'}$ (Eq. 1d). In spiking, a race readout that starts after a **burn-in of $b = 10$ steps**; KL to Eq. 1d is 0.011, at the sampling floor of 0.010. | impl (M2) |
-| Sharpened policy | $P_\beta \propto p_a^\beta$ with matched score (Eq. 1e). Unstable at the flow level (3 of 5 seeds collapse at $\beta = 4$); no matched spiking readout. | Proposal |
+| Sharpened policy | $P_\beta \propto p_a^\beta$ with matched score (Eq. 1e). Fixed $\beta = 4$ is unstable (M2). | Proposal |
+| Adaptive $\beta$ | Eq. 1g: after each episode $\log \beta \mathrel{+}= \kappa_\beta z$, $z$ the clipped trend of return (20- against 100-episode averages, over the running sd), $\beta \in [1, 16]$, $\kappa_\beta = 0.01$, no update over the first 20 episodes; one global scalar, all tasks (`--beta-kappa 0.01 --beta-max 16`). Flow only: no matched spiking readout (a race to $k$ spikes reaches $\beta_{eff} \approx 1.5$). Through the matched score it is also a global step-size gain on the task term. Abstraction: a utility-trend gain like the adaptive gain theory of LC-NE, with no term for the utility level. Known issues: needs episode boundaries; $\beta$ does not recover after a collapse. The time-based ramp (`--beta-end`) is an oracle reference ablation, not part of the model. | Proposal (v4) |
 
 ## 4. Plasticity
 
@@ -46,7 +47,7 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 
 | Item | Current form | Status |
 | --- | --- | --- |
-| Structural modulator | Map equation, $g_{ba} = M^{\ast}_a \mathbb{I}[b \ne a]$, with $M^{\ast}$ clipped at 20. $\lambda = 0.05$, constant from frame 0. In spiking, $\lambda$ is divided by the spikes per frame, keeping the per-count $\lambda \lesssim 5 \times 10^{-4}$. It seals latent and action modules (persistence 0.98–0.996) at no cost to CartPole return. Latents become flow sinks: the task term cuts latent→action flow and the map term seals latents against the controller (iteration 003). | impl (M2) |
+| Structural modulator | Map equation, $g_{ba} = M^{\ast}_a \mathbb{I}[b \ne a]$, with $M^{\ast}$ clipped at 20. $\lambda = 0.05$, constant from frame 0. In spiking, $\lambda$ is divided by the spikes per frame, keeping the per-count $\lambda \lesssim 5 \times 10^{-4}$. It seals latent and action modules (persistence 0.98–0.996) at no cost to CartPole return. In v4, $\lambda = 0$ costs CartPole (500 → 396), MountainCar (−132 → −187) and LunarLander (102 → 11), not Acrobot (iteration 006). Latents become flow sinks: the task term cuts latent→action flow and the map term seals latents against the controller (iteration 003). | impl (M2) |
 | Latent output | Barrier (Eq. 4e), $-\beta_{LA} p_a / J_{\mathcal{A} a}$ subtracted from $g$ on latent→action pairs; `--la-beta`, off by default. On CartPole at $\beta_{LA} = 0.3$ it raises the latent→action share from 0.002 to 0.029, with flow return 279 ± 22 and spiking 155 ± 9. Candidates for M4 are 0.15 and 0.3. It replaces the exit-floor Proposal, which was rejected: its dual does not converge and its exit is not directed to the actions. | Proposal |
 | Routing protection | **Exempt** (default): $g = 0$ on controller→latent/action pairs, so the controller acts as an input layer. Ablations: none (collapses learning in the closed loop) and dual (Eq. 4a, $q^{\ast} = 0.75 J_{route}(W_0)$, $\eta_\mu = 2$; $\mu$ diverges, see iteration 002). | impl (M2) |
 | $d_j$ homeostasis | **Its own term** (Eq. 4d), $-\epsilon_h (d_j - 1) \kappa_{ij}$ with $\epsilon_h = 5$, every frame, independent of $\lambda$. Its expectation is a uniform column rescaling, so $T$ and $D$ are unchanged. It holds $d_{max} \le 1.04$ in v3 (v1: up to 19). Abstraction: fast heterosynaptic plasticity; the biological evidence is for postsynaptic, not presynaptic, conservation. | impl (M2) |
@@ -54,7 +55,7 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 | Task modulator | TD error $\delta_f = r_f + \gamma V_{f+1} - V_f$, $\gamma = 0.99$. Critic $V = u \cdot \pi_{\mathcal{C}} / p_{\mathcal{C}}$, a readout of controller flow shares, trained by NLMS with $\eta_V = 0.1$. Reward −1 on termination, 0 otherwise, bootstrapping on truncation. | impl (M2) |
 | Task reward (M3) | CartPole −1 on termination; MountainCar and Acrobot $0.1 r$; LunarLander $0.01 r$ (environment reward $r$). | Proposal |
 | TD normalisation | `--td-norm s`: the task term uses $\delta s / \mathrm{RMS}(\delta)$, running mean square over 1000 frames; the critic learns from the raw $\delta$. $s = 0.04$ is CartPole's RMS $\delta$. Fixes the Acrobot collapse (−374 ± 156 → −128 ± 7), neutral on the other tasks. Candidate M3 default. | Proposal |
-| Task rate | $\eta = 10$ in both backends, **annealed** as $\eta / (1 + e / 300)$ over episodes $e$. A constant rate stalls (spiking 88 at $\eta = 10$, 120 at $\eta = 5$; annealed 184). | impl (M2) |
+| Task rate | $\eta = 10$ in both backends (v4 flow: $\eta = 5$, `--eta`), **annealed** as $\eta / (1 + e / 300)$ over episodes $e$. A constant rate stalls (spiking 88 at $\eta = 10$, 120 at $\eta = 5$; annealed 184). | impl (M2) |
 
 ## 5. Parameters
 
@@ -62,9 +63,11 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 | --- | --- | --- |
 | $\alpha$, $n$, $\rho$ | teleportation share, hops per frame, carry-over | 0.2, 20, 0 |
 | $\lambda$, $\epsilon_h$ | structural rate, $d_j$ homeostasis rate | 0.05, 5 |
-| $\eta$, $\tau_\eta$, $\tau_e$ | task rate, its annealing time constant (episodes), eligibility time constant (frames) | 10, 300, 3 |
+| $\eta$, $\tau_\eta$, $\tau_e$ | task rate, its annealing time constant (episodes), eligibility time constant (frames) | 10 (v4 flow: 5), 300, 3 |
+| $p_{cc}$ | controller recurrence | 0.1 (v4: 0) |
+| $\kappa_\beta$, $\beta_{max}$ | adaptive-$\beta$ gain and bound (Eq. 1g, Proposal) | 0 (off; v4: 0.01), 16 |
 | $b$ | race burn-in (steps) | 10 |
-| $\beta_{LA}$ | latent-output barrier (Eq. 4e, Proposal) | 0 (off) |
+| $\beta_{LA}$ | latent-output barrier (Eq. 4e, Proposal) | 0 (off; M3: 0.3) |
 | $\gamma$, $\eta_V$ | discount, critic rate (NLMS) | 0.99, 0.1 |
 | $\theta$, input rate, $k$ | spiking noise, input rate, frame window | 0.5, 1.0, 100 |
 | $w_{min}$, $w_{max}$, $M^{\ast}$ clip | bounds | $10^{-3}$, 1, 20 |
@@ -80,3 +83,4 @@ The full rule is $\Delta W_{ij} = \eta_e \delta_f e_{ij} - \lambda (g_{ij} - \ba
 | v2 | 2026-10-05 | M2 fixes: $d_j$ homeostasis as its own term (Eq. 4d, $\epsilon_h = 5$); race burn-in $b = 10$; spiking $\eta = 5$. Fixes the ratchet and the race bias, but return falls (spiking 140 → 120). | [002](iterations/002-m2.md) |
 | v3 | 2026-10-05 | Task rate $\eta = 10$ annealed as $\eta / (1 + e/300)$ in both backends; the v1 ratchet had been hidden annealing. Spiking return 184 ± 13, flow 287 ± 21. | [002](iterations/002-m2.md) |
 | v3 | 2026-10-20 | Defaults unchanged. Added: M3 task encoders and rewards, parallel spiking heads, TD normalisation (Proposals); the batched spiking engine. | [005](iterations/005-m3-tasks-heads.md) |
+| v4 | 2026-10-21 | M3 configuration: controller built without recurrence ($p_{cc} = 0$); adaptive $\beta$ (Eq. 1g, Proposal) with $\eta = 5$; TD normalisation 0.04 and $\beta_{LA} = 0.3$. Flow return: CartPole 500, MountainCar −132, Acrobot −100, LunarLander 102 (10 seeds). Code defaults unchanged. | [006](iterations/006-m3-reward.md) |

@@ -220,7 +220,15 @@ $$
 
 Its matched score in (4b) is $h_b = \beta \left( \mathbb{I}[b = a^{\ast}] - \tilde{P}_\beta(b) \right) / J^{in}_b$ on action modules, still a $K$-vector, and $\beta = 1$ recovers (4b). In spiking, a many-spike race or a late-window count sharpens the policy, but neither is exactly (1e). The readouts that sharpened the policy gave much higher spiking return (count argmax 186 against 87 for the burn-in race over episodes 201–300; preliminary), at a KL of 0.17 from (1d).
 
-**Limits of this policy family.** $P(a \mid \mathbf{o})$ is a ratio of linear functions of $v$, so it is a mixture of each controller neuron's routing, and it has no temperature to sharpen it. Recurrence inside the controller blurs the stimulus. In a preliminary flow-level test, even ideal routing reached P(correct) = 0.92 with no controller recurrence, falling to 0.59 when 95% of the controller's outgoing weight stayed within the controller ($\alpha = 0.2$). So keep controller recurrence low, for example by giving the controller a larger $\alpha$, or by exempting the controller's own column from the map term (§4.5).
+**Proposal: adaptive $\beta$ (iteration 006).** A fixed $\beta = 4$ was unstable (M2). A $\beta$ that rises on a schedule tied to the training length works, but the schedule is an oracle: it needs the run length in advance and was set per task. It is kept only as a reference ablation. The causal rule is driven by the trend of episode return. After each episode $e$, with running averages $\bar{R}_{fast}$ and $\bar{R}_{slow}$ over 20 and 100 episodes and $s_R$ the running standard deviation of $R$ about $\bar{R}_{slow}$,
+
+$$
+\log \beta \leftarrow \log \beta + \kappa_\beta z_e, \qquad z_e = \mathrm{clip} \left( \frac{\bar{R}_{fast} - \bar{R}_{slow}}{s_R}, -2, 2 \right), \qquad \beta \in [1, \beta_{max}] \qquad \text{(1g)}
+$$
+
+with $\kappa_\beta = 0.01$, $\beta_{max} = 16$ and no update over the first 20 episodes. It is one global scalar and it can fall as well as rise. It is not a gradient. The matched score in (4b) carries the prefactor $\beta$, so $\beta$ is also a global step-size gain on the task term: dividing it out (the score direction kept) removes part of the gain on Acrobot and CartPole and most of it on LunarLander, and none on MountainCar (iteration 006). Biologically, $\beta$ is a global gain set by a utility-trend signal: sustained improvement in return relative to its slow average raises $\beta$ (exploitation), sustained decline lowers it (exploration), and the normalisation by $s_R$ parallels reward-range adaptation in dopamine neurons [Tobler et al. 2005]. This abstracts the utility-driven phasic/tonic switch of the adaptive gain theory of locus coeruleus–noradrenaline [Aston-Jones & Cohen 2005], with tonic dopamine as a secondary candidate whose sign is unresolved. Unlike that theory, (1g) has no term for the absolute level of utility and does not respond to momentary lapses. One scalar acting on both response gain and plasticity is plausible, since noradrenaline also converts Hebbian eligibility traces into LTP [He et al. 2015], but here the coupling follows from matching the score to the readout; it is not an independently motivated mechanism. Open issues: (1g) needs episode boundaries, and a plain per-frame reward rate would not replace it, because it is constant in MountainCar and Acrobot; a leaky mean of $\delta / \mathrm{RMS}(\delta)$ is the candidate. A $\beta$ stuck low after a collapse does not recover, because $z_e \approx 0$ on a new plateau. Slow mean reversion of $\log \beta$ toward a set point is the candidate fix; a term that raises $\beta$ when utility is low would be an engineering choice, the opposite of the adaptive gain theory. Higher $\beta$ raises return, which raises $\beta$, and this positive feedback plausibly explains LunarLander's bimodal outcomes. A matched spiking readout for $\beta$ in the 8–16 range is open: a race to $k$ spikes after burn-in reaches only $\beta_{eff} \approx 1.5$ at $k = 16$ on trained weights (preliminary).
+
+**Limits of this policy family.** $P(a \mid \mathbf{o})$ is a ratio of linear functions of $v$, so it is a mixture of each controller neuron's routing, and it has no temperature to sharpen it. Recurrence inside the controller blurs the stimulus. In a preliminary flow-level test, even ideal routing reached P(correct) = 0.92 with no controller recurrence, falling to 0.59 when 95% of the controller's outgoing weight stayed within the controller ($\alpha = 0.2$). Controller recurrence also defeats the task term. Credit on a controller→controller synapse depends on the postsynaptic neuron's own routing to the actions, so it varies within the controller, and the module-level score $h_b$ of (4b) cannot represent it. This is the general limit of a broadcast third factor in a recurrent network, which per-neuron feedback such as e-prop addresses [Bellec et al. 2020]. On trained weights, controller→controller synapses carried 15–78% of $\lVert W \odot \nabla \log P \rVert^2$, and the (4b) direction had cosine $0.03$–$0.45$ with it on that block (Appendix A). So the controller is built without recurrence ($p_{cc} = 0$, iteration 006), which makes it a feed-forward encoder. A cost-term penalty on $(\mathcal{C}, \mathcal{C})$ is not an alternative: the map term's diagonal is zero, so after the baseline $\bar{g}_j$ it potentiates controller→controller links relative to cross-module ones, and a penalty there would not be a description-length gradient.
 
 **Encoding matters as much as learning.** With one receptive field per observation dimension, the policy is an average of per-dimension votes. In flow-level CartPole tests, even ideal votes reached only 84 steps. One vote per conjunctive $(\theta, \dot{\theta})$ grid cell reached 491. So the controller uses conjunctive receptive fields (preliminary; see the iteration 001 record).
 
@@ -441,7 +449,7 @@ $$
 h_b = \frac{\mathbb{I}[b = a^{\ast}]}{J^{in}_{a^{\ast}}} - \frac{\mathbb{I}[b \in \mathcal{A}]}{\sum_{a' \in \mathcal{A}} J^{in}_{a'}}, \qquad e_{ij} \leftarrow \left( 1 - \frac{1}{\tau_e} \right) e_{ij} + \kappa_{ij} \left( h_{m(i)} - \bar{h}_j \right), \qquad \bar{h}_j = \sum_k T_{kj} h_{m(k)} \qquad \text{(4b)}
 $$
 
-Here $a^{\ast}$ is the chosen action. By the Lemma, the expected trace increment in a frame is $W_{ij} \partial \log \tilde{P}(a^{\ast} \mid \mathbf{o}) / \partial W_{ij}$. That is a weight-scaled policy-gradient score, with exactly the form of (4): a $K$-vector broadcast, a per-neuron baseline and a coincidence. The surrogate is close to the true policy. The cosine with $W \odot \nabla \log P$ computed through the resolvent was $0.997$ (Appendix A).
+Here $a^{\ast}$ is the chosen action. By the Lemma, the expected trace increment in a frame is $W_{ij} \partial \log \tilde{P}(a^{\ast} \mid \mathbf{o}) / \partial W_{ij}$. That is a weight-scaled policy-gradient score, with exactly the form of (4): a $K$-vector broadcast, a per-neuron baseline and a coincidence. The surrogate is close to the true policy on untrained weights: the cosine with $W \odot \nabla \log P$ computed through the resolvent was $0.997$ on a small random network and $0.981$ on the M3 networks. Training with controller recurrence drives it down to $0.55$–$0.85$; without it, the cosine stays at $0.83$–$0.99$ (§2.4, Appendix A).
 
 **TD error as third factor.** The task update is $\Delta W_{ij} = \eta \delta_f e_{ij}$, with a global TD error from a linear critic on the controller's flow shares:
 
@@ -685,8 +693,8 @@ In biology, a frame of 100–250 ms sits between the walk relaxation (tens of ms
 10. **Carry-over.** $\rho$ is a free parameter. With $\pi_{f-1}$ held fixed, the gradient ignores the dependence through earlier frames (cosine $0.98$ with the full gradient in a test).
 11. **Number of latent modules.** $\lvert \mathcal{L} \rvert$ is a hyperparameter unless latent modules are re-detected.
 12. **Routing conflict.** The map term starves the controller's routing unless the dual (4a) or an exemption is used (§4.5). $q^{\ast}$ is a free parameter.
-13. **Surrogate policy gradient.** The action-gated eligibility (4b) follows the gradient of the one-step inflow surrogate, not of (1d) exactly (cosine $0.997$ in a test). The TD critic (4c) is linear in the controller's flow shares.
-14. **Policy family.** (1d) has no temperature, and controller recurrence blurs it (§2.4). The sharpened family (1e) was unstable at the flow level without an entropy floor (M2).
+13. **Surrogate policy gradient.** The action-gated eligibility (4b) follows the gradient of the one-step inflow surrogate, not of (1d) exactly (cosine $0.997$ on an untrained test network; $0.55$–$0.85$ on trained M3 weights with controller recurrence, $0.83$–$0.99$ without). The TD critic (4c) is linear in the controller's flow shares.
+14. **Policy family.** (1d) has no temperature, and controller recurrence blurs it (§2.4). The sharpened family (1e) was unstable at fixed $\beta$ (M2); the adaptive $\beta$ of (1g) is causal but needs episode boundaries, and has no matched spiking readout.
 15. **Carry-over memory.** Linear carry-over forgets geometrically. Holding a cue needs the module-level nonlinearity proposed in §2.3.
 
 ---
@@ -801,6 +809,22 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
 - **Rejected alternatives** (the exit floor, the dual on $J_{\mathcal{A} \ell}$, and a log-barrier on each latent's total exit): Eq. 5 matches to $\le 8 \times 10^{-10}$, and the Monte Carlo correlation is $\ge 0.9998$.
 - **The routing exemption, as implemented with $M^{\ast}$ from the full $q$, is not an exact gradient:** maximum error $7 \times 10^{-3}$, cosine $0.985$. It is exact when $M^{\ast}$ uses exit rates that exclude the exempt pairs.
 
+**Numerical checks for the credit limit of (4b)** (iteration 006; scratch `check_credit.py` and `check_blocks.py`; M3 networks, $\alpha = 0.2$; 20 held-out stimuli, one sampled action each; seed 0):
+
+- **Exact score.** $W \odot \nabla \log P$ through the resolvent matches finite differences of $\log P$ (recomputing $\pi$) to $4.6 \times 10^{-11}$ on a 13-neuron network.
+- **Cosine of the expected (4b) increment ($\kappa = J$) with the exact score:**
+
+  | Weights | CartPole | MountainCar | Acrobot | LunarLander |
+  | --- | --- | --- | --- | --- |
+  | Untrained, $p_{cc} = 0.1$ or 0 | 0.981 | — | 0.981 | — |
+  | Trained, $p_{cc} = 0.1$ | 0.741 | 0.851 | 0.550 | 0.757 |
+  | Trained, $p_{cc} = 0$ | 0.834 | 0.929 | 0.961 | 0.992 |
+  | Trained, $p_{cc} = 0$, oracle $\beta$ ramp | 0.975 | 0.935 | 0.990 | 0.993 |
+
+  The magnitude ratio $\lVert h \rVert / \lVert \text{exact} \rVert$ is 0.56–0.62 untrained and 0.11–0.21 trained, so (4b) under-scales the gradient by a roughly constant factor.
+- **Block decomposition** (trained, $p_{cc} = 0.1$): controller→controller synapses carry 0.22 (CartPole), 0.15 (MountainCar), 0.78 (Acrobot) and 0.47 (LunarLander) of $\lVert \text{exact} \rVert^2$, with within-block cosine 0.03, 0.45, 0.08 and 0.22. On the controller→action and latent→action blocks the cosine is $\ge 0.986$. The module-level resolvent credit (4f, `m4-tmaze`) does not repair the controller→controller block (cosine $-0.02$ to $0.45$).
+- The $0.997$ of the review revisions above holds for untrained weights only.
+
 ## Appendix B: Corrections to the earlier derivation
 
 1. **Sign error.** The earlier version expanded $L(M)$ with $+$ on its second and third terms; both are negative. The gradient's log factor becomes $M^{\ast}_m = \log \frac{q_{\curvearrowright}(p_m+q_m)}{q_m^2} \ge 0$, not $\log \frac{q_{\curvearrowright}}{p_m+q_m} \le 0$.
@@ -840,10 +864,15 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
     - **Proposal: the latent-output barrier (4e).** It replaces the exit-floor Proposal, which was rejected because its dual does not converge and its exit is not directed to the actions.
     - **Dual (4a).** Its target was infeasible once modules seal (§4.5).
     - **Exemptions.** The routing exemption is a heuristic, not an exact gradient (Appendix A).
+13. **Iteration 006, M3 reward (2026-10-21).**
+    - **Correction.** The $0.997$ cosine of (4b) with the true score holds only on untrained weights. On trained weights with controller recurrence it falls to $0.55$–$0.85$ (§4.6, Appendix A).
+    - **Credit limit.** The module-level score cannot credit controller→controller synapses, so the controller is built without recurrence, $p_{cc} = 0$ (§2.4). A $(\mathcal{C}, \mathcal{C})$ cost penalty is rejected: it is not a description-length gradient.
+    - **Proposal: adaptive $\beta$ (1g).** A causal, utility-trend rule replaces fixed $\beta$; the training-length schedule is an oracle reference only (§2.4).
 
 
 ## References
 
+- Aston-Jones, G., & Cohen, J. D. (2005). An integrative theory of locus coeruleus-norepinephrine function: adaptive gain and optimal performance. *Annual Review of Neuroscience*, 28, 403–450.
 - Attwell, D., & Laughlin, S. B. (2001). An energy budget for signaling in the grey matter of the brain. *Journal of Cerebral Blood Flow & Metabolism*, 21(10), 1133–1145.
 - Baars, B. J. (2005). Global workspace theory of consciousness: toward a cognitive neuroscience of human experience. *Progress in Brain Research*, 150, 45–53.
 - Bellec, G., Scherr, F., Subramoney, A., Hajek, E., Salaj, D., Legenstein, R., & Maass, W. (2020). A solution to the learning dilemma for recurrent networks of spiking neurons. *Nature Communications*, 11, 3625.
@@ -861,6 +890,7 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
 - Gold, J. I., & Shadlen, M. N. (2007). The neural basis of decision making. *Annual Review of Neuroscience*, 30, 535–574.
 - Gurney, K. N., Humphries, M. D., & Redgrave, P. (2015). A new framework for cortico-striatal plasticity: behavioural theory meets in vitro data at the reinforcement-action interface. *PLoS Biology*, 13(1), e1002034.
 - Hamid, A. A., Frank, M. J., & Moore, C. I. (2021). Wave-like dopamine dynamics as a mechanism for spatiotemporal credit assignment. *Cell*, 184(10), 2733–2749.
+- He, K., Huertas, M., Hong, S. Z., Tie, X., Hell, J. W., Shouval, H., & Kirkwood, A. (2015). Distinct eligibility traces for LTP and LTD in cortical synapses. *Neuron*, 88(3), 528–538.
 - Henneberger, C., Papouin, T., Oliet, S. H. R., & Rusakov, D. A. (2010). Long-term potentiation depends on release of D-serine from astrocytes. *Nature*, 463, 232–236.
 - Horowitz, J. M., & Esposito, M. (2014). Thermodynamics with continuous information flow. *Physical Review X*, 4, 031015.
 - Kempter, R., Gerstner, W., & van Hemmen, J. L. (1999). Hebbian learning and spiking neurons. *Physical Review E*, 59(4), 4498–4514.
@@ -881,6 +911,7 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
 - Sejnowski, T. J. (1977). Storing covariance with nonlinearly interacting neurons. *Journal of Mathematical Biology*, 4(4), 303–321.
 - Shouval, H. Z., Wang, S. S.-H., & Wittenberg, G. M. (2010). Spike timing dependent plasticity: a consequence of more fundamental learning rules. *Frontiers in Computational Neuroscience*, 4.
 - Still, S., Sivak, D. A., Bell, A. J., & Crooks, G. E. (2012). Thermodynamics of prediction. *Physical Review Letters*, 109, 120604.
+- Tobler, P. N., Fiorillo, C. D., & Schultz, W. (2005). Adaptive coding of reward value by dopamine neurons. *Science*, 307(5715), 1642–1645.
 - Turrigiano, G. G., Leslie, K. R., Desai, N. S., Rutherford, L. C., & Nelson, S. B. (1998). Activity-dependent scaling of quantal amplitude in neocortical neurons. *Nature*, 391(6670), 892–896.
 - Vogels, T. P., Sprekeler, H., Zenke, F., Clopath, C., & Gerstner, W. (2011). Inhibitory plasticity balances excitation and inhibition in sensory pathways and memory networks. *Science*, 334(6062), 1569–1573.
 - Wang, Z., Joshi, S., Savel'ev, S. E., et al. (2017). Memristors with diffusive dynamics as synaptic emulators for neuromorphic computing. *Nature Materials*, 16, 101–108.

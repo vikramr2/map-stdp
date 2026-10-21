@@ -2,7 +2,35 @@
 
 This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. The project is research, so entries are dated rather than versioned. Record decisions and reversals here as well as file changes.
 
+## 2026-10-21
+
+### Added (iteration 006: M3 reward)
+
+- **Model v4** (`docs/model.md`): the M3 configuration `--p-cc 0 --beta-kappa 0.01 --beta-max 16 --eta 5` (with `--td-norm 0.04`, `--la-beta 0.3`). Flow return over 10 seeds: CartPole 272.5 → 500.0, MountainCar −184.2 → −131.8, Acrobot −128.8 → −100.1, LunarLander −37.8 → 102.5 (± 94, one seed collapsed). Code defaults unchanged, so v1–v3 and `tests/golden.json` reproduce bit for bit (9/9).
+- **`experiments/m2.py`:** `Agent(p_cc, beta_end, beta_ramp, beta_kappa, beta_max, score_unit)` and `ablate={"critic": "net"}`; the result JSON records them.
+- **`experiments/m3.py`:** `--lam`, `--p-cc`, `--beta`, `--beta-end`, `--beta-ramp`, `--eta`, `--beta-kappa`, `--beta-max`, `--score-unit`, `--critic net`; file-name tokens for each; `summary()` keeps the variants out of the baseline groups.
+- **`experiments/tasks.py`:** `CartPoleFull` (all four observations; a negative result).
+- **Results:** about 515 `experiments/results/m3_*` runs, including the map-term ablation of v4 (`lam0`).
+- **Docs:** `docs/iterations/006-m3-reward.md`; derivation §2.4 (credit limit, Proposal Eq. 1g), §4.6, §9 items 13–14, Appendix A (numerical checks for the credit limit, from `/derivation-check`: exact score to $4.6 \times 10^{-11}$, cosines and block decomposition) and Appendix B item 13; three references; SPEC controller entry and M3 row.
+
+### Changed (decisions)
+
+- **Controller built without recurrence ($p_{cc} = 0$).** Map-STDP's module-level task term cannot credit controller→controller synapses (cosine of Eq. 4b with the exact score 0.55–0.85 on trained weights, 0.83–0.99 without them). The controller is now described as a feed-forward encoder, not cortex or a workspace (`neuroscientist`).
+- **Correction:** the $0.997$ cosine of Eq. 4b with the true score holds only on untrained weights.
+- **Proposal: adaptive $\beta$ (Eq. 1g)**, a causal utility-trend gain, one setting for all tasks. **The time-based $\beta$ ramp is rejected as a model component** (the user's decision): it needs the run length in advance. It stays only as a labelled oracle reference flag.
+- **Rejected:** a $(\mathcal{C}, \mathcal{C})$ cost penalty (not a description-length gradient), the Eq. 4f resolvent credit on reactive tasks, an entropy-gradient term, the rich and network critics, `CartPoleFull`.
+- **Deferred:** a matched sharpened spiking readout (a race to $k$ spikes reaches only $\beta_{eff} \approx 1.5$).
+- **Encoder:** kept fixed through M3 (`neuroscientist` review of visual-cortex models).
+- **The map term still earns its place in v4.** With `--lam 0` (10 seeds): CartPole 500.0 → 396.4 (p = .05), MountainCar −131.8 → −187.1 (p = 1e-4; 8 of 10 seeds never reach the goal, so $\beta$ never rises), LunarLander 102.5 → 11.0 (p = .02); Acrobot unchanged (−100.1 against −98.3).
+
 ## 2026-10-20
+
+### Changed (CLAUDE.md)
+
+- **CLAUDE.md** gains three things a fresh session would otherwise learn by hitting them:
+  - **A "Traps" list:** RNG-call order and the golden tests, no `zip(strict=True)`, the `m2_*` result-file namespace, and silent spiking modules.
+  - **The unmerged `m4-tmaze` branch:** a T-maze M4 prototype whose iteration number 004 collides with `main`'s.
+  - **The symptoms of launching outside the `map-stdp` env:** the KaTeX hook errors and CodeGraph does not connect.
 
 ### Added (iteration 005: M3 tasks, spiking heads, learner limits)
 
