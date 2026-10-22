@@ -14,16 +14,21 @@ from experiments import m2
 from mapstdp import spiking as sp
 
 GOLDEN = pathlib.Path(__file__).parent / "golden.json"
-CASES = [("flow", "exempt", 0.05, "v3"), ("flow", "dual", 0.05, "v1"), ("flow", "none", 0.05, "v2"),
-         ("spiking", "exempt", 0.05, "v3"), ("spiking", "exempt", 0.0, "v1")]
+CASES = [("flow", "exempt", 0.05, "v3"), ("spiking", "exempt", 0.05, "v3")]  # (backend, routing, lam, model tag)
+REMOVED = ("mu", "q_star")  # dual-routing (Eq. 4a) state, removed in iteration 013; still recorded in golden.json
 
 
 def fingerprint(backend, routing, lam, model, episodes=3):
-    agent, env = m2.Agent(backend, routing, lam, 0, model), gym.make("CartPole-v1")
+    assert model == m2.MODEL, "models v1 and v2 were removed in iteration 013"
+    agent, env = m2.Agent(m2.Config(backend, routing, lam, 0)), gym.make("CartPole-v1")
     returns = [agent.episode(env) for _ in range(episodes)]
     ev = agent.evaluate(kl_obs=3, kl_reps=5)
     return {"returns": returns, "W_sum": float(agent.W.sum()), "W_sq": float((agent.W ** 2).sum()),
-            "u_sum": float(agent.u.sum()), "mu": agent.mu, "q_star": agent.q_star, "silent": agent.silent, "eval": ev}
+            "u_sum": float(agent.u.sum()), "silent": agent.silent, "eval": ev}
+
+
+def golden_entry(key):
+    return {k: v for k, v in json.loads(GOLDEN.read_text())[key].items() if k not in REMOVED}
 
 
 def case_id(case):
@@ -37,7 +42,7 @@ def test_self_checks(module):
 
 @pytest.mark.parametrize("case", CASES, ids=case_id)
 def test_m2_reproduces_golden(case):
-    assert fingerprint(*case) == json.loads(GOLDEN.read_text())[case_id(case)]
+    assert fingerprint(*case) == golden_entry(case_id(case))
 
 
 def test_summary_reads_all_results(capsys):
@@ -53,7 +58,7 @@ def readout_fingerprint():
 
 
 def test_spiking_readout_and_pairings():
-    assert readout_fingerprint() == json.loads(GOLDEN.read_text())["spiking-readout"]
+    assert readout_fingerprint() == golden_entry("spiking-readout")
 
 
 if __name__ == "__main__" and "--update" in sys.argv:

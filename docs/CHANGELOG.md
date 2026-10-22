@@ -2,6 +2,16 @@
 
 This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. The project is research, so entries are dated rather than versioned. Record decisions and reversals here as well as file changes.
 
+## 2026-10-22
+
+### Removed / Changed (iteration 013 prep: prune unadopted variants, `m2.Config`)
+
+- **Removed (not adopted; code, CLI flags and golden cases):** models v1 and v2 and the dual routing term (Eq. 4a) in `experiments/m2.py` (`--model`, `--routing dual`, `Agent.mu`/`q_star`, `EPS`, `ETA_SPK`, `ETA_MU`, `Q_STAR_FRAC`); the β ramp (`--beta-end`, `--beta-ramp`), mean reversion (Eq. 1g′: `--beta-eps`, `--beta-set`, `--beta-decay`), trace signal (`--beta-signal`), step cap (`--beta-step-cap`, `--beta-step-shape`) and score-unit ablation (`--score-unit`); the TD(λ) critic (Eq. 4c′, `--critic-lambda`); the `rich` and `net` critics (`--critic`); the usage term (Eq. 4i: `--c-use`, `--use-tau`, `core.usage_score` and its self-check); the MSPRT readout in `experiments/ceiling.py`. `mapstdp/core.py` keeps `modulator(routing='dual')` for `experiments/m1.py`. Golden cases `flow-dual-0.05-v1`, `flow-none-0.05-v2`, `spiking-exempt-0.0-v1` deleted from `tests/golden.json`; nothing regenerated.
+- **Changed:** `m2.Agent(cfg)` takes one frozen `m2.Config` dataclass (shared by the m2 and m3 CLIs, `m3.fidelity`, `ceiling`, `m2_viz`); `m2.run(cfg, episodes, name=None)`. `Agent.episode` split into `task_step` and `track`; the KL readout check moved to `Agent.race_fidelity`; `regulariser` became `entropy_term` (Eq. 4h only).
+- **Result files:** names unchanged for every kept configuration. New files no longer carry the pruned keys `mu`, `q_star`, `beta_end`, `beta_ramp`, `score_unit`, `params.eta_mu`, or `use_rms_ratio`/`ubar` in evals. `m2 --summary`, `m3 --summary`, `m3 --ablations` and `ceiling --summary` print byte-identical output over the committed results (v1/v2, dual, MSPRT and pruned-variant files included).
+- **Behaviour:** remaining golden cases (`flow-exempt-0.05-v3`, `spiking-exempt-0.05-v3`, `spiking-readout`) bit-identical; v4 LunarLander, iteration-012 MountainCar, spiking 2-head and diffbound runs reproduce the original code's returns exactly. ruff clean; pyright 42 → 33 errors.
+- **Docs:** CLAUDE.md `m2.py` bullet updated for `m2.Config` and the pruned model versions; dual routing marked as `m1.py`-only. Decision (user): no no-latent control or new golden fingerprints before the prune; the no-latent ablation is deferred to the latent fixes and sweeps of iteration 013, and code still needed as reference (flow training, ceilings, ablations) is kept until superseded.
+
 ## 2026-10-21
 
 ### Added (iteration 012: encoders, separate critic, entropy terms)

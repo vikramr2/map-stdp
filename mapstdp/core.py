@@ -201,7 +201,7 @@ def action_entropy(W, pi, m, roles):
 
 
 def entropy_score(W, pi, m, roles):
-    """Entropy modulator (iteration 012 C1, Proposal) as a K x K table tab[b, a'] = g_b / J^in_b with
+    """Entropy modulator (Eq. 4h, iteration 012, Proposal) as a K x K table tab[b, a'] = g_b / J^in_b with
     g_b = -P~(b) (log P~(b) - sum_a P~(a) log P~(a)) on action modules, 0 elsewhere (P~: beta = 1 shares).
     centered(tab) * kappa with kappa = J averages to W * dH(P~)/dW, pi fixed (self-check)."""
     K, A = len(roles), roles == "A"
@@ -209,18 +209,6 @@ def entropy_score(W, pi, m, roles):
     P = Jin[A] / Jin[A].sum()
     h = np.zeros(K)
     h[A] = -P * (np.log(P) - (P * np.log(P)).sum()) / Jin[A]
-    return np.repeat(h[:, None], K, 1)
-
-
-def usage_score(W, pi, m, roles, ubar):
-    """Usage homeostasis modulator (iteration 012 C2, Proposal): tab[b, a'] = (ubar_b - 1/|A|) / J^in_b on action
-    modules (ubar: running average of the beta = 1 action shares, length |A|), 0 elsewhere. The update is
-    -centered(tab) * kappa, whose average (kappa = J) is -W * d/dW sum_b (ubar_b - 1/|A|) log J^in_b, ubar and pi
-    fixed."""
-    K, A = len(roles), roles == "A"
-    Jin = action_inflow(W, pi, m, K)
-    h = np.zeros(K)
-    h[A] = (np.asarray(ubar) - 1 / A.sum()) / Jin[A]
     return np.repeat(h[:, None], K, 1)
 
 
@@ -306,16 +294,12 @@ if __name__ == "__main__":  # self-check: Eq. 1a bound, Eq. 7 vs finite differen
     assert (np.abs(W3.sum(0) - 1) < np.abs(1.5 * W.sum(0) - 1)).all()
     W5, m5, r5, mk5 = build_network((4, 3, 3, 3, 3), "CLAAA", p_same=0.8, p_cross=0.2, seed=2)  # iteration 012
     pi5 = flow(W5, stimulus(0.6, m5, r5), alpha)
-    ub = np.array([0.5, 0.3, 0.2])
-    U = lambda W_: (np.log(action_inflow(W_, pi5, m5, 5)[r5 == "A"]) * (ub - 1 / 3)).sum()  # noqa: E731
     gH = centered(entropy_score(W5, pi5, m5, r5), W5, m5) * pi5 / W5.sum(0)  # Eq. 5 form: dH/dW, pi fixed
-    gU = centered(usage_score(W5, pi5, m5, r5, ub), W5, m5) * pi5 / W5.sum(0)
     for i, j in zip(*np.nonzero(mk5)):
         E = np.zeros_like(W5)
         E[i, j] = h
         assert abs((action_entropy(W5 + E, pi5, m5, r5) - action_entropy(W5 - E, pi5, m5, r5)) / (2 * h) - gH[i, j]) \
             < 1e-6
-        assert abs((U(W5 + E) - U(W5 - E)) / (2 * h) - gU[i, j]) < 1e-6
     Cf = fourier_coeffs(4, 2, 2)
     assert len(Cf) == 32 and fourier_features(np.full(4, 0.5), Cf).min() >= 0
     vf = fourier_stimulus(np.zeros(4), Cf, *build_network((64, 4, 4), "CLA")[1:3])

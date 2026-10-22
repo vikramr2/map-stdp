@@ -24,7 +24,7 @@ def path(kind, seed, la_beta=0.0):
 
 
 def train(seed, episodes, la_beta=0.0):
-    agent, env, R = m2.Agent("spiking", "exempt", 0.05, seed, "v3", la_beta=la_beta), gym.make("CartPole-v1"), []
+    agent, env, R = m2.Agent(m2.Config("spiking", seed=seed, la_beta=la_beta)), gym.make("CartPole-v1"), []
     for ep in range(1, episodes + 1):
         R.append(agent.episode(env))
         if ep % 50 == 0:
@@ -57,7 +57,7 @@ def walk_hops(S, X, T, rng):
 def record(seed, la_beta=0.0, tries=20):
     """Best of `tries` frozen-weight episodes (the policy is stochastic), so the page shows a long balance."""
     z = np.load(path("W", seed, la_beta))
-    agent = m2.Agent("spiking", "exempt", 0.05, seed, "v3", la_beta=la_beta)
+    agent = m2.Agent(m2.Config("spiking", seed=seed, la_beta=la_beta))
     agent.W = z["W"]
     T = agent.W / agent.W.sum(0)
     hop_rng = np.random.default_rng(seed)
