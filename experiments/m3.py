@@ -7,6 +7,24 @@ MountainCar, Acrobot and LunarLander, flow against spiking with H parallel heads
     needs the run length, never a default or a recommended setting), --eta E (task rate); file-name tokens
     pcc<P>, b<B>[-<B2>r<R>], eta<E> after the ablation tokens; --beta-kappa k [--beta-max B] (causal adaptive beta,
     token bk<k>m<B>), --score-unit (Eq. 4b increment / beta, token su), --critic net (network-activity critic).
+  Iteration 007 (adaptive beta, Proposal): --beta-eps e [--beta-set B0] (mean reversion of log beta toward a fixed set
+    point B0 or, without --beta-set, upward toward an experience-dependent one, leaking over --beta-decay D episodes
+    (0: strict running maximum); tokens re<e>[s<B0>][d<D>] after bk..m..),
+    --beta-signal trace (per-frame update from the reset-at-termination reward trace, no episode boundaries;
+    --beta-kappa is then per frame; token tr).
+  Iteration 008 (Proposal): --beta-step-cap c [--beta-step-shape {min,sat,invu,hyb}] (Eq. 4b increment scaled by
+    beta_eta / beta, beta_eta = min(beta, c), c beta / (c + beta), beta exp(1 - beta / c) or beta up to c and
+    c (1 + log(beta / c)) above; policy keeps the full beta; token sc<c>[sat|iu|hy] after the re.. token; excludes
+    --score-unit).
+  Iteration 009 (Proposal): --critic-lambda l (TD(lambda) critic, Eq. 4c with a trace; token cl<l>), --gamma g (critic
+    and delta discount; token g<g>), both after the sc.. token; --tau-e T (task trace, ablation token tau_e<T>).
+  Iteration 010 (Proposal, spiking): --readout diffbound (count-difference race to a bound, theta from beta through
+    m2.BOUND_CAL; combine with --beta B or --beta-kappa k --beta-max B; token dbc after the cl../g.. tokens).
+  Iteration 012 (Proposal, flow): --encoder SPEC (controller encoder, tasks.with_encoder: g<n>s<sigma> grid or
+    f<order>c<conj>[h][b] Fourier; token enc<SPEC>), --critic-layer SPEC (separate critic on its own fixed RF layer,
+    tasks.critic_layer; token crit<SPEC>), --c-ent c [--ent-target H0] (C1 entropy term; token ce<c>[H<H0>]),
+    --c-use c [--use-tau T] (C2 usage homeostasis; token cu<c>[t<T>]); all after the dbc token, before eta.
+    --episodes E off the task's default adds the token ep<E> (after su).
   python -m experiments.m3 --summary    -> per task: random, flow and spiking per H (last-100 return over seeds)
   python -m experiments.m3 --fidelity   -> per task and H: error of the pooled pi-hat and kappa against the flow
 Heads: H independent spiking replicas of the network on the same W (tasks share one block-diagonal SuperNeuroMAT
@@ -58,7 +76,12 @@ def nondefault(r):
     eta0 = m2.ETA if r["backend"] == "flow" else r["params"]["eta_task"]
     return r.get("lam", 0.05) != 0.05 or r.get("p_cc", 0.1) != 0.1 or r.get("beta", 1.0) != 1.0 or \
         r.get("beta_end") is not None or \
-        r.get("eta_task", eta0) != eta0 or bool(r.get("beta_kappa")) or bool(r.get("score_unit"))
+        r.get("eta_task", eta0) != eta0 or bool(r.get("beta_kappa")) or bool(r.get("score_unit")) or \
+        bool(r.get("beta_eps")) or r.get("beta_signal", "episode") != "episode" or bool(r.get("beta_step_cap")) or \
+        bool(r.get("critic_lambda")) or r.get("gamma", m2.GAMMA) != m2.GAMMA or \
+        r.get("ablate", {}).get("tau_e", m2.TAU_E) != m2.TAU_E or r.get("readout", "race") != "race" or \
+        bool(r.get("encoder_spec") or r.get("critic_layer") or r.get("c_ent") or r.get("c_use")) or \
+        r["episodes"] != TASKS[r.get("task", "CartPole")].episodes
 
 
 def variant_tokens(a):
@@ -67,7 +90,18 @@ def variant_tokens(a):
     if a.beta != 1.0 or a.beta_end is not None:
         t.append(f"b{a.beta:g}" + (f"-{a.beta_end:g}r{a.beta_ramp:g}" if a.beta_end is not None else ""))
     t += [f"bk{a.beta_kappa:g}m{a.beta_max:g}"] if a.beta_kappa else []
-    return t + ([f"eta{a.eta:g}"] if a.eta is not None else []) + (["su"] if a.score_unit else [])
+    t += [f"re{a.beta_eps:g}" + (f"s{a.beta_set:g}" if a.beta_set else "") + (f"d{a.beta_decay:g}" if a.beta_decay
+                                                                              else "")] if a.beta_eps else []
+    t += [f"sc{a.beta_step_cap:g}" + {"min": "", "sat": "sat", "invu": "iu", "hyb": "hy"}[a.beta_step_shape]] \
+        if a.beta_step_cap else []
+    t += ["tr"] if a.beta_signal == "trace" else []
+    t += ([f"cl{a.critic_lambda:g}"] if a.critic_lambda else []) + ([f"g{a.gamma:g}"] if a.gamma != m2.GAMMA else [])
+    t += ["dbc"] if a.readout == "diffbound" else []
+    t += ([f"enc{a.encoder}"] if a.encoder else []) + ([f"crit{a.critic_layer}"] if a.critic_layer else [])
+    t += [f"ce{a.c_ent:g}" + (f"H{a.ent_target:g}" if a.ent_target is not None else "")] if a.c_ent else []
+    t += [f"cu{a.c_use:g}" + (f"t{a.use_tau:g}" if a.use_tau != m2.USE_TAU else "")] if a.c_use else []
+    t += ([f"eta{a.eta:g}"] if a.eta is not None else []) + (["su"] if a.score_unit else [])
+    return t + ([f"ep{a.episodes}"] if a.episodes and a.episodes != TASKS[a.task].episodes else [])
 
 
 def summary():
@@ -139,6 +173,30 @@ def main():
     ap.add_argument("--beta-kappa", type=float, default=0.0, help="causal adaptive beta gain (0 = off)")
     ap.add_argument("--beta-max", type=float, default=4.0, help="upper bound of the adaptive beta")
     ap.add_argument("--score-unit", action="store_true", help="ablation: Eq. 4b increment divided by beta")
+    ap.add_argument("--beta-step-cap", type=float, default=0.0,
+                    help="cap c on beta's gain of the Eq. 4b increment (min(beta, c)); policy keeps beta; 0 = off")
+    ap.add_argument("--beta-step-shape", choices=("min", "sat", "invu", "hyb"), default="min",
+                    help="shape of the plasticity gain under --beta-step-cap: hard cap, saturating, inverted U, "
+                         "identity then logarithmic")
+    ap.add_argument("--beta-eps", type=float, default=0.0, help="adaptive beta: mean-reversion rate of log beta")
+    ap.add_argument("--beta-set", type=float, default=0.0,
+                    help="adaptive beta: fixed set point (two-sided); 0 = experience-dependent set point, upward only")
+    ap.add_argument("--beta-decay", type=float, default=0.0,
+                    help="adaptive beta: leak time (episodes) of the experience-dependent set point; 0 = strict max")
+    ap.add_argument("--beta-signal", choices=("episode", "trace"), default="episode",
+                    help="adaptive beta: per-episode return trend (Eq. 1g) or per-frame reward trace (no boundaries)")
+    ap.add_argument("--critic-lambda", type=float, default=0.0,
+                    help="TD(lambda) critic trace (Eq. 4c with z <- gamma lambda z + x; Proposal); 0 = Eq. 4c")
+    ap.add_argument("--gamma", type=float, default=m2.GAMMA, help="discount of the critic and delta (Eq. 4c)")
+    ap.add_argument("--readout", choices=("race", "diffbound"), default="race",
+                    help="spiking action readout: race (Eq. 1d) or count-difference bound (Proposal, iteration 010)")
+    ap.add_argument("--encoder", default=None, help="controller encoder spec (iteration 012): g<n>s<sigma> | "
+                    "f<order>c<conj>[h][b]")
+    ap.add_argument("--critic-layer", default=None, help="separate critic RF layer spec (iteration 012)")
+    ap.add_argument("--c-ent", type=float, default=0.0, help="C1 entropy term coefficient (0 = off)")
+    ap.add_argument("--ent-target", type=float, default=None, help="C1: adapt c_ent toward H(P~) = this x log|A|")
+    ap.add_argument("--c-use", type=float, default=0.0, help="C2 usage homeostasis coefficient (0 = off)")
+    ap.add_argument("--use-tau", type=float, default=m2.USE_TAU, help="C2 usage average time constant (frames)")
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--ablations", action="store_true", help="summary of the flow learning-rule ablations")
     ap.add_argument("--fidelity", action="store_true")
@@ -164,7 +222,11 @@ def main():
                la_beta=a.la_beta, task=a.task, heads=a.heads,
                name=name(a.task, a.backend, a.heads, a.la_beta, a.seed, a.td_norm, variant), engine=a.engine,
                td_norm=a.td_norm, ablate=ablate, p_cc=a.p_cc, beta_end=a.beta_end, beta_ramp=a.beta_ramp,
-               beta_kappa=a.beta_kappa, beta_max=a.beta_max, score_unit=a.score_unit)
+               beta_kappa=a.beta_kappa, beta_max=a.beta_max, score_unit=a.score_unit, beta_eps=a.beta_eps,
+               beta_set=a.beta_set, beta_signal=a.beta_signal, beta_decay=a.beta_decay,
+               beta_step_cap=a.beta_step_cap, beta_step_shape=a.beta_step_shape, critic_lambda=a.critic_lambda,
+               gamma=a.gamma, readout=a.readout, encoder=a.encoder, critic_layer=a.critic_layer, c_ent=a.c_ent,
+               c_use=a.c_use, use_tau=a.use_tau, ent_target=a.ent_target)
     print(f"done: last100 {np.mean(r['returns'][-100:]):.1f}, {r['frames']} frames, {r['ms_per_frame']:.2f} ms/frame")
 
 

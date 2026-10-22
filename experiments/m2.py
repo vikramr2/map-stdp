@@ -15,13 +15,47 @@ Agent(beta_end=B, beta_ramp=R): beta ramped linearly from beta to B over the fir
 Agent(beta_kappa=k, beta_max=B): causal adaptive gain (Proposal, flow only), one global scalar: after each episode
   log beta += k z, z = (R_fast - R_slow) / sd(R) clipped to [-2, 2] (fast / slow running returns over BETA_TAU_F /
   BETA_TAU_S episodes), beta kept in [beta, B]. It rises while return improves and falls when it drops.
+Agent(beta_eps=e[, beta_set=B0]) (Proposal, iteration 007): mean reversion, log beta += e (log s - log beta) per update.
+  beta_set B0 > 0: a fixed set point s = B0, both ways (homeostatic tone). beta_set 0: an experience-dependent set point
+  (Eq. 1g'), pulling up only: s rises at once to the slow average of log beta (BETA_TAU_S episodes, BETA_TS frames) and,
+  with beta_decay D > 0, leaks back toward it over D episodes (0: a strict running maximum). beta returns toward the
+  gain it had sustained after a fall, and the update is unchanged while beta is at or above s.
+Agent(beta_signal='trace') (Proposal, iteration 007): beta updated every frame, no episode boundaries. Utility is the
+  reset-at-termination discounted reward trace G_f = r_f + gamma G_{f-1} (G_{f-1} := 0 after a terminal frame); z_f is
+  the trend of its bias-corrected running means over BETA_TF and BETA_TS frames, over the spread of its BETA_TH-frame
+  mean, clipped to [-2, 2]; log beta += beta_kappa z_f per frame (beta_kappa is then per frame) after BETA_TF frames.
 Agent(score_unit=True): ablation, the Eq. 4b increment divided by beta (matched direction, beta-free magnitude).
+Agent(beta_step_cap=c[, beta_step_shape=S]) (Proposal, iteration 008): the Eq. 4b increment scaled by beta_eta / beta,
+  a beta-dependent step size on the same matched-score direction, while the policy (Eq. 1e) keeps the full beta.
+  beta_eta: 'min' (default) min(beta, c), a hard cap; 'sat' c beta / (c + beta), smooth saturation (half at beta = c);
+  'invu' beta exp(1 - beta / c), an inverted U peaking at beta = c; 'hyb' beta up to c, then c (1 + log(beta / c))
+  (continuous, slope 1 at c). c = 0 (default) is off. Excludes score_unit.
 ablate critic='net': critic features from network activity, the flow shares of controller and latent neurons.
+Agent(critic_lambda=l) (Proposal, iteration 009): TD(lambda) critic, Eq. 4c with the trace z <- gamma l z + x and the
+  normalised step u += eta_V delta z / (x . x); z is periphery state, reset each episode; l = 0 is Eq. 4c bit for bit.
+Agent(gamma=g) (Proposal, iteration 009): discount of the critic and of delta (Eq. 4c); default GAMMA = 0.99. The
+  beta_signal='trace' reward trace keeps GAMMA (a separate quantity); the task trace e uses tau_e, not gamma.
+Agent(readout='diffbound') (Proposal, iteration 010; spiking only): the action is the count-difference race to a bound
+  (sp.diffbound, at most one spike per action module and head per step) instead of the race. beta (fixed, or adaptive
+  with beta_kappa) is the target sharpness: theta = BOUND_CAL^-1(beta), log-log interpolation of the measured
+  beta_eff(theta) table for the agent's heads, clipped to the table, randomised between floor and ceil for a fractional
+  theta. The Eq. 4b score uses beta (matched where the table reaches beta; below its first entry the readout is sharper
+  than the score). Draws one extra uniform per frame, only on this path.
   python -m experiments.m2 --summary   -> results table over seeds (plus the random-policy return)
 Both backends share one frame update; they differ only in where pi, kappa and the action come from:
   flow:    pi = n-hop flow, kappa = J (expected pairings), action ~ Eq. 1d;
   spiking: pi = spike shares, kappa = covariance count / spikes in the frame, action = race readout.
-Dividing kappa by the frame's spike count is the 1/(spikes per frame) scaling of lambda and eta (model.md §4)."""
+Dividing kappa by the frame's spike count is the 1/(spikes per frame) scaling of lambda and eta (model.md §4).
+Iteration 012 (Proposals, flow; all off by default, none draws from rng):
+Agent(encoder=SPEC): the controller encoder replaced by tasks.with_encoder(task, SPEC) (grid g<n>s<sigma> or Fourier
+  f<order>c<conj>[h][b]); the controller size becomes the feature count.
+Agent(critic_layer=SPEC): separate critic, V = u . phi(o) on its own fixed RF layer (tasks.critic_layer), NLMS as
+  Eq. 4c; the actor's flow is not used by the critic.
+Agent(c_ent=c): C1, entropy term, a separate per-frame ungated update W += eta_e c kappa (g_b / J^in_b - gbar_j)
+  (core.entropy_score; average W * grad H(P~), P~ the beta = 1 action shares, pi fixed); eta_e the annealed task rate.
+Agent(c_use=c[, use_tau=T]): C2, usage homeostasis, W -= eta_e c kappa ((ubar_b - 1/|A|) / J^in_b - baseline_j)
+  (core.usage_score), ubar the running average of P~ over T frames.
+Agent(ent_target=f[, ent_k=k]): c_ent adapted SAC-style, log c_ent += k (f log|A| - H(P~)) per frame (nats)."""
 import argparse
 import dataclasses
 import glob
@@ -32,7 +66,8 @@ import time
 import gymnasium as gym
 import numpy as np
 
-from experiments.tasks import TASKS, random_states
+from experiments.tasks import TASKS, random_states, with_encoder
+from experiments.tasks import critic_layer as critic_layer_fn
 from mapstdp import core
 from mapstdp import spiking as sp
 
@@ -40,11 +75,15 @@ ALPHA, N_HOPS, K_SPK, RATE, THETA = 0.2, 20, 100, 1.0, 0.5
 ETA, TAU_E, GAMMA, ETA_V, EPS, ETA_MU = 10.0, 3.0, 0.99, 0.1, 1.0, 2.0
 ETA_SPK, EPS_H, BURN = 5.0, 5.0, 10  # v2: spiking task rate, d_j homeostasis rate (own term), race burn-in (steps)
 ETA_TAU = 300.0  # v3: task-rate annealing time constant (episodes)
+USE_TAU, ENT_K = 300.0, 1e-3  # iteration 012: usage-average time constant (frames), entropy-target gain
+REC_EPIS = 20  # iteration 012: episodes recorded at the end of a run for diag012
 BETA_TAU_F, BETA_TAU_S = 20.0, 100.0  # beta_kappa (Proposal): fast and slow running episode return (episodes)
+BETA_TF, BETA_TS, BETA_TH = 4000.0, 20000.0, 300.0  # beta_signal='trace': fast, slow and spread time constants (frames)
 TD_TAU = 1000.0  # --td-norm (Proposal): time constant (frames) of the running mean square of delta
 RICH_N = 256  # ablation critic='rich': RFs on the full observation (tasks 'pool' encoder)
 RICH_MR = (np.zeros(RICH_N, int), np.array(["C"]))  # module labels / roles for a stand-alone RF layer
 Q_STAR_FRAC = 0.75  # dual routing target q* as a fraction of the held-out mean J_route at W_0 (Eq. 4a)
+BOUND_CAL = {16: ((1, 3.1), (2, 3.5), (4, 4.0), (8, 5.0), (16, 6.5), (32, 9.2), (64, 11.5))}  # heads: (theta, beta_eff)
 LOG_EVERY = 50  # module sizes are per task (tasks.Task.sizes; CartPole 36, 16, 16, 16, 16)
 OUT = pathlib.Path(__file__).parent / "results"
 
@@ -79,8 +118,19 @@ class Agent:
 
     def __init__(self, backend, routing, lam, seed, model="v3", beta=1.0, eta_tau=None, la_beta=0.0,
                  task="CartPole", heads=1, engine="snm", td_norm=0.0, ablate=None, p_cc=0.1, beta_end=None,
-                 beta_ramp=None, beta_kappa=0.0, beta_max=4.0, score_unit=False):
+                 beta_ramp=None, beta_kappa=0.0, beta_max=4.0, score_unit=False, beta_eps=0.0, beta_set=0.0,
+                 beta_signal="episode", beta_decay=0.0, beta_step_cap=0.0, beta_step_shape="min", critic_lambda=0.0,
+                 gamma=GAMMA, readout="race", encoder=None, critic_layer=None, c_ent=0.0, c_use=0.0,
+                 use_tau=USE_TAU, ent_target=None, ent_k=ENT_K):
         self.task, self.heads, self.engine = TASKS[task], heads, engine
+        if encoder:  # iteration 012: controller encoder spec (tasks.with_encoder)
+            self.task = with_encoder(self.task, encoder)
+        assert not (encoder or critic_layer or c_ent or c_use or ent_target) or backend == "flow", "iteration 012: flow"
+        self.encoder, self.critic_layer, self.c_ent, self.c_use, self.use_tau = encoder, critic_layer, c_ent, c_use, \
+            use_tau
+        self.ent_target, self.ent_k, self.reg_sq = ent_target, ent_k, np.zeros(3)  # task, entropy, usage sq sums
+        self.crit = critic_layer_fn(self.task, critic_layer) if critic_layer else None
+        assert ent_target is None or c_ent > 0, "ent_target adapts c_ent multiplicatively: start it above 0"
         ab = dict(wmin=1e-3, tau_e=TAU_E, critic="ctrl") | (ablate or {})  # M3 learning-rule ablations (iteration 005)
         self.ablate, self.wmin, self.tau_e = ab, ab["wmin"], ab["tau_e"]
         self.rich = rich_critic(self.task) if ab["critic"] == "rich" else None
@@ -97,12 +147,22 @@ class Agent:
         self.eps, self.eps_h, self.burn = (0.0, EPS_H, BURN) if v2 else (EPS, 0.0, 0)
         self.eta = ETA_SPK if model == "v2" and backend == "spiking" else ETA
         self.beta, self.eta_tau, self.ep, self.la_beta = beta, eta_tau, 0, la_beta
-        assert beta == 1.0 or backend == "flow", "the race readout has no matched sharpened policy"
+        bound = readout == "diffbound"
+        assert readout == "race" or (bound and backend == "spiking" and heads in BOUND_CAL), "diffbound: spiking, cal H"
+        assert beta == 1.0 or backend == "flow" or bound, "the race readout has no matched sharpened policy"
+        self.readout, self.bound_n, self.bound_dl, self.bound_th = readout, 0, 0, 0.0
         self.p_cc, self.beta0, self.beta_end = p_cc, beta, beta_end
         self.beta_ramp = (beta_ramp or self.task.episodes / 2) if beta_end is not None else None
         assert beta_end is None or backend == "flow", "the beta ramp sharpens Eq. 1e: flow only"
-        assert not beta_kappa or (backend == "flow" and beta_end is None), "adaptive beta: flow, no ramp"
+        assert not beta_kappa or ((backend == "flow" or bound) and beta_end is None), "adaptive beta: flow, no ramp"
         self.beta_kappa, self.beta_max, self.score_unit, self.r_fast = beta_kappa, beta_max, score_unit, None
+        assert beta_signal in ("episode", "trace") and (beta_kappa or not (beta_eps or beta_signal == "trace"))
+        self.beta_eps, self.beta_set, self.beta_signal, self.beta_decay = beta_eps, beta_set, beta_signal, beta_decay
+        assert not (beta_step_cap and score_unit), "beta_step_cap and score_unit both rescale the Eq. 4b increment"
+        assert beta_step_shape in ("min", "sat", "invu", "hyb") and (beta_step_cap or beta_step_shape == "min")
+        self.beta_step_cap, self.beta_step_shape = beta_step_cap, beta_step_shape
+        self.log_set = np.log(beta_set) if beta_set else np.log(beta)  # set point s (log)
+        self.log_avg, self.trace, self.tr_ema = np.log(beta), 0.0, np.zeros((4, 2))  # trace EMAs f, s, h, var
         self.A = np.flatnonzero(self.roles == "A")
         self.ctrl = self.roles[self.m] == "C"
         self.groups = [np.flatnonzero(self.m == a) for a in self.A]
@@ -110,8 +170,13 @@ class Agent:
         self.rng = np.random.default_rng(seed)
         self.net = np.isin(self.roles[self.m], ["C", "L"]) if ab["critic"] == "net" else None
         n_u = RICH_N if self.rich is not None else (self.ctrl if self.net is None else self.net).sum()
+        if self.crit is not None:
+            n_u = len(self.crit(held_out_obs(1, task=self.task)[0]))
+        self.ubar = np.full(len(self.A), 1 / len(self.A))  # C2: running average of the beta = 1 action shares
         self.u, self.mu, self.silent = np.zeros(n_u), 0.0, 0
+        self.critic_lambda, self.gamma, self.z = critic_lambda, gamma, 0.0  # z: Eq. 4c trace, periphery
         self.held = [self.stim(o) for o in held_out_obs(task=self.task)]
+        self.rec = None  # list: record observations (iteration 012 end-of-run diagnostics; no rng)
         self.snn, self.live = None, False  # live after q_star, so this evaluate() runs no races, draws nothing from rng
         self.q_star = Q_STAR_FRAC * self.evaluate()["J_route"]  # ponytail: fixed, learn it if dual matters
         if backend == "spiking":
@@ -133,11 +198,23 @@ class Agent:
             p = np.bincount(self.m, pi, self.K)
             return pi, W / W.sum(0) * pi, int(self.rng.choice(len(self.A), p=core.policy(p, self.roles, self.beta)))
         S = self.spike_frame(v)
-        a = sp.race(S, self.race_groups, self.rng, self.burn)
+        a = sp.race(S, self.race_groups, self.rng, self.burn) if self.readout == "race" else self.bound(S)
         if a is None:
             self.silent, a = self.silent + 1, int(self.rng.integers(len(self.A)))
         pi, kappa, n = sp.pooled(S, self.heads)
         return pi, kappa / max(n, 1), a
+
+    def bound(self, S):
+        """readout='diffbound' (module doc): theta from beta through BOUND_CAL, then sp.diffbound; None if silent."""
+        th_cal, b_cal = np.log(np.array(BOUND_CAL[self.heads], float)).T
+        th = float(np.exp(np.interp(np.log(self.beta), b_cal, th_cal)))
+        th = np.floor(th) + (self.rng.random() < th - np.floor(th))
+        r = sp.diffbound(S, self.race_groups, th, self.rng, self.burn, cap=1, heads=self.heads)
+        self.bound_n, self.bound_th = self.bound_n + 1, self.bound_th + th
+        if r is None:
+            return None
+        self.bound_dl += r[1]
+        return r[0]
 
     def spike_frame(self, v):
         """Spike raster of one frame on the current weights, k x (heads N), head h in columns h N .. (h + 1) N - 1."""
@@ -149,6 +226,8 @@ class Agent:
     def feats(self, pi, o=None):
         """Critic features x = pi_C / p_C (controller flow shares), so V = u . x. Ablation critic='rich': RICH_N
         Gaussian RFs on the full observation, outside the network (diagnostic only: is the critic the bottleneck?)."""
+        if self.crit is not None:
+            return self.crit(o)
         if self.rich is not None:
             return self.rich.stim(o, *RICH_MR)[:RICH_N]
         if self.net is not None:
@@ -161,7 +240,10 @@ class Agent:
         structural term (Eq. 4); d_j homeostasis (Eq. 4d); routing dual mu (Eq. 4a, from the pre-update JK).
         Mutates self.W and self.mu; returns the updated trace e."""
         p, q, JK, _ = core.module_stats(self.W, pi, self.m, self.K)
+        reg = self.regulariser(pi, kappa) if (self.c_ent or self.c_use or self.ent_target) else None
         kap = kappa / self.beta if self.score_unit else kappa  # Eq. 4b is linear in kappa: increment / beta
+        if self.beta_step_cap:  # step gain beta_eta(beta) instead of beta; the score keeps the full beta
+            kap = kappa * (self.beta_eta() / self.beta)
         e = core.eligibility_step(e, self.W, kap, pi, self.m, self.roles, self.A[a], self.tau_e, self.beta)
         if self.lam > 0:
             g = core.modulator(p, q, self.roles, routing=self.routing, mu=self.mu)
@@ -172,14 +254,55 @@ class Agent:
             self.W = core.homeostasis_update(self.W, self.mask, kappa, self.eps_h, self.wmin)
         if self.routing == "dual":
             self.mu = max(0.0, self.mu + ETA_MU * (self.q_star - core.j_route(JK, self.roles)))
+        if reg is not None:
+            self.W = core.clip_weights(self.W + reg, self.mask, self.wmin)
         return e
+
+    def task_rate(self):
+        return self.eta / (1 + self.ep / self.eta_tau) if self.eta_tau else self.eta
+
+    def regulariser(self, pi, kappa):
+        """Iteration 012 C1 + C2 (module doc), on the pre-update W (as Eq. 4b): the ungated per-frame increment
+        eta_e kappa (c_ent (g^H - gbar^H) - c_use (g^U - gbar^U)); W is clipped by the caller. Updates ubar and,
+        with ent_target, c_ent. Accumulates the squared norms for the RMS ratio against the task term."""
+        eta, W, m, inc = self.task_rate(), self.W, self.m, 0.0
+        if self.c_ent or self.ent_target:
+            if self.ent_target is not None:
+                H = core.action_entropy(W, pi, m, self.roles)
+                H0 = self.ent_target * np.log(len(self.A))
+                self.c_ent = float(np.clip(self.c_ent * np.exp(self.ent_k * (H0 - H)), 1e-6, 10.0))
+            dH = eta * self.c_ent * core.centered(core.entropy_score(W, pi, m, self.roles), W, m) * kappa
+            self.reg_sq[1] += (dH[self.mask] ** 2).sum()
+            inc = inc + dH
+        if self.c_use:
+            Jin = core.action_inflow(W, pi, m, self.K)[self.A]
+            self.ubar += (Jin / Jin.sum() - self.ubar) / self.use_tau
+            dU = -eta * self.c_use * core.centered(core.usage_score(W, pi, m, self.roles, self.ubar), W, m) * kappa
+            self.reg_sq[2] += (dU[self.mask] ** 2).sum()
+            inc = inc + dU
+        return inc
+
+    def beta_eta(self):
+        """Plasticity gain of the Eq. 4b increment under beta_step_cap c (module doc): min, sat, invu or hyb of beta."""
+        b, c = self.beta, self.beta_step_cap
+        if self.beta_step_shape == "sat":
+            return c * b / (c + b)
+        if self.beta_step_shape == "hyb":
+            return b if b <= c else c * (1 + np.log(b / c))
+        return b * np.exp(1 - b / c) if self.beta_step_shape == "invu" else min(b, c)
 
     def critic_step(self, x, x2, term, r=0.0):
         """TD error delta_f (Eq. 4c: reward r_f = task.reward(r, term), for CartPole -1 on termination, 0 otherwise;
-        bootstraps on truncation; V = u . x), computed before the NLMS critic update of u. Returns delta; the caller
-        applies the task update eta_e delta e."""
-        delta = self.task.reward(r, term) + (0.0 if term else GAMMA * self.u @ x2) - self.u @ x
-        self.u += ETA_V * delta * x / (x @ x)  # NLMS
+        bootstraps on truncation; V = u . x; discount self.gamma, GAMMA unless --gamma), computed before the NLMS
+        critic update of u. Returns delta; the caller applies the task update eta_e delta e.
+        critic_lambda (Proposal, iteration 009): TD(lambda) critic, Eq. 4c with an accumulating trace,
+        z <- gamma lambda z + x, u += eta_V delta z / (x . x): a raw presynaptic trace on the critic's inputs, the
+        normalisation a global scalar applied at update time. z is periphery state (the critic's feature synapses),
+        not crossbar state; it is reset at each episode start (after a terminal frame, and after a truncation, which
+        bootstraps first). lambda = 0 gives z = x exactly, so the update is bit for bit the NLMS step of Eq. 4c."""
+        delta = self.task.reward(r, term) + (0.0 if term else self.gamma * self.u @ x2) - self.u @ x
+        self.z = self.gamma * self.critic_lambda * self.z + x
+        self.u += ETA_V * delta * self.z / (x @ x)  # NLMS (lambda = 0) / normalised TD(lambda)
         return delta
 
     def episode(self, env):
@@ -189,6 +312,7 @@ class Agent:
         if self.beta_end is not None:
             self.beta = self.beta0 + (self.beta_end - self.beta0) * min(1.0, self.ep / self.beta_ramp)
         o, _ = env.reset(seed=int(self.rng.integers(1 << 30)))
+        self.z = 0.0  # critic trace reset at episode boundaries (the task trace e restarts at 0 below, as before)
         pi, kappa, a = self.frame(self.stim(o))
         x, e, R, done = self.feats(pi, o), 0.0, 0, False
         while not done:
@@ -199,8 +323,14 @@ class Agent:
             x2 = self.feats(pi, o)
             V = self.u @ x
             delta = self.critic_step(x, x2, term, r)
+            if self.beta_signal == "trace":
+                self.beta_frame(self.task.reward(r, term), term)
             d_task = self.td_scale(delta)
             eta = self.eta / (1 + self.ep / self.eta_tau) if self.eta_tau else self.eta
+            if self.c_ent or self.c_use or self.ent_target:  # RMS of the task update (C1/C2 calibration)
+                self.reg_sq[0] += ((eta * d_task * e)[self.mask] ** 2).sum() if np.ndim(e) else 0.0
+            if self.rec is not None:
+                self.rec.append(o)
             self.W = core.clip_weights(self.W + eta * d_task * e, self.mask, self.wmin)
             x = x2
             self.frames += 1
@@ -208,7 +338,7 @@ class Agent:
             st["n"], st["td_abs"], st["td_sq"] = st["n"] + 1, st["td_abs"] + abs(delta), st["td_sq"] + delta ** 2
             st["td_task_abs"] += abs(d_task)
             st["V_min"], st["V_max"] = min(st["V_min"], V), max(st["V_max"], V)
-        if self.beta_kappa:
+        if self.beta_kappa and self.beta_signal == "episode":
             self.beta_step(R)
         self.ep += 1
         return R
@@ -223,6 +353,39 @@ class Agent:
         self.r_slow += (R - self.r_slow) / BETA_TAU_S
         if self.ep >= BETA_TAU_F:
             z = np.clip((self.r_fast - self.r_slow) / np.sqrt(self.r_var + 1e-12), -2, 2)
+            if self.beta_eps:
+                return self.beta_move(z, 1 / BETA_TAU_S)
+            self.beta = float(np.clip(self.beta * np.exp(self.beta_kappa * z), self.beta0, self.beta_max))
+
+    def beta_move(self, z, rate):
+        """Eq. 1g': log beta += kappa z + eps (log s - log beta), s fixed (beta_set) or experience-dependent:
+        the leaky (beta_decay) or strict running maximum of the slow average of log beta (rate per update), toward
+        which the pull is upward only. The leak scales with rate: beta_decay is in episodes (trace: BETA_TS / 100)."""
+        lb = np.log(self.beta)
+        if self.beta_set:
+            pull = self.log_set - lb
+        else:
+            self.log_avg += (lb - self.log_avg) * rate
+            leak = rate * BETA_TAU_S / self.beta_decay if self.beta_decay else 0.0  # 1 / D per episode
+            self.log_set = max(self.log_avg, self.log_set - (self.log_set - self.log_avg) * leak)
+            pull = max(self.log_set - lb, 0.0)
+        self.beta = float(np.clip(self.beta * np.exp(self.beta_kappa * z + self.beta_eps * pull), self.beta0,
+                                  self.beta_max))
+
+    def beta_frame(self, r, term):
+        """beta_signal='trace': per-frame update from the reset-at-termination discounted reward trace (module doc)."""
+        self.trace = r + GAMMA * self.trace
+        g, e = self.trace, self.tr_ema
+        if term:
+            self.trace = 0.0
+        for i, (x, tau) in enumerate(((g, BETA_TF), (g, BETA_TS), (g, BETA_TH))):
+            e[i] += (np.array([x, 1.0]) - e[i]) / tau  # bias-corrected running mean: e[i, 0] / e[i, 1]
+        gf, gs, h = e[:3, 0] / e[:3, 1]
+        e[3] += (np.array([(h - gs) ** 2, 1.0]) - e[3]) / BETA_TS
+        if self.frames >= BETA_TF:  # self.frames counts the frames before this one
+            z = float(np.clip((gf - gs) / (np.sqrt(e[3, 0] / e[3, 1]) + 1e-12), -2, 2))
+            if self.beta_eps:
+                return self.beta_move(z, 1 / BETA_TS)
             self.beta = float(np.clip(self.beta * np.exp(self.beta_kappa * z), self.beta0, self.beta_max))
 
     def td_scale(self, delta):
@@ -246,6 +409,12 @@ class Agent:
                    V_min=float(st["V_min"]), V_max=float(st["V_max"]), frac_wmin=float((w <= 1e-3 + 1e-12).mean()),
                    frac_wmax=float((w >= 1 - 1e-12).mean()), P_mean=P.mean(0).tolist(),
                    P_entropy=float(-(P * np.log2(P)).sum(1).mean()), P_max=float(P.max(1).mean()))
+        if self.c_ent or self.c_use or self.ent_target:  # iteration 012: RMS ratios of C1 / C2 to the task update
+            t = max(self.reg_sq[0], 1e-300)
+            out.update(ent_rms_ratio=float(np.sqrt(self.reg_sq[1] / t)),
+                       use_rms_ratio=float(np.sqrt(self.reg_sq[2] / t)),
+                       c_ent=self.c_ent, ubar=self.ubar.tolist())
+            self.reg_sq = np.zeros(3)
         self.stats = dict(n=0, td_abs=0.0, td_sq=0.0, td_task_abs=0.0, V_min=np.inf, V_max=-np.inf)
         return out
 
@@ -282,15 +451,24 @@ class Agent:
 
 def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=None, eta=None, la_beta=0.0,
         task="CartPole", heads=1, name=None, engine="snm", td_norm=0.0, ablate=None, p_cc=0.1, beta_end=None,
-        beta_ramp=None, beta_kappa=0.0, beta_max=4.0, score_unit=False):
+        beta_ramp=None, beta_kappa=0.0, beta_max=4.0, score_unit=False, beta_eps=0.0, beta_set=0.0,
+        beta_signal="episode", beta_decay=0.0, beta_step_cap=0.0, beta_step_shape="min", critic_lambda=0.0,
+        gamma=GAMMA, readout="race", encoder=None, critic_layer=None, c_ent=0.0, c_use=0.0, use_tau=USE_TAU,
+        ent_target=None):
     """Train for `episodes`, evaluating every LOG_EVERY (evaluate() plus diagnostics()), and write the result file
-    (default name m2_*.json)."""
+    (default name m2_*.json). Iteration-012 runs add end-of-run diagnostics (diag012) over the last REC_EPIS
+    episodes."""
     agent = Agent(backend, routing, lam, seed, model, beta, eta_tau, la_beta, task, heads, engine, td_norm, ablate,
-                  p_cc, beta_end, beta_ramp, beta_kappa, beta_max, score_unit)
+                  p_cc, beta_end, beta_ramp, beta_kappa, beta_max, score_unit, beta_eps, beta_set, beta_signal,
+                  beta_decay, beta_step_cap, beta_step_shape, critic_lambda, gamma, readout, encoder, critic_layer,
+                  c_ent, c_use, use_tau, ent_target)
+    new012 = bool(encoder or critic_layer or c_ent or c_use or ent_target)
     env = gym.make(agent.task.env_id)
     agent.eta = eta or agent.eta
     returns, evals, t0 = [], [{"episode": 0, **agent.evaluate(), **agent.diagnostics()}], time.perf_counter()
     for ep in range(1, episodes + 1):
+        if new012 and ep == episodes - REC_EPIS + 1:
+            agent.rec = []
         returns.append(agent.episode(env))
         if ep % LOG_EVERY == 0:
             evals.append({"episode": ep, **agent.evaluate(), **agent.diagnostics()})
@@ -306,13 +484,26 @@ def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=Non
            "model": model, "beta": beta, "eta_tau": agent.eta_tau, "eta_task": agent.eta, "la_beta": la_beta,
            "td_norm": td_norm, "ablate": ablate or {}, "p_cc": p_cc, "beta_end": beta_end,
            "beta_ramp": agent.beta_ramp, "beta_kappa": beta_kappa, "beta_max": beta_max, "score_unit": score_unit,
+           **({"beta_eps": beta_eps, "beta_set": beta_set} if beta_eps else {}),
+           **({"beta_decay": beta_decay} if beta_decay else {}),
+           **({"beta_step_cap": beta_step_cap} if beta_step_cap else {}),
+           **({"beta_step_shape": beta_step_shape} if beta_step_shape != "min" else {}),
+           **({"beta_signal": beta_signal} if beta_signal != "episode" else {}),
+           **({"critic_lambda": critic_lambda} if critic_lambda else {}),
+           **({"gamma": gamma} if gamma != GAMMA else {}),
+           **({"readout": readout, "bound_deadline_frac": agent.bound_dl / max(agent.bound_n, 1),
+               "bound_theta_mean": agent.bound_th / max(agent.bound_n, 1)} if readout != "race" else {}),
            "evals": evals, "frames": frames, "ms_per_frame": (time.perf_counter() - t0) / frames * 1e3,
            "silent_race_frames": agent.silent, "mu": agent.mu, "q_star": agent.q_star,
-           "params": dict(alpha=ALPHA, n=N_HOPS, k=K_SPK, rate=RATE, theta=THETA, eta=ETA, tau_e=TAU_E, gamma=GAMMA,
+           "params": dict(alpha=ALPHA, n=N_HOPS, k=K_SPK, rate=RATE, theta=THETA, eta=ETA, tau_e=TAU_E, gamma=gamma,
                           eta_v=ETA_V, eps=agent.eps, eps_h=agent.eps_h, burn=agent.burn, eta_task=agent.eta,
                           beta=beta, eta_tau=agent.eta_tau, eta_mu=ETA_MU, sizes=agent.task.sizes)}
     if (task, heads) != ("CartPole", 1):
         res.update(task=task, heads=heads, engine=engine, encoder=agent.task.encoder, n_ctrl=agent.task.n_ctrl)
+    if new012:
+        res.update({k: v for k, v in (("encoder_spec", encoder), ("critic_layer", critic_layer), ("c_ent", c_ent),
+                                      ("c_use", c_use), ("ent_target", ent_target)) if v},
+                   **({"use_tau": use_tau} if c_use else {}), n_ctrl=agent.task.n_ctrl, diag012=diag012(agent))
     OUT.mkdir(exist_ok=True)
     if name is None:
         b = (f"_b{beta:g}" if beta != 1 else "") + (f"_eta{eta:g}" if eta else "")
@@ -321,6 +512,45 @@ def run(backend, routing, lam, seed, episodes, model="v3", beta=1.0, eta_tau=Non
         name = f"m2_{backend}_{routing}_lam{lam:g}{b}_{model}_s{seed}"
     (OUT / f"{name}.json").write_text(json.dumps(res))
     return res
+
+
+def r2_cv(X, y, ridge=1e-3):
+    """Two-fold cross-validated R^2 of a linear (ridge on z-scored X, with intercept) fit of y on X (fixed split)."""
+    idx = np.random.default_rng(0).permutation(len(y))
+    X1 = np.c_[np.ones(len(y)), (X - X.mean(0)) / (X.std(0) + 1e-12)]
+    pred = np.zeros(len(y))
+    for tr, te in ((idx[::2], idx[1::2]), (idx[1::2], idx[::2])):
+        A = X1[tr].T @ X1[tr] + ridge * len(tr) * np.eye(X1.shape[1])
+        pred[te] = X1[te] @ np.linalg.solve(A, X1[tr].T @ y[tr])
+    return float(1 - ((y - pred) ** 2).sum() / max(((y - y.mean()) ** 2).sum(), 1e-300))
+
+
+def diag012(agent, n=2000):
+    """Iteration-012 end-of-run diagnostics on up to n observations from the last REC_EPIS episodes (never touches
+    agent.rng or W): controller density (share of controller neurons with v_i > 10% of max v), the critic's V on those
+    states, and how well V decodes linearly from module flow shares: p_b over latent and action modules (R2_LA), the
+    controller-share features of the default critic (R2_ctrl, the V of a pi_C critic) and neuron-level L/A shares
+    (R2_LA_neurons, ridge)."""
+    obs = agent.rec or []
+    obs = [obs[i] for i in np.linspace(0, len(obs) - 1, min(n, len(obs))).astype(int)] if obs else []
+    agent.rec = None
+    if len(obs) < 20:
+        return {}
+    LA, nLA = np.isin(agent.roles, ["L", "A"]), np.isin(agent.roles[agent.m], ["L", "A"])
+    dens, P, PN, PC, V = [], [], [], [], []
+    for o in obs:
+        v = agent.stim(o)
+        vc = v[agent.ctrl]
+        dens.append(float((vc > 0.1 * vc.max()).mean()))
+        pi = core.flow(agent.W, v, ALPHA, N_HOPS)
+        P.append(np.bincount(agent.m, pi, agent.K)[LA])
+        PN.append(pi[nLA])
+        PC.append(pi[agent.ctrl] / pi[agent.ctrl].sum())
+        V.append(float(agent.u @ agent.feats(pi, o)))
+    V = np.array(V)
+    held = [float((v[agent.ctrl] > 0.1 * v[agent.ctrl].max()).mean()) for v in agent.held]
+    return dict(n=len(obs), density=float(np.mean(dens)), density_held=float(np.mean(held)), V_sd=float(V.std()),
+                R2_LA=r2_cv(np.array(P), V), R2_ctrl=r2_cv(np.array(PC), V), R2_LA_neurons=r2_cv(np.array(PN), V, 1e-2))
 
 
 def summary():

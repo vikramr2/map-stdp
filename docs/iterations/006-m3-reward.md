@@ -65,8 +65,9 @@ python -m experiments.m3 --task T --td-norm 0.04 --p-cc 0 --beta-end 4 --eta 5 -
 
 - Final $\beta$ under v4: CartPole 16 on every seed; MountainCar 5.9–7.5; Acrobot 6.8–15.3; LunarLander 3.2–16.
 - **LunarLander is bimodal:** seed 7 collapsed to −101. $\beta_{max} = 8$ is tighter there (106.7 ± 44.2) but costs CartPole (385.9).
-- With adaptive $\beta$, $p_{cc} = 0$ matters on LunarLander (102.5 against 29.6 at $p_{cc}$ 0.1, n = 5, p = .04) and not significantly on the other three.
-- $\beta_{max}$ 32 (n = 5): CartPole 421 ± 176, no better elsewhere. $\kappa_\beta$ 0.005 and 0.02 and $\eta = 3$ are worse.
+- With adaptive $\beta$, $p_{cc} = 0$ matters on LunarLander (102.5 against 29.6 at $p_{cc}$ 0.1, n = 5, p = .04; n = 10 in iteration 007: 26.6 ± 56.2, p = .045) and not significantly on the other three.
+- **v4's own numbers are partly a lucky draw (iteration 007).** Changing $\kappa_\beta$ by 1% (0.0099), which changes only the trajectory, gives CartPole 432.0 ± 143.0 and Acrobot −113.7 ± 22.0. Compare against the pooled v4 reference (n = 20): CartPole 466.0 ± 104.4, MountainCar −132.4 ± 2.9, Acrobot −106.9 ± 18.5, LunarLander 100.6 ± 92.1.
+- $\beta_{max}$ 32 (n = 5): CartPole 421 ± 176, no better elsewhere (n = 10 in iteration 007: 443.8 ± 129.1; MountainCar and Acrobot bit-identical to v4). $\kappa_\beta$ 0.005 and 0.02 and $\eta = 3$ are worse.
 
 **Reference and ablations:**
 
@@ -78,6 +79,7 @@ python -m experiments.m3 --task T --td-norm 0.04 --p-cc 0 --beta-end 4 --eta 5 -
 
 - The adaptive rule beats the oracle on CartPole (p = 3e-4) and is not significantly different on the other three tasks.
 - **$\beta$ is two things at once.** Dividing it out of the score keeps all of MountainCar's gain (it is sharpness) and removes most of LunarLander's under v4 (it is the larger effective step). Acrobot and CartPole lie between.
+- **Correction (iteration 007, n = 10):** v4 + score unit gives CartPole 415.0 ± 102.2, MountainCar −129.3 ± 4.2, Acrobot −110.2 ± 22.0, LunarLander 64.0 ± 95.6 (p = .38 against v4); oracle + score unit gives 231.9, −131.0, −114.7, 4.4. So the LunarLander claim above does not hold at n = 10: with the adaptive rule, dividing $\beta$ out of the score costs LunarLander return, but not significantly. It costs CartPole (p = .027). The step-size part of $\beta$ is clearest under the oracle ramp (LunarLander 60.6 → 4.4, p = .011).
 
 **CartPole: the oscillation is cart drift.** Under a sharp policy (oracle ramp, seed 0, episodes 300–600) 295 of 300 episodes ended with $\lvert x \rvert > 2.4$, 1 with the pole falling and 4 truncated; at $\beta = 1$, $p_{cc} = 0$: 211, 58 and 31. The encoder sees only $(\theta, \dot{\theta})$. Giving the critic $x$ (`--critic rich`, an abstraction: 222.9 at $\beta = 1$, 127.3 with the oracle) or the controller all four observations (`CartPoleFull`: 233.7 baseline, 240.2 at $p_{cc}$ 0) made it worse; the network critic (`--critic net`) changed nothing (303.4 at $p_{cc}$ 0). What fixed it was $\beta$ past about 8: the near-deterministic policy holds 500, and the adaptive rule finds that by itself.
 

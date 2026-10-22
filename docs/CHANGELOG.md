@@ -4,6 +4,71 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## 2026-10-21
 
+### Added (iteration 012: encoders, separate critic, entropy terms)
+
+- **Code** (all default off; golden 9/9 bit-identical; ruff clean): `mapstdp/core.py` Fourier basis (`fourier_coeffs`, `fourier_features`, `fourier_stimulus`), `action_inflow`, `action_entropy`, `entropy_score` (Eq. 4h), `usage_score` (Eq. 4i), with self-checks. `experiments/tasks.py` encoder specs `g<n>[s<σ>]`, `f<order>c<conj>[h][b]`, `FOURIER_BOUNDS`, `with_encoder`, `critic_layer`. `experiments/m2.py` `Agent(encoder, critic_layer, c_ent, c_use, use_tau, ent_target)` and diagnostics. `experiments/m3.py` `--encoder`, `--critic-layer`, `--c-ent`, `--ent-target`, `--c-use`, `--use-tau`; tokens `enc`, `crit`, `ce`, `cu`, `ep<E>`. `experiments/ceiling.py` `--encoder`, `--no-train`, an underflow guard for $p^\beta$.
+- **Results:** about 680 `m3_*` runs (pilot seeds 0–4, pre-registered seeds 0–19, fresh seeds 20–39, LunarLander 3000-episode runs) and about 230 `ceiling_*` runs (10 CEM runs per cell).
+- **Docs:** `docs/iterations/012-encoders-critic-entropy.md`; derivation §4.6 (Eq. 4c'' separate critic, Eqs. 4h and 4i, Proposals), Appendix A (numerical checks for 4h and 4i: finite differences to $2 \times 10^{-10}$, Monte Carlo correlation ≥ 0.9998, full-resolvent cosine 0.92–0.999), Appendix B item 17; references Chung & Kozma 2020, Foster et al. 2000, Haarnoja et al. 2018, Lansink et al. 2009, O'Doherty et al. 2004, Tervo et al. 2014; model.md rows, parameter and history; SPEC M3 row; CLAUDE.md iteration range and the best MountainCar command.
+- **Findings (40 seeds):** MountainCar −100.7, 38/40 at −110 (12 × 12 encoder, 24 × 24 separate critic, entropy target); Acrobot −92.8, 35/40 (separate Fourier critic); CartPole 500, 40/40, median 296 episodes to solve (Fourier encoder and critic); LunarLander unchanged. Confirmed on fresh seeds 20–39.
+- **Decision:** no model version bump; the per-task configurations stay Proposals. The entropy term's setting deviates from the neuroscientist's calibration (destructive at 0.1–0.3 of the task RMS); sign-off pending. Next: iteration 013 on a new branch, a TD-STDP backbone with communities.
+
+### Added (iteration 011: flow diagnostics)
+
+- **Docs:** `docs/iterations/011-flow-diagnostics.md` (scratch code only; no repo code or results changed). model.md history row; SPEC M3 row; CLAUDE.md iteration range.
+- **Findings (preliminary):** a sharper readout does not help on frozen v4 weights (argmax: MountainCar −133.6, Acrobot −107.6). MountainCar is limited by the encoder and the critic: 12 × 12 controller grid + separate critic on a 24 × 24 RF layer gives −101.9 ± 6.0, 18/20 at −110 (v4 −131.0, 0/40). Acrobot's bad seeds entrench the zero-torque action early; masking it on frozen weights gives −97.4 (26/40 at −100).
+- **Corrections:** the 6 × 6 MountainCar encoder's CEM ceiling is about −114 at 10 CEM runs, not −110 (iterations 005, 009, 010 used 3 runs); iteration 009's "the critic is not the MountainCar bottleneck" is withdrawn (009 record, derivation §4.6).
+- **Decision (user):** iteration 012 tests a 12 × 12 encoder + separate 24 × 24 critic on MountainCar, a Fourier-basis encoder [Chung & Kozma 2020] and a separate critic on the other tasks, and an entropy bonus on all tasks.
+
+### Added (iteration 010: decision-bound readout)
+
+- **`mapstdp/spiking.py`:** `diffbound()`, a race on count differences to a bound (Eq. 1h), optionally capped at one spike per module, head and step; self-checks (deterministic raster, cap, $K = 2$ gambler's-ruin Monte Carlo). **`experiments/ceiling.py`:** readouts `beta<B>`, `db<T>`, `msprt<T>c<C>`, `--nmax`; existing readouts draw unchanged. **`experiments/m2.py`:** `Agent(readout='diffbound')`, spiking only, $\theta$ from $\beta$ through `BOUND_CAL`. **`experiments/m3.py`:** `--readout`, token `dbc`. All default off; golden 9/9 bit-identical, ruff clean.
+- **Results:** level-1 ceilings on MountainCar and Acrobot for Eq. 1e at $\beta$ 4/8/16, (1h) and MSPRT at $\theta$ 2–16 (3 CEM seeds); spiking pilot at 16 heads on CartPole and MountainCar (race, (1h) with adaptive $\beta$, (1h) at fixed $\beta$ 4 and 8; seeds 0–4).
+- **Docs:** `docs/iterations/010-decision-bound.md`; derivation §2.4 (Eq. 1h, Proposal, spiking only; $\beta$ read as a decision threshold rather than noradrenergic gain; burst overdispersion $\beta_{eff} \approx \theta / F$), §9 item 14, Appendix A (numerical checks for 1h: $K = 2$ identity to $2 \times 10^{-15}$, expected count to $10^{-12}$, $K = 3$ KL ≤ 0.0065, burst formula), Appendix B item 16; references Bogacz et al. 2006, Bogacz & Gurney 2007, Bogacz et al. 2010, Cavanagh et al. 2011, Feller 1968, Lo & Wang 2006, Usher & McClelland 2001, Wald 1947; model.md row and history; SPEC M3 row; CLAUDE.md iteration range.
+- **Decision:** flow unchanged (the gate failed: (1h) and MSPRT ceilings equal Eq. 1e's at matched $\beta$). Spiking (1h) kept as a Proposal, not adopted: MountainCar −132.2 against −177.0 for the race (flow parity), CartPole 153.9 against 298.3. MSPRT and the attractor fallback dropped.
+- **Note:** the committed iteration-005 $\beta = 4$ ceiling at seed 0 does not reproduce on this machine (MountainCar −115.2 against −121.6); training return differs too, so the drift is machine level. The committed files are kept.
+
+### Added (iteration 009: credit horizon, negative)
+
+- **`experiments/m2.py`:** `Agent(critic_lambda, gamma)`: the critic runs through a presynaptic trace $z$ (Eq. 4c'), identical to Eq. 4c at $\lambda = 0$ (golden 9/9, full v4 reruns identical). **`experiments/m3.py`:** `--critic-lambda`, `--gamma`; tokens `cl<λ>`, `g<γ>`; `nondefault()` catches `tau_e`.
+- **Results:** 280 new `experiments/results/m3_*` runs (MountainCar and Acrobot arms, seeds 0–19; $\tau_e = 10$ also on fresh seeds 20–39 and on CartPole and LunarLander).
+- **Docs:** `docs/iterations/009-credit-horizon.md`; derivation §4.6 (Eq. 4c', tested, not adopted), Appendix A (numerical checks for 4c': $\lambda = 0$ bit-identical; forward-view equivalences to $10^{-15}$; update-time normalisation off by up to 12% on Acrobot), Appendix B item 15; references Pan et al. 2005, Sutton 1988; model.md rows; SPEC M3 row.
+
+### Changed (decisions, iteration 009)
+
+- **v4 kept.** The `neuroscientist` filtered the proposals first (critic TD($\lambda$), $\tau_e = 10$, $\gamma = 0.995$ accepted; $\tau_e = 30$ rejected as beyond the dopamine-trace evidence; encoder expansion lowest priority). No arm survived the pre-registered Bonferroni tests, $\tau_e = 10$ did not replicate on fresh seeds and cost CartPole (295.6 against 487.6), and the critic trace with update-time normalisation diverged on Acrobot (20 of 20 seeds).
+- **The critic is not the bottleneck** (V correlates 0.99 with the true value on MountainCar). v4 sits 10–25 below the ceiling of its own Eq. 1e readout, so the flow gap is the learned weights. Next, iteration 010: a decision-bound readout, mainly for a sharpened spiking readout.
+
+### Added (iteration 008: β's gain on the task step)
+
+- **`experiments/m2.py`:** `Agent(beta_step_cap, beta_step_shape)`: the Eq. 4b increment uses $\beta_\eta(\beta)$ in place of $\beta$, with shapes `min`, `sat` ($c\beta/(c+\beta)$), `invu` ($\beta e^{1-\beta/c}$) and `hyb` (identity to $c$, logarithmic above); the direction is unchanged (cosine 1). Exclusive with `score_unit`. Defaults off; `tests/golden.json` bit-identical (9/9).
+- **`experiments/m3.py`:** `--beta-step-cap`, `--beta-step-shape`; tokens `sc<c>[sat|iu|hy]`.
+- **Results:** 960 new `experiments/results/m3_*` runs at $\kappa_\beta = 0.01$: v4 and v5 at seeds 10–39, six step shapes at seeds 0–19, and the pre-registered confirmation (v5, min 4, sat 16, hyb 4) at seeds 20–39.
+- **Docs:** `docs/iterations/008-beta-step-gain.md`; derivation §2.4 note; model.md and the 007 record corrected; SPEC M3 row.
+
+### Changed (decisions, iteration 008)
+
+- **No step shape adopted.** None of the four pre-registered tests on fresh seeds 20–39 survives Bonferroni; min 4's CartPole effect from seeds 0–19 reversed (445.6 against 499.4). `invu` rejected (MountainCar seeds that never learn, worse Acrobot).
+- **v5 withdrawn; the documented model is v4 again** (the user's decision). At $\kappa_\beta = 0.01$ and n = 40, v5 is not better than v4 on any task (LunarLander nominally worse, 52.4 against 81.3, p = .13); the 1g′ recovery evidence rested on the $\kappa_\beta$ 0.0099 runs. Eq. 1g′ stays in the derivation as a tested, unadopted Proposal; its flags remain.
+- **Seed noise:** the $\kappa_\beta$ 0.0099 control is replaced by more seeds at $\kappa_\beta = 0.01$ (the user's decision). v5's CartPole mean is 500.0, 399.4 and 499.4 over seeds 0–9, 10–19 and 20–39; report at least 20 seeds per arm.
+- **Neuroscientist review:** a plasticity gain that saturates while response gain does not is a plausible, untested abstraction (dissociable, non-monotone neuromodulator dose-responses: Arnsten 2009, Vijayraghavan et al. 2007, Salgado et al. 2012, Seol et al. 2007); smooth saturation preferred to a hard cap; "not a gradient" corrected to "a $\beta$-dependent step size on the same gradient".
+
+### Added (iteration 007: robust adaptive β)
+
+- **Model v5** (`docs/model.md`): v4 plus `--beta-eps 0.005 --beta-decay 1000`, the experience-dependent set point of Eq. 1g′ (Proposal). $\beta$ now recovers after a collapse (CartPole, 20 runs: 5 of 5 drops recover, against 1 of 3 in the v4 family). Return is unchanged: pooled over $\kappa_\beta$ 0.01 and 0.0099 (n = 20), CartPole 489.8, MountainCar −130.4, Acrobot −106.7, LunarLander 92.3, against 466.0, −132.4, −106.9 and 100.6 (all p ≥ .05). Code defaults unchanged; `tests/golden.json` bit-identical (9/9).
+- **`experiments/m2.py`:** `Agent(beta_eps, beta_set, beta_decay, beta_signal)`, `beta_move()`, `beta_frame()` (per-frame trace signal), constants `BETA_TF`, `BETA_TS`, `BETA_TH`; the result JSON records the new keys only when non-default.
+- **`experiments/m3.py`:** `--beta-eps`, `--beta-set`, `--beta-decay`, `--beta-signal`; tokens `re<ε>[s<β₀>][d<τ_D>]` and `tr`; `nondefault()` updated.
+- **Results:** 440 new `experiments/results/m3_*` runs: candidates C1–C4 and v5, the $\kappa_\beta$ 0.0099 noise control, and the iteration 006 rows extended to 10 seeds.
+- **Docs:** `docs/iterations/007-robust-beta.md`; derivation §2.4 (Proposal Eq. 1g′, open issues updated), §9 item 14, Appendix A (numerical checks for 1g′ from `/derivation-check`: reduction to 1g bit for bit on 33 119 updates, fixed point and recovery rate exact, trace signal zero-mean when stationary), Appendix B item 14; three references (Abraham & Bear 1996, Eisenberger 1992, Niv et al. 2007); SPEC M3 row; CLAUDE.md v5 command.
+
+### Changed (decisions, iteration 007)
+
+- **v4's numbers are partly a lucky draw.** Changing $\kappa_\beta$ by 1% gives CartPole 432 and Acrobot −114. Variants are now compared against the pooled v4 family (n = 20).
+- **Correction to iteration 006:** at n = 10, dividing $\beta$ out of the task step gives LunarLander 64.0 (p = .38 against v4), not 7.0; "most of LunarLander's gain is the step size" no longer holds. The 006 record is annotated.
+- **A strict running maximum as the set point is rejected** (`neuroscientist`): it never decreases, so it would block disengagement after a change in task. A maximum leaking over $\tau_D = 1000$ episodes replaces it, with the same recovery.
+- **Rejected:** a leaky mean of $\delta / \mathrm{RMS}(\delta)$ as the episode-free signal ($\beta$ stays at 1 on MountainCar and Acrobot); two-sided reversion toward a slow average; a $\beta$ floor of 2.
+- **Not adopted:** a fixed two-sided set point ($\beta_0 = 8$; narrows LunarLander's spread, no gain in mean, hand-set prior); the per-frame outcome-reset trace (the signal works, but no single per-frame rate fits all tasks).
+- **Collapses live in the weights:** frozen-checkpoint tests show re-raising $\beta$ helps only while the weights still hold a good policy. The next lever is the $\beta$ step gain at high $\beta$, not the $\beta$ rule.
+
 ### Added (iteration 006: M3 reward)
 
 - **Model v4** (`docs/model.md`): the M3 configuration `--p-cc 0 --beta-kappa 0.01 --beta-max 16 --eta 5` (with `--td-norm 0.04`, `--la-beta 0.3`). Flow return over 10 seeds: CartPole 272.5 → 500.0, MountainCar −184.2 → −131.8, Acrobot −128.8 → −100.1, LunarLander −37.8 → 102.5 (± 94, one seed collapsed). Code defaults unchanged, so v1–v3 and `tests/golden.json` reproduce bit for bit (9/9).

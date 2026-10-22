@@ -5,16 +5,28 @@ R = H_A^T M[:, C] (actions x controller, nonnegative) and Eq. 1d is P(a | o) = (
   learned:  R of the W Map-STDP learned (flow, v3, beta_LA 0.3, --td-norm 0.04), frozen;
   level 2:  CEM over the controller -> action synapses of that W (bounds [w_min, w_max], mask, alpha, the latents and
             everything else as learned), Eq. 1d readout; the realistic ceiling;
-  level 1:  CEM over any R = exp(theta), readouts Eq. 1d, Eq. 1e (beta = 4) and argmax; the generous upper bound.
+  level 1:  CEM over any R = exp(theta), readouts Eq. 1d, Eq. 1e (beta<B>, e.g. beta4) and argmax; the generous upper
+            bound. Iteration 010 (Proposal) adds two decision-bound readouts on the embedded jump chain of the action
+            spikes (each action spike lands on module a with probability p_a / sum p):
+            db<T>: count-difference race, stop when one action leads every other by T spikes (K = 2: Eq. 1e, beta = T);
+            msprt<T>c<C>: MSPRT on y = C n, stop when max_a y_a - log sum_b exp(y_b) >= -log(1 + exp(-C (T - 1/2)))
+            (K = 2: identical to db<T>; C -> inf: db<T>). Both choose the leader (ties uniform) at the deadline of
+            --nmax action spikes.
 Run from the repo root:
-  python -m experiments.ceiling --task Acrobot --level {learned,2,1} [--readout {1d,beta4,argmax}] [--seed 0]
-    -> experiments/results/ceiling_<task>_<level>[_<readout>]_s<seed>.json
+  python -m experiments.ceiling --task Acrobot --level {learned,2,1} [--readout {1d,beta<B>,argmax,db<T>,msprt<T>c<C>}]
+    [--nmax N] [--seed 0] [--encoder SPEC] [--no-train]
+    -> experiments/results/ceiling_<task>_<level>[_<readout>][_enc<SPEC>]_s<seed>.json
+  --encoder SPEC (iteration 012): the controller encoder tasks.with_encoder(task, SPEC). --no-train (level 1 only):
+  skip the training run, which level 1 does not use (CEM starts from R = 1 with its own rng), so the result is the
+  same; train_last100 is then null.
   python -m experiments.ceiling --summary"""
 import argparse
 import glob
 import json
 import pathlib
+import re
 import time
+from functools import lru_cache
 
 import gymnasium as gym
 import numpy as np
@@ -41,33 +53,77 @@ def action_matrix(W, agent):
     return H.T @ hop_operator(W)[:, agent.ctrl]
 
 
-def act(p, readout, rng):
-    if readout == "argmax":
+NMAX = 1024  # decision-bound readouts: deadline in action spikes (--nmax)
+
+
+def jump_counts(p, nmax, rng):
+    """Cumulative action-spike counts (nmax x K) of the embedded jump chain: spike s lands on a w.p. p_a / sum p."""
+    idx = np.minimum(np.searchsorted(np.cumsum(p / p.sum()), rng.random(nmax), side="right"), len(p) - 1)
+    return np.cumsum(np.eye(len(p), dtype=int)[idx], 0)
+
+
+def bound_decision(p, theta, nmax, rng, c=None):
+    """Decision-bound readout (module doc): (action, action spikes used, deadline hit). c None: count difference
+    (stop when n_a - max_{b != a} n_b >= theta); c: MSPRT with the matched threshold. Deadline: leader, ties uniform."""
+    n = jump_counts(p, nmax, rng)
+    if c is None:
+        top2 = np.sort(n, 1)[:, -2:]
+        stop = top2[:, 1] - top2[:, 0] >= theta
+    else:
+        y = c * n
+        lse = y.max(1) + np.log(np.exp(y - y.max(1, keepdims=True)).sum(1))
+        stop = y.max(1) - lse >= -np.log1p(np.exp(-c * (theta - 0.5)))
+    hit = np.flatnonzero(stop)
+    if len(hit):
+        return int(np.argmax(n[hit[0]])), int(hit[0]) + 1, False
+    lead = np.flatnonzero(n[-1] == n[-1].max())
+    return int(lead[0] if len(lead) == 1 else rng.choice(lead)), nmax, True
+
+
+@lru_cache
+def parse_readout(readout):
+    """readout -> (kind, theta, c): ('1d'|'argmax', -, -), ('beta', B, -), ('db', T, None), ('msprt', T, C)."""
+    m = re.fullmatch(r"(beta|db|msprt)([\d.]+)(?:c([\d.]+))?", readout)
+    assert readout in ("1d", "argmax") or (m and (m[1] == "msprt") == (m[3] is not None)), readout
+    return (readout, None, None) if not m else (m[1], float(m[2]), float(m[3]) if m[3] else None)
+
+
+def act(p, readout, rng, nmax=NMAX, stats=None):
+    """Action from the action shares p under the readout; stats (list) collects (spikes, deadline) of bound readouts."""
+    kind, b, c = parse_readout(readout)
+    if kind == "argmax":
         return int(np.argmax(p))
-    q = p ** 4 if readout == "beta4" else p
+    if kind in ("db", "msprt"):
+        a, n, dl = bound_decision(p, b, nmax, rng, c)
+        if stats is not None:
+            stats.append((n, dl))
+        return a
+    q = p ** b if kind == "beta" else p
+    if not q.sum() > 0 or not np.isfinite(q.sum()):  # p^beta under/overflow (iteration 011): rescale first
+        q = (p / p.max()) ** b
     return int(rng.choice(len(q), p=q / q.sum()))
 
 
-def rollouts(R, agent, env, readout, seeds):
+def rollouts(R, agent, env, readout, seeds, nmax=NMAX, stats=None):
     """Mean return of the frozen policy over episodes with the given env seeds (policy rng seeded likewise)."""
     out = []
     for s in seeds:
         o, _ = env.reset(seed=int(s))
         rng, total, done = np.random.default_rng(s), 0.0, False
         while not done:
-            o, r, term, trunc, _ = env.step(act(R @ agent.stim(o)[agent.ctrl], readout, rng))
+            o, r, term, trunc, _ = env.step(act(R @ agent.stim(o)[agent.ctrl], readout, rng, nmax, stats))
             total, done = total + r, term or trunc
         out.append(total)
     return float(np.mean(out))
 
 
-def trained_agent(task, seed):
+def trained_agent(task, seed, encoder=None, train=True):
     """The Map-STDP flow agent after the task's training episodes (the M3 flow reference with --td-norm)."""
-    agent = m2.Agent("flow", "exempt", 0.05, seed, la_beta=LA_BETA, task=task, td_norm=TD_NORM)
+    agent = m2.Agent("flow", "exempt", 0.05, seed, la_beta=LA_BETA, task=task, td_norm=TD_NORM, encoder=encoder)
     env, R = gym.make(agent.task.env_id), []
-    for _ in range(agent.task.episodes):
+    for _ in range(agent.task.episodes if train else 0):
         R.append(agent.episode(env))
-    return agent, float(np.mean(R[-100:]))
+    return agent, float(np.mean(R[-100:])) if train else None
 
 
 def cem(score, mu, sd, rng, log):
@@ -85,16 +141,16 @@ def cem(score, mu, sd, rng, log):
     return mu
 
 
-def run(task, level, readout, seed):
+def run(task, level, readout, seed, nmax=NMAX, encoder=None, train=True):
     t0 = time.perf_counter()
-    agent, train_ret = trained_agent(task, seed)
+    agent, train_ret = trained_agent(task, seed, encoder, train)
     env, rng, W0 = gym.make(agent.task.env_id), np.random.default_rng(seed + 1000), agent.W.copy()
     R0 = action_matrix(W0, agent)
     v = agent.held[0]  # R reproduces the agent's own Eq. 1d policy
     assert np.allclose(R0 @ v[agent.ctrl] / (R0 @ v[agent.ctrl]).sum(),
                        core.policy(np.bincount(agent.m, core.flow(W0, v, m2.ALPHA, m2.N_HOPS), agent.K), agent.roles))
     log = lambda s: print(f"{task} L{level} {readout}: {s} ({(time.perf_counter() - t0) / 60:.1f} min)", flush=True)  # noqa: E731
-    log(f"trained, last100 training return {train_ret:.1f}")
+    log(f"trained, last100 training return {train_ret:.1f}" if train else "untrained (level 1)")
     if level == "learned":
         R = R0
     elif level == "2":
@@ -104,17 +160,24 @@ def run(task, level, readout, seed):
             W[sel] = WMIN + (WMAX - WMIN) / (1 + np.exp(-th))
             return action_matrix(W, agent)
         x = np.clip((W0[sel] - WMIN) / (WMAX - WMIN), 1e-4, 1 - 1e-4)
-        R = to_R(cem(lambda th, s: rollouts(to_R(th), agent, env, readout, s), np.log(x / (1 - x)),
+        R = to_R(cem(lambda th, s: rollouts(to_R(th), agent, env, readout, s, nmax), np.log(x / (1 - x)),
                      np.ones(sel.sum()), rng, log))
     else:
-        R = np.exp(cem(lambda th, s: rollouts(np.exp(th.reshape(R0.shape)), agent, env, readout, s),
+        R = np.exp(cem(lambda th, s: rollouts(np.exp(th.reshape(R0.shape)), agent, env, readout, s, nmax),
                        np.zeros(R0.size), 2 * np.ones(R0.size), rng, log).reshape(R0.shape))
-    final = [rollouts(R, agent, env, readout, [s]) for s in np.random.default_rng(99).integers(1 << 30, size=FINAL)]
+    st = []  # (action spikes, deadline hit) per decision of a bound readout
+    final = [rollouts(R, agent, env, readout, [s], nmax, st)
+             for s in np.random.default_rng(99).integers(1 << 30, size=FINAL)]
     res = dict(task=task, level=level, readout=readout, seed=seed, train_last100=train_ret,
                final_mean=float(np.mean(final)), final_sd=float(np.std(final)), final=final,
                minutes=(time.perf_counter() - t0) / 60,
-               params=dict(pop=POP, elite=ELITE, iters=ITERS, epis=EPIS, td_norm=TD_NORM, la_beta=LA_BETA))
-    suffix = "" if level == "learned" else f"_{readout}"
+               params=dict(pop=POP, elite=ELITE, iters=ITERS, epis=EPIS, td_norm=TD_NORM, la_beta=LA_BETA),
+               **({"encoder_spec": encoder, "n_ctrl": agent.task.n_ctrl, "R": R.tolist()} if encoder else {}))
+    if st:
+        res.update(nmax=nmax, spikes_mean=float(np.mean([n for n, _ in st])),
+                   deadline_frac=float(np.mean([d for _, d in st])), R=R.tolist())
+    suffix = "" if level == "learned" else f"_{readout}" + (f"_n{nmax}" if st and nmax != NMAX else "")
+    suffix += f"_enc{encoder}" if encoder else ""
     (m2.OUT / f"ceiling_{task}_L{level}{suffix}_s{seed}.json").write_text(json.dumps(res))
     log(f"final {res['final_mean']:.1f} +- {res['final_sd']:.1f} over {FINAL} fresh episodes")
 
@@ -125,24 +188,32 @@ def summary():
         r = json.loads(pathlib.Path(f).read_text())
         rows.setdefault(r["task"], []).append(r)
     for task, rs in rows.items():
-        print(f"\n{task}: Map-STDP training last100 {rs[0]['train_last100']:.1f}")
+        tr = [r["train_last100"] for r in rs if r["train_last100"] is not None]
+        print(f"\n{task}: Map-STDP training last100 " + (f"{tr[0]:.1f}" if tr else "n/a"))
         for r in sorted(rs, key=lambda r: (r["level"] != "learned", r["level"], r["readout"])):
-            print(f"  level {r['level']:7} {r['readout']:6}  {r['final_mean']:8.1f} +- {r['final_sd']:6.1f}  "
-                  f"({r['minutes']:.0f} min)")
+            extra = f"  spikes {r['spikes_mean']:.1f} deadline {r['deadline_frac']:.3f}" if "nmax" in r else ""
+            print(f"  level {r['level']:7} {r['readout']:9} {r.get('encoder_spec') or '':9} s{r['seed']}  "
+                  f"{r['final_mean']:8.1f} +- "
+                  f"{r['final_sd']:6.1f}  ({r['minutes']:.0f} min)" + extra)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", choices=tuple(TASKS))
     ap.add_argument("--level", choices=("learned", "2", "1"), default="2")
-    ap.add_argument("--readout", choices=("1d", "beta4", "argmax"), default="1d")
+    ap.add_argument("--readout", default="1d", help="1d, argmax, beta<B>, db<T> or msprt<T>c<C> (module doc)")
+    ap.add_argument("--nmax", type=int, default=NMAX, help="deadline (action spikes) of db and msprt")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--encoder", default=None, help="controller encoder spec (iteration 012, tasks.with_encoder)")
+    ap.add_argument("--no-train", action="store_true", help="level 1: skip the (unused) training run")
     ap.add_argument("--summary", action="store_true")
     a = ap.parse_args()
     if a.summary:
         return summary()
     assert a.level == "1" or a.readout == "1d", "levels learned and 2 use the model's own readout, Eq. 1d"
-    run(a.task, a.level, a.readout, a.seed)
+    parse_readout(a.readout)
+    assert not a.no_train or a.level == "1", "--no-train: level 1 only"
+    run(a.task, a.level, a.readout, a.seed, a.nmax, a.encoder, not a.no_train)
 
 
 if __name__ == "__main__":

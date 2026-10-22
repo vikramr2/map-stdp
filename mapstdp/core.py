@@ -4,6 +4,8 @@ Conventions (docs/derivation.md): W[i, j] is the synapse pre j -> post i, T = W 
 d_j = sum_i W[i, j], J[i, j] = pi_j T[i, j], module tables are indexed [b, a] = (post module, pre module).
 Logs are base 2 (bits). Task term: action-gated eligibility (Eq. 4b) here; TD critic in experiments/m2.py.
 """
+import itertools
+
 import numpy as np
 
 
@@ -60,6 +62,29 @@ def rbf_stimulus(x, centers, sigma, m, roles):
     b = np.exp(-(d2 - d2.min()) / (2 * sigma ** 2))
     v = np.zeros(len(m))
     v[roles[m] == "C"] = b / b.sum()
+    return v
+
+
+def fourier_coeffs(d, order, conj):
+    """Fourier-basis coefficient vectors c in {0..order}^d with 1..conj nonzero entries (conjunction order <= conj;
+    the constant c = 0 excluded), in itertools.product order (iteration 012, Proposal)."""
+    return np.array([c for c in itertools.product(range(order + 1), repeat=d) if 0 < np.count_nonzero(c) <= conj],
+                     float)
+
+
+def fourier_features(x, C, onoff=True, bias=False):
+    """Nonnegative Fourier-basis rates of x in [0, 1]^d: f = cos(pi C x), ON/OFF split ([f]+, [-f]+) or (1 + f) / 2,
+    plus a constant unit if bias (Chung & Kozma 2020, arXiv:2008.13044, with conjunction order capped)."""
+    f = np.cos(np.pi * C @ np.asarray(x, float))
+    b = np.concatenate([np.maximum(f, 0), np.maximum(-f, 0)]) if onoff else (1 + f) / 2
+    return np.append(b, 1.0) if bias else b
+
+
+def fourier_stimulus(x, C, m, roles, onoff=True, bias=False):
+    """v(o) from fourier_features, one feature per controller neuron, v sums to 1 (iteration 012, Proposal)."""
+    b = fourier_features(x, C, onoff, bias)
+    v = np.zeros(len(m))
+    v[roles[m] == "C"] = b / max(b.sum(), 1e-12)
     return v
 
 
@@ -163,6 +188,42 @@ def action_score(W, pi, m, roles, a, beta=1.0):
     return np.repeat(h[:, None], K, 1)
 
 
+def action_inflow(W, pi, m, K):
+    """J^in_b = sum_{i in b} sum_j T_ij pi_j per module (action shares at beta = 1 are J^in_A / sum J^in_A)."""
+    return np.bincount(m, (W / W.sum(0) * pi).sum(1), K)
+
+
+def action_entropy(W, pi, m, roles):
+    """H(P~) in nats, P~ the beta = 1 action shares J^in_A / sum J^in_A, pi held fixed (iteration 012)."""
+    J = action_inflow(W, pi, m, len(roles))[roles == "A"]
+    P = J / J.sum()
+    return float(-(P * np.log(P)).sum())
+
+
+def entropy_score(W, pi, m, roles):
+    """Entropy modulator (iteration 012 C1, Proposal) as a K x K table tab[b, a'] = g_b / J^in_b with
+    g_b = -P~(b) (log P~(b) - sum_a P~(a) log P~(a)) on action modules, 0 elsewhere (P~: beta = 1 shares).
+    centered(tab) * kappa with kappa = J averages to W * dH(P~)/dW, pi fixed (self-check)."""
+    K, A = len(roles), roles == "A"
+    Jin = action_inflow(W, pi, m, K)
+    P = Jin[A] / Jin[A].sum()
+    h = np.zeros(K)
+    h[A] = -P * (np.log(P) - (P * np.log(P)).sum()) / Jin[A]
+    return np.repeat(h[:, None], K, 1)
+
+
+def usage_score(W, pi, m, roles, ubar):
+    """Usage homeostasis modulator (iteration 012 C2, Proposal): tab[b, a'] = (ubar_b - 1/|A|) / J^in_b on action
+    modules (ubar: running average of the beta = 1 action shares, length |A|), 0 elsewhere. The update is
+    -centered(tab) * kappa, whose average (kappa = J) is -W * d/dW sum_b (ubar_b - 1/|A|) log J^in_b, ubar and pi
+    fixed."""
+    K, A = len(roles), roles == "A"
+    Jin = action_inflow(W, pi, m, K)
+    h = np.zeros(K)
+    h[A] = (np.asarray(ubar) - 1 / A.sum()) / Jin[A]
+    return np.repeat(h[:, None], K, 1)
+
+
 def eligibility_step(e, W, kappa, pi, m, roles, a, tau_e=3.0, beta=1.0):
     """Eq. 4b: e <- (1 - 1/tau_e) e + kappa_ij (h_m(i) - hbar_j)."""
     return (1 - 1 / tau_e) * e + kappa * centered(action_score(W, pi, m, roles, a, beta), W, m)
@@ -243,6 +304,22 @@ if __name__ == "__main__":  # self-check: Eq. 1a bound, Eq. 7 vs finite differen
     assert (np.abs(W2.sum(0) - 1) < np.abs(1.5 * W.sum(0) - 1)).all()
     W3 = homeostasis_update(W * 1.5, mask, np.ones_like(W), 0.1)
     assert (np.abs(W3.sum(0) - 1) < np.abs(1.5 * W.sum(0) - 1)).all()
+    W5, m5, r5, mk5 = build_network((4, 3, 3, 3, 3), "CLAAA", p_same=0.8, p_cross=0.2, seed=2)  # iteration 012
+    pi5 = flow(W5, stimulus(0.6, m5, r5), alpha)
+    ub = np.array([0.5, 0.3, 0.2])
+    U = lambda W_: (np.log(action_inflow(W_, pi5, m5, 5)[r5 == "A"]) * (ub - 1 / 3)).sum()  # noqa: E731
+    gH = centered(entropy_score(W5, pi5, m5, r5), W5, m5) * pi5 / W5.sum(0)  # Eq. 5 form: dH/dW, pi fixed
+    gU = centered(usage_score(W5, pi5, m5, r5, ub), W5, m5) * pi5 / W5.sum(0)
+    for i, j in zip(*np.nonzero(mk5)):
+        E = np.zeros_like(W5)
+        E[i, j] = h
+        assert abs((action_entropy(W5 + E, pi5, m5, r5) - action_entropy(W5 - E, pi5, m5, r5)) / (2 * h) - gH[i, j]) \
+            < 1e-6
+        assert abs((U(W5 + E) - U(W5 - E)) / (2 * h) - gU[i, j]) < 1e-6
+    Cf = fourier_coeffs(4, 2, 2)
+    assert len(Cf) == 32 and fourier_features(np.full(4, 0.5), Cf).min() >= 0
+    vf = fourier_stimulus(np.zeros(4), Cf, *build_network((64, 4, 4), "CLA")[1:3])
+    assert np.isclose(vf.sum(), 1)
     Wc, mc, rc, _ = build_network((36, 4, 4), "CLA")
     vc = cartpole_stimulus([0, 0, 0.21, -3.5], mc, rc)  # theta at +max, theta_dot at -max: grid cell (5, 0)
     assert np.isclose(vc.sum(), 1) and vc.argmax() == 30

@@ -226,7 +226,35 @@ $$
 \log \beta \leftarrow \log \beta + \kappa_\beta z_e, \qquad z_e = \mathrm{clip} \left( \frac{\bar{R}_{fast} - \bar{R}_{slow}}{s_R}, -2, 2 \right), \qquad \beta \in [1, \beta_{max}] \qquad \text{(1g)}
 $$
 
-with $\kappa_\beta = 0.01$, $\beta_{max} = 16$ and no update over the first 20 episodes. It is one global scalar and it can fall as well as rise. It is not a gradient. The matched score in (4b) carries the prefactor $\beta$, so $\beta$ is also a global step-size gain on the task term: dividing it out (the score direction kept) removes part of the gain on Acrobot and CartPole and most of it on LunarLander, and none on MountainCar (iteration 006). Biologically, $\beta$ is a global gain set by a utility-trend signal: sustained improvement in return relative to its slow average raises $\beta$ (exploitation), sustained decline lowers it (exploration), and the normalisation by $s_R$ parallels reward-range adaptation in dopamine neurons [Tobler et al. 2005]. This abstracts the utility-driven phasic/tonic switch of the adaptive gain theory of locus coeruleus–noradrenaline [Aston-Jones & Cohen 2005], with tonic dopamine as a secondary candidate whose sign is unresolved. Unlike that theory, (1g) has no term for the absolute level of utility and does not respond to momentary lapses. One scalar acting on both response gain and plasticity is plausible, since noradrenaline also converts Hebbian eligibility traces into LTP [He et al. 2015], but here the coupling follows from matching the score to the readout; it is not an independently motivated mechanism. Open issues: (1g) needs episode boundaries, and a plain per-frame reward rate would not replace it, because it is constant in MountainCar and Acrobot; a leaky mean of $\delta / \mathrm{RMS}(\delta)$ is the candidate. A $\beta$ stuck low after a collapse does not recover, because $z_e \approx 0$ on a new plateau. Slow mean reversion of $\log \beta$ toward a set point is the candidate fix; a term that raises $\beta$ when utility is low would be an engineering choice, the opposite of the adaptive gain theory. Higher $\beta$ raises return, which raises $\beta$, and this positive feedback plausibly explains LunarLander's bimodal outcomes. A matched spiking readout for $\beta$ in the 8–16 range is open: a race to $k$ spikes after burn-in reaches only $\beta_{eff} \approx 1.5$ at $k = 16$ on trained weights (preliminary).
+with $\kappa_\beta = 0.01$, $\beta_{max} = 16$ and no update over the first 20 episodes. It is one global scalar and it can fall as well as rise. It is not a gradient. The matched score in (4b) carries the prefactor $\beta$, so $\beta$ is also a global step-size gain on the task term: dividing it out (the score direction kept) lowers CartPole return significantly, and Acrobot and LunarLander return not significantly, with no effect on MountainCar (iteration 006, corrected at 10 seeds in iteration 007). Limiting $\beta$'s effect on the step while the policy keeps the full $\beta$ (hard, saturating, inverted-U and hybrid caps; the score's direction is unchanged) did not raise return on fresh seeds, and the realised step does not grow with $\beta$, because $\mathbb{I} - \tilde{P}_\beta$ shrinks as the policy sharpens (iteration 008). Biologically, $\beta$ is a global gain set by a utility-trend signal: sustained improvement in return relative to its slow average raises $\beta$ (exploitation), sustained decline lowers it (exploration), and the normalisation by $s_R$ parallels reward-range adaptation in dopamine neurons [Tobler et al. 2005]. This abstracts the utility-driven phasic/tonic switch of the adaptive gain theory of locus coeruleus–noradrenaline [Aston-Jones & Cohen 2005], with tonic dopamine as a secondary candidate whose sign is unresolved. Unlike that theory, (1g) has no term for the absolute level of utility and does not respond to momentary lapses. One scalar acting on both response gain and plasticity is plausible, since noradrenaline also converts Hebbian eligibility traces into LTP [He et al. 2015], but here the coupling follows from matching the score to the readout; it is not an independently motivated mechanism. Open issues: (1g) needs episode boundaries, and a plain per-frame reward rate would not replace it, because it is constant in MountainCar and Acrobot. A leaky mean of $\delta / \mathrm{RMS}(\delta)$ fails as a replacement: the critic's own learning dominates it, and it holds $\beta$ at 1 on MountainCar and Acrobot (iteration 007). A $\beta$ stuck low after a collapse does not recover, because $z_e \approx 0$ on a new plateau; (1g′) below addresses this. A term that raises $\beta$ when utility is low would be an engineering choice, the opposite of the adaptive gain theory. Higher $\beta$ raises return, which raises $\beta$; but $\beta$ correlates with return about as strongly when its step-size role is removed, so most of that correlation is (1g) tracking return by design, and the collapses that split LunarLander's outcomes are in the weights, not in $\beta$ (iteration 007). A race to $k$ spikes after burn-in reaches only $\beta_{eff} \approx 1.5$ at $k = 16$ on trained weights; (1h) below is the matched spiking readout.
+
+**Proposal, not adopted: experience-dependent set point for $\beta$ (iteration 007; no benefit at 40 seeds, iteration 008).** A slow average $\bar{\ell}$ of $\log \beta$ feeds a set point $s$ that rises to $\bar{\ell}$ at once and leaks back toward it only slowly, and $\log \beta$ gains an upward-only pull toward $s$. After each episode, with $\bar{\ell}$ and $s$ updated from the pre-update $\beta$,
+
+$$
+\bar{\ell} \leftarrow \bar{\ell} + \frac{\log \beta - \bar{\ell}}{\tau_S}, \qquad s \leftarrow \max \left( \bar{\ell}, s - \frac{s - \bar{\ell}}{\tau_D} \right), \qquad \log \beta \leftarrow \log \beta + \kappa_\beta z_e + \epsilon_\beta \max \left( s - \log \beta, 0 \right) \qquad \text{(1g')}
+$$
+
+with $\bar{\ell}_0 = s_0 = 0$, $\tau_S = 100$ and $\tau_D = 1000$ episodes, $\epsilon_\beta = 0.005$, and $\beta$ clipped to $[1, \beta_{max}]$ as in (1g). While $\log \beta \ge s$ the pull is zero and (1g′) is exactly (1g). After a fall to a plateau ($z_e = 0$), the gap $s - \log \beta$ shrinks by the factor $1 - \epsilon_\beta$ per episode while $s$ leaks slowly, so $\beta$ returns toward the gain the agent had sustained, and never above it. It is one global scalar and causal; it needs no run length. It cannot repair a collapse that lives in the weights: frozen-weight tests show that re-raising $\beta$ helps only while the weights still hold a good policy (iteration 007). Biologically it abstracts a history-dependent homeostatic set point, by analogy with metaplasticity [Abraham & Bear 1996] and with tonic dopamine as a slow average of reward rate [Niv et al. 2007]; it is not a known LC–NE mechanism. Behaviourally it parallels the durable effort level left by rewarded effort [Eisenberger 1992]. A strict running maximum ($\tau_D = \infty$) would assume a stationary task and block disengagement after a change in contingency. A fixed two-sided set point, $\log \beta \leftarrow \log \beta + \kappa_\beta z_e + \epsilon_\beta (\log \beta_0 - \log \beta)$, with fixed point $\log \beta_0 + \kappa_\beta \bar{z} / \epsilon_\beta$ under constant $z_e = \bar{z}$, narrows LunarLander's spread but pulls $\beta$ down while performance is good, against the adaptive gain theory, and $\beta_0$ is a hand-set prior.
+
+**Proposal (spiking only): a race on count differences to a bound (iteration 010).** Let $n_a(t)$ be the action spikes of module $a$ counted from the burn-in to step $t$. The readout stops at the first step at which one module leads every other by $\theta$,
+
+$$
+a^{\ast} = a \quad \text{at the first } t \text{ with } n_a(t) - \max_{b \ne a} n_b(t) \ge \theta \qquad \text{(1h)}
+$$
+
+and at the end of the frame (the deadline) takes the leader. If each counted spike is an independent draw of module $a$ with probability $p_a$, then for two actions the lead is a $\pm 1$ random walk absorbed at $\pm \theta$, and by gambler's ruin [Feller 1968]
+
+$$
+P(a^{\ast} = a) = \frac{1}{1 + \left( p_b / p_a \right)^\theta} = \frac{p_a^\theta}{p_a^\theta + p_b^\theta},
+$$
+
+which is (1e) with $\beta = \theta$ exactly. The expected count is $\theta \tanh(\theta x) / \tanh x$ with $x = \frac{1}{2} \ln (p_a / p_b)$, which is $\theta^2$ at a tie [Wald 1947]. For three actions (1h) is not exactly (1e) but close: the KL from (1e) at $\beta = \theta$ was at most 0.0065 (Appendix A), and on trained v4 states the fitted $\beta_{eff}$ was slightly above $\theta$. A race to $k$ spikes, by contrast, sharpens only about as $\sqrt{k}$. With $\theta = 1$, (1h) is the one-spike race. (1h) is a discrete drift-diffusion model with mutual inhibition, the decision rule that the leaky competing accumulator approximates [Usher & McClelland 2001; Bogacz et al. 2006]; mutual inhibition through a shared inhibitory pool keeps Dale's law. A uniform gain on the action modules' rates does not change the order of spikes, so it does not sharpen a race; sharpening needs the bound. So $\beta$ maps onto a decision threshold, which cortico-striatal and subthalamic circuits set [Lo & Wang 2006; Bogacz et al. 2010; Cavanagh et al. 2011], more directly than onto noradrenergic gain. The basal-ganglia MSPRT [Bogacz & Gurney 2007] is the principled $K > 2$ form; at $K = 2$ it equals (1h), and at $K = 3$ it was never closer to (1e) than (1h).
+
+Two facts limit (1h) on the spiking network (iteration 010).
+- **Bursts.** Action modules are nearly closed, so each entry into one is a cascade of spikes, and counts are overdispersed by a factor $F \approx 15$–20. If each independent sample adds $B$ spikes, $\beta_{eff} \approx \theta \mathbb{E}[B] / \mathbb{E}[B^2] = \theta / F$, and reaching $\beta$ costs about $F \beta^2$ spikes instead of $\beta^2$ (Appendix A). Counting at most one spike per module, per head and per step (a saturating readout synapse) lowers $F$ by 1.5–2 times.
+- **Range.** With that cap, pooled over 16 heads and 100 steps, $\beta_{eff}$ spans 3.1 ($\theta = 1$, a majority over the first step's pooled spikes) to 11.5 ($\theta = 64$). The agent maps $\beta$ to $\theta$ through this measured table.
+
+In flow, (1h) adds nothing: at matched $\beta$ its level-1 ceilings on MountainCar and Acrobot equal those of (1e). It is a spiking readout for (1g) and is coupled to the score (4b) through $\beta$ as before.
 
 **Limits of this policy family.** $P(a \mid \mathbf{o})$ is a ratio of linear functions of $v$, so it is a mixture of each controller neuron's routing, and it has no temperature to sharpen it. Recurrence inside the controller blurs the stimulus. In a preliminary flow-level test, even ideal routing reached P(correct) = 0.92 with no controller recurrence, falling to 0.59 when 95% of the controller's outgoing weight stayed within the controller ($\alpha = 0.2$). Controller recurrence also defeats the task term. Credit on a controller→controller synapse depends on the postsynaptic neuron's own routing to the actions, so it varies within the controller, and the module-level score $h_b$ of (4b) cannot represent it. This is the general limit of a broadcast third factor in a recurrent network, which per-neuron feedback such as e-prop addresses [Bellec et al. 2020]. On trained weights, controller→controller synapses carried 15–78% of $\lVert W \odot \nabla \log P \rVert^2$, and the (4b) direction had cosine $0.03$–$0.45$ with it on that block (Appendix A). So the controller is built without recurrence ($p_{cc} = 0$, iteration 006), which makes it a feed-forward encoder. A cost-term penalty on $(\mathcal{C}, \mathcal{C})$ is not an alternative: the map term's diagonal is zero, so after the baseline $\bar{g}_j$ it potentiates controller→controller links relative to cross-module ones, and a penalty there would not be a description-length gradient.
 
@@ -458,6 +486,34 @@ $$
 $$
 
 Here $\pi_{\mathcal{C}}$ is the flow on the controller neurons, so $x_f$ sums to 1. The update is normalised LMS. In CartPole the reward is $r_f = -1$ on termination and 0 otherwise. $V_{f+1} = 0$ on termination, and the critic bootstraps on truncation. The critic weights $u$ are a vector over controller neurons in the periphery, and $\delta$ is a global scalar, so the task term stays crossbar-native. The earlier module-level critic, $V_f = \sum_b u_b p_b(f)$, did worse in flow-level CartPole tests (160 against 195; preliminary, iteration 001). A dedicated value population is an untested alternative. For one-step tasks (bandits), $\delta = R - \bar{R}(\mathbf{o})$.
+
+**Tested, not adopted: a critic eligibility trace, TD($\lambda$) (iteration 009).** A presynaptic trace on the critic synapses, reset at episode start,
+
+$$
+z_f = \gamma \lambda z_{f-1} + x_f, \qquad u \leftarrow u + \frac{\eta_V}{\lVert x_f \rVert^2} \delta_f z_f \qquad \text{(4c')}
+$$
+
+reduces to (4c) at $\lambda = 0$ bit for bit. With a constant step its offline (per-episode) update is the forward-view $\lambda$-return update [Sutton 1988]; with the normalisation applied at update time, as in (4c'), it is the $\lambda$-return of step-weighted TD errors, which equals the normalised forward view only when $\lVert x \rVert^2$ is constant along the episode (Appendix A). The trace $z$ is periphery state, like $u$. Plausibly it is a dopamine-gated eligibility on corticostriatal value synapses, 0.3–2.5 s at $\lambda$ 0.7–0.9 [Yagishita et al. 2014; Pan et al. 2005]. In practice (4c') diverged on Acrobot, where $\lVert x \rVert^2$ varies about twelvefold within an episode: $V$ reached about $10^{21}$ on 20 of 20 seeds at $\lambda = 0.9$. Normalising the trace input instead, $z_f = \gamma \lambda z_{f-1} + x_f / \lVert x_f \rVert^2$, matches the normalised forward view exactly and was stable (exploratory), but changed final return by at most about 2 on MountainCar. TD($\lambda$) speeds up MountainCar's first goal (median episode 14 against 25) without changing the final return; its $V$ correlates 0.99 with the true discounted value along successful MountainCar episodes, but that does not make the critic adequate: the remaining policy improvements are worth about 0.1 in TD-error units, below the critic's error, and a separate critic on a finer sensory layer, with a finer encoder, lifts MountainCar to about −102 (iteration 011, preliminary). A longer task trace ($\tau_e = 10$) and $\gamma = 0.995$ did not replicate either, and $\tau_e = 10$ cost CartPole (iteration 009).
+
+**Proposal: a separate critic population (iteration 012).** The critic reads its own fixed layer of nonnegative sensory receptive fields $y_f = \phi(\mathbf{o}_f)$ instead of the controller shares:
+
+$$
+V_f = u \cdot y_f, \qquad u \leftarrow u + \eta_V \delta_f \frac{y_f}{\lVert y_f \rVert^2} \qquad \text{(4c'')}
+$$
+
+with $\delta_f$ as in (4c). The layer (a Gaussian grid, or a Fourier basis of the observation with nonnegative ON/OFF rates) is fixed and never trained through the actor. With $p_{cc} = 0$, $x_f$ was already close to the controller's stimulus drive, so the change is in the critic's basis, not its principle: the critic never read the communities, and the module-level critic did worse. The communities remain the actor's states; the value function's state representation is designer-given, and value decodes only partly from module shares (cross-validated $R^2$ 0.2–0.7, against 0.8–0.99 from neuron-level shares; iteration 012). Biologically it is a parallel value pathway on shared input, like ventral-striatal critics fed by hippocampal place input [O'Doherty et al. 2004; Lansink et al. 2009] and the place-cell actor-critic of [Foster et al. 2000]. Its signed weights $u$ need an excitatory–inhibitory pair or a differential memristor pair. On MountainCar the critic's resolution is what matters: with a 12 × 12 controller grid, a 24 × 24 critic layer gave −101.9 (18 of 20 seeds at −110) and a 12 × 12 one −119.6 (iteration 012).
+
+**Proposal: an entropy term and a usage term on the action modules (iteration 012).** With $\tilde{P}$ the frame's action shares at $\beta = 1$, $\tilde{P}(b) = J^{in}_b / \sum_{a \in \mathcal{A}} J^{in}_a$, two module-level modulators act through the same coincidence count and per-row baseline as (4b), but are applied every frame and are not gated by $\delta$:
+
+$$
+\Delta W_{ij} = \eta c_e \kappa_{ij} \left( \frac{g^H_{m(i)}}{J^{in}_{m(i)}} - \bar{g}^H_j \right), \qquad g^H_b = -\tilde{P}(b) \left( \log \tilde{P}(b) - \sum_{a \in \mathcal{A}} \tilde{P}(a) \log \tilde{P}(a) \right) \qquad \text{(4h)}
+$$
+
+$$
+\Delta W_{ij} = -\eta c_u \kappa_{ij} \left( \frac{\bar{u}_{m(i)} - 1 / \lvert \mathcal{A} \rvert}{J^{in}_{m(i)}} - \bar{g}^U_j \right) \qquad \text{(4i)}
+$$
+
+on action modules ($g = 0$ elsewhere), where $\bar{u}_b$ is a running average of $\tilde{P}(b)$ over $\tau_u = 300$ frames. With $\pi$ fixed and $\kappa = J$, (4h) averages to $\eta c_e W \odot \nabla H(\tilde{P})$ and (4i) to $-\eta c_u W \odot \nabla \sum_b (\bar{u}_b - 1/\lvert \mathcal{A} \rvert) \log J^{in}_b$ (Appendix A). Putting the entropy gradient inside $h$ of (4b) instead would gate it by $\delta$, whose mean is near zero, so it would average away; Chung & Kozma likewise apply it to the plain STDP trace [Chung & Kozma 2020, Eq. 26]. The $\beta = 1$ shares keep $\beta$ the only temperature. Optionally $c_e$ tracks a target entropy, $\log c_e \leftarrow \log c_e + k \left( f \log \lvert \mathcal{A} \rvert - H(\tilde{P}) \right)$ per frame with $k = 10^{-3}$ [Haarnoja et al. 2018]. In practice the terms are useful only far below the task term: at 10–30% of its RMS they drive the policy to uniform (Acrobot on all pilot seeds), because the task increment is mostly zero-mean noise while (4h) is pure drift. With $c_e = 0.01$ and a target of $0.8 \log \lvert \mathcal{A} \rvert$, $c_e$ rises early and decays to about $4 \times 10^{-4}$, a transient exploration bonus; it helped MountainCar on fresh seeds and nothing else (iteration 012). Biologically (4h) and (4i) abstract usage homeostasis of the action channels through their shared inhibition, by analogy with homeostatic scaling [Turrigiano et al. 1998]. They are not a neuromodulator: exploration-related noradrenaline acts on choice stochasticity, which $\beta$ already models [Aston-Jones & Cohen 2005; Tervo et al. 2014].
 
 **Biological cost.** The vector $h$ requires the identity of the chosen action to be broadcast to the action modules. In basal-ganglia terms, the selected channel is tagged by its own activity when dopamine arrives [Gurney et al. 2015], which is more natural than a separate efference copy. The $1/J^{in}$ factors read as divisive normalisation, an abstraction. $\bar{h}_j$, like $\bar{g}_j$, is a presynaptic baseline over $j$'s targets and is not available at the postsynaptic synapse (§6).
 
@@ -694,7 +750,7 @@ In biology, a frame of 100–250 ms sits between the walk relaxation (tens of ms
 11. **Number of latent modules.** $\lvert \mathcal{L} \rvert$ is a hyperparameter unless latent modules are re-detected.
 12. **Routing conflict.** The map term starves the controller's routing unless the dual (4a) or an exemption is used (§4.5). $q^{\ast}$ is a free parameter.
 13. **Surrogate policy gradient.** The action-gated eligibility (4b) follows the gradient of the one-step inflow surrogate, not of (1d) exactly (cosine $0.997$ on an untrained test network; $0.55$–$0.85$ on trained M3 weights with controller recurrence, $0.83$–$0.99$ without). The TD critic (4c) is linear in the controller's flow shares.
-14. **Policy family.** (1d) has no temperature, and controller recurrence blurs it (§2.4). The sharpened family (1e) was unstable at fixed $\beta$ (M2); the adaptive $\beta$ of (1g) is causal but needs episode boundaries, and has no matched spiking readout.
+14. **Policy family.** (1d) has no temperature, and controller recurrence blurs it (§2.4). The sharpened family (1e) was unstable at fixed $\beta$ (M2); the adaptive $\beta$ of (1g, 1g′) is causal but needs episode boundaries (a per-frame trace of reward reset at terminal outcomes is a usable signal, but no single per-frame rate fits all tasks; iteration 007), and its spiking readout (1h) spans only $\beta_{eff} \approx 3$–11.5 at 16 heads, because action spikes come in bursts (iteration 010).
 15. **Carry-over memory.** Linear carry-over forgets geometrically. Holding a cue needs the module-level nonlinearity proposed in §2.3.
 
 ---
@@ -825,6 +881,32 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
 - **Block decomposition** (trained, $p_{cc} = 0.1$): controller→controller synapses carry 0.22 (CartPole), 0.15 (MountainCar), 0.78 (Acrobot) and 0.47 (LunarLander) of $\lVert \text{exact} \rVert^2$, with within-block cosine 0.03, 0.45, 0.08 and 0.22. On the controller→action and latent→action blocks the cosine is $\ge 0.986$. The module-level resolvent credit (4f, `m4-tmaze`) does not repair the controller→controller block (cosine $-0.02$ to $0.45$).
 - The $0.997$ of the review revisions above holds for untrained weights only.
 
+**Numerical checks for the critic trace (4c')** (iteration 009; scratch `check_tdl.py`; real critic features of the v4 initial network under a random policy, MountainCar 200 frames and Acrobot 500 frames, seeds 0–2, $\gamma \in \lbrace 0.99, 0.995 \rbrace$, $\lambda \in \lbrace 0.7, 0.9 \rbrace$; $u$ frozen within the episode):
+
+- **$\lambda = 0$:** the online rule equals (4c) bit for bit.
+- **Constant step:** the backward-view sum equals the forward-view $\lambda$-return update to $\le 1.0 \times 10^{-15}$.
+- **Update-time normalisation (4c'):** relative difference from the normalised forward view $\le 10^{-3}$ on MountainCar ($\lVert x \rVert^2$ coefficient of variation 0.002–0.004) and 0.019–0.123 on Acrobot (coefficient of variation 0.59–0.75), cosine $\ge 0.9979$.
+- **Trace-time normalisation:** equals the normalised forward view to $\le 1.2 \times 10^{-15}$.
+- Not yet checked: the spectral radius of the expected per-episode iteration on Acrobot features, which would confirm the divergence mechanism.
+
+**Numerical checks for the adaptive-$\beta$ set point (1g′)** (iteration 007; scratch `check_1g.py` and `check_1g_d.py`, run on the repo's `m2.Agent.beta_move` and `beta_frame`; none of these rules is a gradient):
+
+- **Reduction to (1g).** With $z_e$ drawn as clipped $\mathcal{N}(0.5, 1)$, 20 runs of 2000 updates, every update with $\log \beta \ge s$ equals the (1g) update bit for bit: 32983 of 32983 at $\tau_D = \infty$, 33119 of 33119 at $\tau_D = 1000$.
+- **Fixed point of the two-sided variant.** Under constant $\bar{z}$, $\log \beta$ converges to $\log \beta_0 + \kappa_\beta \bar{z} / \epsilon_\beta$ to six decimals for $(\bar{z}, \beta_0, \epsilon_\beta) = (0, 8, 0.001)$, $(0.3, 4, 0.01)$ and $(-0.2, 8, 0.005)$.
+- **Recovery on a plateau.** From $s = \log 16$ and $\beta = 2$ with $z_e = 0$: at $\tau_D = \infty$, $s$ stays fixed and the gap ratio after 100, 200 and 400 episodes is $0.6058$, $0.3670$ and $0.1347$, equal to $(1 - \epsilon_\beta)^n$. At $\tau_D = 1000$, $s$ leaks to $\log 13.7$ by episode 200 and $\beta$ reaches 7.08 there, against 7.46.
+- **Per-frame trace signal (1g″ of iteration 007, not adopted).** On synthetic episodes (reward 1 per frame, Poisson lengths, 5 seeds), the mean $z_f$ is at most $0.06$ in magnitude on a stationary process and $+0.77$ ($-0.77$) over the 40 000 frames after episode length rises from 50 to 200 (falls from 200 to 50).
+
+**Numerical checks for the bounded race (1h)** (iteration 010; scratch `010/exact.py`, `check_k2.py`, `check_k3.py`, `k3kl.py`, `burst.py`, and an independent `010mine/k2.py`; counted spikes drawn i.i.d. from $p$ unless stated):
+
+- **$K = 2$, gambler's ruin.** The exact absorbing chain gives $P(a^{\ast} = a) = p_a^\theta / (p_a^\theta + p_b^\theta)$ to $\le 2 \times 10^{-15}$, and $\mathbb{E}[N] = \theta \tanh(\theta x) / \tanh x$ to $\le 10^{-12}$, for $p_a \in \lbrace 0.5, 0.55, 0.6, 0.75, 0.9 \rbrace$ and $\theta \in \lbrace 1, 2, 4, 8, 16 \rbrace$. A Monte Carlo of the repo's `ceiling.bound_decision` (20 000 runs per cell) is within 0.5%. At $K = 2$ the MSPRT with matched threshold equals (1h) for any gain $c$.
+- **$K = 3$.** KL from (1e) at $\beta = \theta$ is at most 0.0065 on hand-picked $p$ ($\theta \in \lbrace 2, 4, 8 \rbrace$, 6000 runs). On 60 trained-v4 states per task (4000 runs each), it is 0.0002–0.0033 for $\theta = 2$–16, and the maximum-likelihood $\beta_{eff}$ is 2.15–2.23, 4.24–4.39, 8.08–8.18 and 15.95 at $\theta = 2, 4, 8, 16$. MSPRT ($c = 1$) has KL 0.020–0.025 at $\theta = 2$ and 0.004–0.006 at $\theta = 4$.
+- **Bursts.** With geometric burst sizes $B$ of overdispersion $F = \mathbb{E}[B^2] / \mathbb{E}[B]$, the measured $\beta_{eff}$ is 6.7–7.1 against $\theta / F = 6.4$ ($F = 5$, $\theta = 32$), 13.0–13.2 against 12.8 ($F = 5$, $\theta = 64$) and 7.5–7.6 against 7.1 ($F = 9$, $\theta = 64$); the excess is the $O(1/F)$ overshoot term.
+
+**Numerical checks for the entropy and usage terms (4h, 4i)** (iteration 012; scratch `012/dcheck.py`, `012/dcheck_sbm.py`, using `fdcheck.py`; with $\pi$ fixed, `lemma_grad` with $g_{ij} = g_{m(i)} / J^{in}_{m(i)}$ against finite differences of $H(\tilde{P})$ and of $\sum_b (\bar{u}_b - 1/\lvert \mathcal{A} \rvert) \log J^{in}_b$):
+
+- **Small networks** (module sizes 5, 4, 3, 3, 3; 3 seeds): finite-difference error $1.1$–$2.1 \times 10^{-10}$ for both; Monte Carlo correlation of the three-factor average with $W \odot \nabla$ 0.99981–0.99989; cosine with the full-resolvent finite difference ($\pi$ recomputed) 0.996–0.999.
+- **The repo's SBM network** (`core.build_network`, $p_{cc} = 0$, perturbed $W$): Monte Carlo correlation 0.9997; cosine with the full-resolvent finite difference 0.93 for (4h) and 0.92 for (4i), so the neglected dependence of $\pi$ on $W$ is not negligible there.
+
 ## Appendix B: Corrections to the earlier derivation
 
 1. **Sign error.** The earlier version expanded $L(M)$ with $+$ on its second and third terms; both are negative. The gradient's log factor becomes $M^{\ast}_m = \log \frac{q_{\curvearrowright}(p_m+q_m)}{q_m^2} \ge 0$, not $\log \frac{q_{\curvearrowright}}{p_m+q_m} \le 0$.
@@ -868,19 +950,44 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
     - **Correction.** The $0.997$ cosine of (4b) with the true score holds only on untrained weights. On trained weights with controller recurrence it falls to $0.55$–$0.85$ (§4.6, Appendix A).
     - **Credit limit.** The module-level score cannot credit controller→controller synapses, so the controller is built without recurrence, $p_{cc} = 0$ (§2.4). A $(\mathcal{C}, \mathcal{C})$ cost penalty is rejected: it is not a description-length gradient.
     - **Proposal: adaptive $\beta$ (1g).** A causal, utility-trend rule replaces fixed $\beta$; the training-length schedule is an oracle reference only (§2.4).
+14. **Iteration 007, robust adaptive $\beta$ (2026-10-21).**
+    - **Proposal: experience-dependent set point (1g′).** An upward-only pull of $\log \beta$ toward a slowly leaking maximum of its own slow average, so a $\beta$ that fell after a collapse recovers (§2.4). The neuroscientist review replaced a strict running maximum with the leaky one.
+    - **Correction.** Dividing $\beta$ out of the score does not remove most of LunarLander's gain at 10 seeds (§2.4).
+    - **Rejected:** a leaky mean of $\delta / \mathrm{RMS}(\delta)$ as the episode-free utility signal.
+15. **Iterations 008–009 (2026-10-21).**
+    - **Withdrawn:** v5 (1g′); no benefit at 40 seeds. The documented model is v4.
+    - **Tested, not adopted:** caps on $\beta$'s gain on the task step (§2.4), the critic trace (4c'), $\tau_e = 10$ and $\gamma = 0.995$ (§4.6). None replicated on fresh seeds.
+    - **Instability.** (4c') with update-time normalisation diverges when $\lVert x \rVert^2$ varies within an episode; trace-time normalisation does not (§4.6).
+16. **Iteration 010, decision-bound readout (2026-10-21).**
+    - **Proposal (spiking only): a race on count differences to a bound (1h).** For two actions it is (1e) with $\beta = \theta$ exactly (gambler's ruin), so the spiking network gets a matched sharpened readout (§2.4).
+    - **Correction.** $\beta$ maps onto a decision threshold more directly than onto noradrenergic gain, because a uniform gain does not sharpen a race (§2.4).
+    - **Tested, not adopted:** (1h) and the MSPRT as flow readouts; their ceilings equal those of (1e).
+17. **Iterations 011–012 (2026-10-21).**
+    - **Correction.** Iteration 009's conclusion that the critic does not limit MountainCar is withdrawn: the remaining improvements are below the critic's resolution (§4.6).
+    - **Proposal: a separate critic population (4c'').** The critic reads its own fixed sensory layer; the communities remain the actor's states (§4.6).
+    - **Proposal: entropy and usage terms (4h, 4i).** Ungated per-frame module-level updates; useful only far below the task term's size (§4.6).
 
 
 ## References
 
+- Abraham, W. C., & Bear, M. F. (1996). Metaplasticity: the plasticity of synaptic plasticity. *Trends in Neurosciences*, 19(4), 126–130.
 - Aston-Jones, G., & Cohen, J. D. (2005). An integrative theory of locus coeruleus-norepinephrine function: adaptive gain and optimal performance. *Annual Review of Neuroscience*, 28, 403–450.
 - Attwell, D., & Laughlin, S. B. (2001). An energy budget for signaling in the grey matter of the brain. *Journal of Cerebral Blood Flow & Metabolism*, 21(10), 1133–1145.
 - Baars, B. J. (2005). Global workspace theory of consciousness: toward a cognitive neuroscience of human experience. *Progress in Brain Research*, 150, 45–53.
 - Bellec, G., Scherr, F., Subramoney, A., Hajek, E., Salaj, D., Legenstein, R., & Maass, W. (2020). A solution to the learning dilemma for recurrent networks of spiking neurons. *Nature Communications*, 11, 3625.
+- Bogacz, R., Brown, E., Moehlis, J., Holmes, P., & Cohen, J. D. (2006). The physics of optimal decision making: a formal analysis of models of performance in two-alternative forced-choice tasks. *Psychological Review*, 113(4), 700–765.
+- Bogacz, R., & Gurney, K. (2007). The basal ganglia and cortex implement optimal decision making between alternative actions. *Neural Computation*, 19(2), 442–477.
+- Bogacz, R., Wagenmakers, E.-J., Forstmann, B. U., & Nieuwenhuis, S. (2010). The neural basis of the speed-accuracy tradeoff. *Trends in Neurosciences*, 33(1), 10–16.
 - Buesing, L., Bill, J., Nessler, B., & Maass, W. (2011). Neural dynamics as sampling: a model for stochastic computation in recurrent networks of spiking neurons. *PLoS Computational Biology*, 7(11), e1002211.
+- Cavanagh, J. F., Wiecki, T. V., Cohen, M. X., Figueroa, C. M., Samanta, J., Sherman, S. J., & Frank, M. J. (2011). Subthalamic nucleus stimulation reverses mediofrontal influence over decision threshold. *Nature Neuroscience*, 14(11), 1462–1467.
 - Chistiakova, M., Bannon, N. M., Bazhenov, M., & Volgushev, M. (2014). Heterosynaptic plasticity: multiple mechanisms and multiple roles. *The Neuroscientist*, 20(5), 483–498.
+- Chung, S., & Kozma, R. (2020). Reinforcement learning with feedback-modulated TD-STDP. *arXiv:2008.13044*.
 - Dayan, P., & Abbott, L. F. (2001). Information theory. In *Theoretical Neuroscience: Computational and Mathematical Modeling of Neural Systems* (pp. 123–150). MIT Press.
 - Delvenne, J.-C., Yaliraki, S. N., & Barahona, M. (2010). Stability of graph communities across time scales. *PNAS*, 107(29), 12755–12760.
+- Eisenberger, R. (1992). Learned industriousness. *Psychological Review*, 99(2), 248–267.
 - Engelhard, B., Finkelstein, J., Cox, J., et al. (2019). Specialized coding of sensory, motor and cognitive variables in VTA dopamine neurons. *Nature*, 570, 509–513.
+- Feller, W. (1968). *An Introduction to Probability Theory and Its Applications*, Vol. 1 (3rd ed.). Wiley.
+- Foster, D. J., Morris, R. G. M., & Dayan, P. (2000). A model of hippocampally dependent navigation, using the temporal difference learning rule. *Hippocampus*, 10(1), 1–16.
 - Frank, M. J. (2006). Hold your horses: a dynamic computational role for the subthalamic nucleus in decision making. *Neural Networks*, 19(8), 1120–1136.
 - Friston, K. (2010). The free-energy principle: a unified brain theory? *Nature Reviews Neuroscience*, 11(2), 127–138.
 - Frémaux, N., Sprekeler, H., & Gerstner, W. (2010). Functional requirements for reward-modulated spike-timing-dependent plasticity. *Journal of Neuroscience*, 30(40), 13326–13337.
@@ -889,20 +996,28 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
 - Gerstner, W., Lehmann, M., Liakoni, V., Corneil, D., & Brea, J. (2018). Eligibility traces and plasticity on behavioral time scales: experimental support of neoHebbian three-factor learning rules. *Frontiers in Neural Circuits*, 12, 53.
 - Gold, J. I., & Shadlen, M. N. (2007). The neural basis of decision making. *Annual Review of Neuroscience*, 30, 535–574.
 - Gurney, K. N., Humphries, M. D., & Redgrave, P. (2015). A new framework for cortico-striatal plasticity: behavioural theory meets in vitro data at the reinforcement-action interface. *PLoS Biology*, 13(1), e1002034.
+- Haarnoja, T., Zhou, A., Hartikainen, K., Tucker, G., Ha, S., Tan, J., Kumar, V., Zhu, H., Gupta, A., Abbeel, P., & Levine, S. (2018). Soft actor-critic algorithms and applications. *arXiv:1812.05905*.
 - Hamid, A. A., Frank, M. J., & Moore, C. I. (2021). Wave-like dopamine dynamics as a mechanism for spatiotemporal credit assignment. *Cell*, 184(10), 2733–2749.
 - He, K., Huertas, M., Hong, S. Z., Tie, X., Hell, J. W., Shouval, H., & Kirkwood, A. (2015). Distinct eligibility traces for LTP and LTD in cortical synapses. *Neuron*, 88(3), 528–538.
 - Henneberger, C., Papouin, T., Oliet, S. H. R., & Rusakov, D. A. (2010). Long-term potentiation depends on release of D-serine from astrocytes. *Nature*, 463, 232–236.
 - Horowitz, J. M., & Esposito, M. (2014). Thermodynamics with continuous information flow. *Physical Review X*, 4, 031015.
 - Kempter, R., Gerstner, W., & van Hemmen, J. L. (1999). Hebbian learning and spiking neurons. *Physical Review E*, 59(4), 4498–4514.
+- Lansink, C. S., Goltstein, P. M., Lankelma, J. V., McNaughton, B. L., & Pennartz, C. M. A. (2009). Hippocampus leads ventral striatum in replay of place-reward information. *PLoS Biology*, 7(8), e1000173.
 - Li, H. L., & van Rossum, M. C. W. (2020). Energy efficient synaptic plasticity. *eLife*, 9, e50804.
 - Litwin-Kumar, A., & Doiron, B. (2012). Slow dynamics and high variability in balanced cortical networks with clustered connections. *Nature Neuroscience*, 15(11), 1498–1505.
+- Lo, C.-C., & Wang, X.-J. (2006). Cortico-basal ganglia circuit mechanism for a decision threshold in reaction time tasks. *Nature Neuroscience*, 9(7), 956–963.
 - Lynn, C. W., Cornblath, E. J., Papadopoulos, L., Bertolero, M. A., & Bassett, D. S. (2021). Broken detailed balance and entropy production in the human brain. *PNAS*, 118(47), e2109889118.
 - Markov, N. T., Misery, P., Falchier, A., Lamy, C., Vezoli, J., Quilodran, R., Gariel, M. A., Giroud, P., Ercsey-Ravasz, M., Pilaz, L. R., Huissoud, C., Barone, P., Dehay, C., Toroczkai, Z., Van Essen, D. C., Kennedy, H., & Knoblauch, K. (2011). Weight consistency specifies regularities of macaque cortical networks. *Cerebral Cortex*, 21(6), 1254–1272.
 - Mazzucato, L., Fontanini, A., & La Camera, G. (2015). Dynamics of multistable states during ongoing and evoked cortical activity. *Journal of Neuroscience*, 35(21), 8214–8231.
+- Niv, Y., Daw, N. D., Joel, D., & Dayan, P. (2007). Tonic dopamine: opportunity costs and the control of response vigor. *Psychopharmacology*, 191(3), 507–520.
+- O'Doherty, J., Dayan, P., Schultz, J., Deichmann, R., Friston, K., & Dolan, R. J. (2004). Dissociable roles of ventral and dorsal striatum in instrumental conditioning. *Science*, 304(5669), 452–454.
+- Pan, W.-X., Schmidt, R., Wickens, J. R., & Hyland, B. I. (2005). Dopamine cells respond to predicted events during classical conditioning: evidence for eligibility traces in the reward-learning network. *Journal of Neuroscience*, 25(26), 6235–6242.
 - Peixoto, T. P. (2014). Hierarchical block structures and high-resolution model selection in large networks. *Physical Review X*, 4, 011047.
 - Petreanu, L., Mao, T., Sternson, S. M., & Svoboda, K. (2009). The subcellular organization of neocortical excitatory connections. *Nature*, 457, 1142–1145.
 - Plaçais, P.-Y., & Preat, T. (2013). To favor survival under food shortage, the brain disables costly memory. *Science*, 339(6118), 440–442.
 - Redgrave, P., Prescott, T. J., & Gurney, K. (1999). The basal ganglia: a vertebrate solution to the selection problem? *Neuroscience*, 89(4), 1009–1023.
+- Tervo, D. G. R., Proskurin, M., Manakov, M., Kabra, M., Vollmer, A., Branson, K., & Karpova, A. Y. (2014). Behavioral variability through stochastic choice and its gating by anterior cingulate cortex. *Cell*, 159(1), 21–32.
+- Usher, M., & McClelland, J. L. (2001). The time course of perceptual choice: the leaky, competing accumulator model. *Psychological Review*, 108(3), 550–592.
 - van Rossum, M. C. W., Bi, G. Q., & Turrigiano, G. G. (2000). Stable Hebbian learning from spike timing-dependent plasticity. *Journal of Neuroscience*, 20(23), 8812–8821.
 - Rosvall, M., & Bergstrom, C. T. (2008). Maps of random walks on complex networks reveal community structure. *PNAS*, 105(4), 1118–1123.
 - Royer, S., & Paré, D. (2003). Conservation of total synaptic weight through balanced synaptic depression and potentiation. *Nature*, 422(6931), 518–522.
@@ -911,9 +1026,11 @@ The preliminary spiking (Hawkes) and flow-level bandit numbers quoted in §2.2, 
 - Sejnowski, T. J. (1977). Storing covariance with nonlinearly interacting neurons. *Journal of Mathematical Biology*, 4(4), 303–321.
 - Shouval, H. Z., Wang, S. S.-H., & Wittenberg, G. M. (2010). Spike timing dependent plasticity: a consequence of more fundamental learning rules. *Frontiers in Computational Neuroscience*, 4.
 - Still, S., Sivak, D. A., Bell, A. J., & Crooks, G. E. (2012). Thermodynamics of prediction. *Physical Review Letters*, 109, 120604.
+- Sutton, R. S. (1988). Learning to predict by the methods of temporal differences. *Machine Learning*, 3(1), 9–44.
 - Tobler, P. N., Fiorillo, C. D., & Schultz, W. (2005). Adaptive coding of reward value by dopamine neurons. *Science*, 307(5715), 1642–1645.
 - Turrigiano, G. G., Leslie, K. R., Desai, N. S., Rutherford, L. C., & Nelson, S. B. (1998). Activity-dependent scaling of quantal amplitude in neocortical neurons. *Nature*, 391(6670), 892–896.
 - Vogels, T. P., Sprekeler, H., Zenke, F., Clopath, C., & Gerstner, W. (2011). Inhibitory plasticity balances excitation and inhibition in sensory pathways and memory networks. *Science*, 334(6062), 1569–1573.
+- Wald, A. (1947). *Sequential Analysis*. Wiley.
 - Wang, Z., Joshi, S., Savel'ev, S. E., et al. (2017). Memristors with diffusive dynamics as synaptic emulators for neuromorphic computing. *Nature Materials*, 16, 101–108.
 - Wilson, R. C., Takahashi, Y. K., Schoenbaum, G., & Niv, Y. (2014). Orbitofrontal cortex as a cognitive map of task space. *Neuron*, 81(2), 267–279.
 - Yagishita, S., Hayashi-Takagi, A., Ellis-Davies, G. C. R., Urakubo, H., Ishii, S., & Kasai, H. (2014). A critical time window for dopamine actions on the structural plasticity of dendritic spines. *Science*, 345(6204), 1616–1620.

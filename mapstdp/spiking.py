@@ -116,6 +116,30 @@ def race(S, groups, rng, burn=0):
     return int(rng.choice(len(c), p=c / c.sum()))
 
 
+def diffbound(S, groups, theta, rng, burn=0, cap=0, heads=1):
+    """Count-difference race to a bound (iteration 010, Proposal): from step `burn` on, integrate each group's spike
+    count (per step, at most `cap` spikes per group and head if cap > 0; groups pooled over `heads` heads as
+    head_groups builds them) and stop at the first step at which one group leads every other by theta or more.
+    For two groups whose spikes form an i.i.d. sequence of labels this is Eq. 1e with beta = theta (gambler's ruin).
+    theta = 1 differs from race() only in same-step ties (no stop, keep counting).
+    Returns (group index, deadline hit, action spikes counted up to the decision), or None if no group spikes.
+    Deadline (end of the frame): the leader, ties uniform; a silent group simply never leads."""
+    if cap > 0:
+        cnt = np.stack([np.minimum(S[burn:, g].reshape(len(S) - burn, heads, -1).sum(2), cap).sum(1)
+                        for g in groups], 1)
+    else:
+        cnt = np.stack([S[burn:, g].sum(1) for g in groups], 1)
+    n = np.cumsum(cnt, 0)
+    if not len(n) or not n[-1].any():
+        return None
+    top2 = np.sort(n, 1)[:, -2:]
+    hit = np.flatnonzero(top2[:, 1] - top2[:, 0] >= theta)
+    if len(hit):
+        return int(np.argmax(n[hit[0]])), False, int(n[hit[0]].sum())
+    lead = np.flatnonzero(n[-1] == n[-1].max())
+    return int(lead[0] if len(lead) == 1 else rng.choice(lead)), True, int(n[-1].sum())
+
+
 def pairings(S, lags=1):
     """Causal counts C[i, j] = #(pre j at t, post i at t + lag), lag = 1..lags; acausal is C.T.
     Returns (causal, causal - acausal, causal - chance), chance = c_i c_j sum_l (k - l) / k^2 from the
@@ -139,6 +163,17 @@ if __name__ == "__main__":  # self-check: W_snm orientation and lag-1 causal cou
     r = race(np.array([[0, 0, 0], [0, 0, 1], [1, 1, 0]], bool), [[0, 1], [2]], np.random.default_rng(0))
     assert r == 1 and race(np.zeros((3, 3), bool), [[0], [1]], None) is None
     assert race(np.array([[0, 0, 1], [0, 0, 1], [1, 1, 0]], bool), [[0, 1], [2]], np.random.default_rng(0), burn=2) == 0
+    D, G = np.array([[0, 1, 1], [1, 0, 0], [0, 1, 1], [0, 1, 0]], bool), [[0], [1, 2]]  # bound, cap, deadline
+    assert diffbound(D, G, 2, None) == (1, False, 2) and diffbound(D, G, 2, None, cap=1) == (1, False, 4)
+    assert diffbound(D, G, 9, None) == (1, True, 6) and diffbound(D[1:2], G, 1, None) == (0, False, 1)
+    assert diffbound(np.zeros((4, 2), bool), [[0], [1]], 2, None) is None
+    D2 = np.hstack([D, D])  # two heads: the cap is per head, so the capped count doubles and so does the bound
+    assert diffbound(D2, head_groups(G, 2, 3), 4, None, cap=1, heads=2) == (1, False, 8)
+    rs = np.random.default_rng(0)  # K = 2 gambler's ruin: one labelled spike per step w.p. p -> P(0) = p^th / sum p^th
+    for th in (2, 4):
+        lab = rs.choice(3, p=[0.3, 0.2, 0.5], size=(4000, 300))  # label 2 = no spike this step
+        wins = [diffbound(np.stack([x == 0, x == 1], 1), [[0], [1]], th, rs)[0] == 0 for x in lab]
+        assert abs(np.mean(wins) - 0.6 ** th / (0.6 ** th + 0.4 ** th)) < 0.025, (th, np.mean(wins))
     from mapstdp import core  # heads: the numpy engine reproduces SuperNeuroMAT's raster spike for spike
     Wc, mc, rc, _ = core.build_network((12, 8, 8, 8), "CLAA", seed=1)
     vc, H = core.stimulus(0.4, mc, rc), 3
