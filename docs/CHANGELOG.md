@@ -2,7 +2,94 @@
 
 This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. The project is research, so entries are dated rather than versioned. Record decisions and reversals here as well as file changes.
 
+## 2026-10-23
+
+### Added (reference code of Chung & Kozma 2020)
+
+- `reference/td_stdp/`: a shallow clone of https://github.com/stephen-chung-mh/td_stdp (commit `a5cb7f4`), the paper authors' BindsNET code, used to compare against the iteration 013 implementation. `reference/` is gitignored; reference only, not imported by the project.
+
+### Added (iteration 013 step 1: TD-STDP backbone of Chung & Kozma 2020 on the branching engine)
+
+- **Code:**
+  - `mapstdp/tdstdp.py` (new): the feed-forward TD-STDP actor-critic of Chung & Kozma 2020, a baseline and not Map-STDP. It holds the branching step without presynaptic normalisation and a SuperNeuroMAT twin, a true-LIF control (CK Eq. 1, or SuperNeuroMAT's subtractive leak), a closed-form block sum of the z/q traces and updates (block 1 = the per-ms rule), a block Adam with per-ms-matched moments, and a self-check.
+  - `experiments/tdstdp.py` (new): closed loop, CLI and `--summary`. Results go to `tdstdp_*.json`.
+  - `tests/test_regression.py` now also runs the `mapstdp.tdstdp` self-check.
+  - Golden is bit-identical, 8 tests pass and ruff is clean.
+- **Self-check:**
+  - The numpy step equals SuperNeuroMAT spike for spike, both in branching mode and with a finite leak, and the closed loop on the `snm` engine reproduces the numpy engine's returns and W.
+  - The block closed form matches the per-ms loop to $4 \times 10^{-16}$.
+  - The STE in branching mode is exact per postsynaptic row (cosine 1.0000) but carries the post rate as a row gain (global cosine 0.9975 critic, 0.9685 actor).
+- **Decisions and deviations** (`docs/iterations/013-tdstdp-backbone.md` §3):
+  - Weight units: η is divided by 1300, from CK Eq. 1 and Eq. 44. The BindsNET reading of 13 destroyed the network in a debug run.
+  - Batch 16 runs as 16 asynchronous env copies with 3000 episodes per copy.
+  - LunarLander runs at B = 20.
+  - Block Adam was changed to per-ms-matched moments after the first form collapsed 3/10 CartPole seeds. It passed a gate set in advance (MW p 0.14 against per-ms Adam).
+  - The E4 rule uses the per-ms update RMS.
+  - E3 and E4 were stopped at episode 50 and relaunched under these two fixes.
+- **Results** (`python -m experiments.tdstdp --summary`):
+  - E1 (CK CartPole, no Adam, 20 seeds) **fails its gate**: 0/20 solved, last-100 15.4 ± 16.4. The true-LIF control with Table 1 verbatim fails the same way (0/10).
+  - E2 (+ per-ms Adam) learns: 377.8 ± 83.2, $T_f$ 123.0 ± 30.2 against CK's 57.0, and 1/20 meets CK's strict $T_s$.
+  - Post hoc: LIF + Adam gives 464.8 ± 31.4 (branching 369.7 on matched seeds, MW p 0.006). SGD with the Adam-equivalent η learns and then collapses in 6/10 seeds. An init at rate 0.1 does not rescue E1.
+  - E3 and E4 (LunarLander) are running locally, started 11:13 EDT, at least 8.5 h.
+- **Not changed:** `docs/derivation.md` and `docs/model.md` (TD-STDP is a baseline, not the model). `CLAUDE.md` gains the Code and Commands lines for the new module and script.
+
+### Decided (iteration 013: TD-STDP on the branching engine first; QIF deferred)
+
+- **Result (preliminary, scratch only; no repo code):** the derivation §5 rule on the `mpr` rate backend (`mprK`: pairing count $J^\Lambda$, eligibility $\kappa_{ij} \Phi^K_{m(i)}$ with no presynaptic baseline, pairing-weighted structural baseline, kernel clipped at 0 for $\kappa$ and $T^{eff}$, eligibility scale 0.75 fixed before training) against `mpr` and flow v4, v4 flags, last-100 mean ± sd:
+
+  | Task (seeds) | flow v4 | mpr | mprK | mprK vs mpr (Welch / MWU p) |
+  | --- | --- | --- | --- | --- |
+  | CartPole (0–19) | 487.6 ± 51.7 | 231.1 ± 103.2 | 190.9 ± 100.8 (n = 18) | 0.23 / 0.63 |
+  | Acrobot (0–19) | −107.6 ± 17.5 | −123.9 ± 23.5 | −114.5 ± 27.2 | 0.25 / 0.05 |
+  | MountainCar (0–9) | −131.8 ± 2.8 | −166.6 ± 35.1 | −159.0 ± 34.8 | 0.63 / 0.57 |
+  | LunarLander (0–9) | 102.5 ± 94.1 | −6.0 ± 57.6 | 4.5 ± 34.4 | 0.63 / 0.62 |
+
+  On frozen weights the new score's cosine with the exact policy gradient is 0.83–0.97 after removing the column rescaling (the old 4b on `mpr`: 0.07–0.42), but in closed loop it closes none of the CartPole gap and is not significantly better than `mpr` on any task. Confounds: the structural and homeostasis terms ran about 1.7× stronger, and `mprK` drives $W$ toward regimes where the rate solver needs fallbacks (5–25× more). CartPole seeds 15 and 17 were stopped at the user's direction (8.6 h, episodes 950 and 600) and are excluded. Scripts and results: session scratchpad `qif/kscore/`.
+- **Decision (user):** the QIF migration postpones the hard part (recurrent modules) rather than removing it. Build the TD-STDP backbone [Chung & Kozma 2020] on the SuperNeuroMAT branching engine first, then tune QIF. Derivation §5 stays a Proposal.
+
+### Changed (derivation rewritten: current state only, map equation only, linear-response base)
+
+- **Docs:** `docs/derivation.md` rewritten from 1037 lines (about 19k words) to about 480 (about 9k words), at the user's direction. History lives here and in `docs/iterations/`, not in the derivation.
+- **Cut:**
+  - Appendix B (corrections) and every dated or "previously/corrected" note.
+  - Iteration-by-iteration narrative and result tables; iterations are now cited in one clause where a design choice needs evidence.
+  - §5's alternative description lengths (entropy rate, entropy production, cost-weighted map equation, Markov stability, SBM, predictive dissipation, information flow, latent-chain entropy rate). The structural term is the map equation only.
+  - The lateral-inhibition score (old Eq. 8, §7).
+  - The rejected latent-output alternatives and the withdrawn or removed variants: Eq. 1g′ (β set point), Eq. 4c′ (critic TD(λ)) and Eq. 4i (usage term).
+  - The dual routing term (4a) is reduced to a short m1-only ablation, and the routing exemption is the stated choice.
+- **Restructured:**
+  - §2.1 now derives the walk as the network's linear response (Hawkes kernel $K = \mathrm{diag}(G) B$, $r = Kr + \mu$, walk $T^{eff} = K/m$, escape $1 - m_j$), with branching mode ($K = (1-\alpha)T$, $G = 1$) as the implemented special case that gives Eq. 1.
+  - The new §5 (**Proposal**, not implemented) states Lemma K (K6), Theorem K3 (K7: pairing-weighted baseline, preconditioner $m_j$) and the policy score (K8–K9: cascade value $\Phi$, no presynaptic baseline), with their open conditions.
+  - §7 is now Inhibition: code the E→E walk, with inhibition entering only through $G$ and $\pi$; the score keeps the pools.
+  - Appendix A is compressed to short proofs and one check table. Its EM-split cosines are flow 0.85/0.92/0.55/0.92 and QIF 0.25–0.44, replacing the 0.977 small-network figure.
+  - Lemma K and (K8)–(K9) were re-checked independently on a 12-neuron softplus network: FD error $9 \times 10^{-10}$ and $7 \times 10^{-9}$ relative.
+- **Equation numbers unchanged** for every surviving equation (1, 1a–1e, 1g, 1h, 2, 3, 3a, 4, 4a–4e, 4c″, 4h, 5–7). The retired numbers (1g′, 4c′, 4i, 8) are not reused. New equations are labelled K1–K9.
+- **References:** dropped works no longer cited. Added Hawkes 1971, Hawkes & Oakes 1974, Lambiotte & Rosvall 2012, Montbrió et al. 2015, Pernice et al. 2011, Trousdale et al. 2012, Tsodyks et al. 1997 and Ozeki et al. 2009 (the last two verified this session).
+- **Other docs:**
+  - CLAUDE.md: dropped the Appendix B sentence and the "seven alternatives" framing.
+  - SPEC (user decision: map equation only): dropped the §6 candidate table and its scoring criteria, the "estimators" and "composite modulators" open items, the per-candidate metric and ablation, and milestone M5 (modulator comparison; M6 keeps its ID). The energy-proxy criterion moved into the energy-model open item. Citations of derivation §3.4 now point to §3; the branching mode now cites §2.1.
+  - model.md: rows citing Eqs. 1g′, 4c′ and 4i now cite their iterations.
+  - `.claude/skills/doc-edit/SKILL.md`: the Appendix B rule is replaced by "no history in the derivation".
+  - No code changed.
+- **Review fixes (snn-expert and neuroscientist reviews, same day):**
+  - Notation: offspring matrix $K \to \Lambda$ (so $J^\Lambda$, $\Lambda^{pop}$), offspring mean $m_j \to \nu_j$, Theorem K3 → Theorem K, latent-output barrier weight $\beta \to \beta_{LA}$ ($D_{LA}$), entropy-target gain and fraction $k_H$, $\phi_H$ (logs in nats). $K$ is now only the number of modules. Equation labels unchanged.
+  - Corrections: the exact score is $\kappa_{ij} \Phi_i$ (neuron level); the module table $\Phi^K_{m(i)}$ is an approximation (cosine 0.83–0.97). Appendix A: baseline-as-renormalisation is $0.025 \lambda$ (was $2.5 \lambda$), (4h) MC correlation $\ge 0.9997$ (was 0.9998); §4.6 untrained (4b) cosine 0.98–0.998. "$m_j$ is a continuation probability" is replaced by "$\nu_j$ offspring on average". The Markov-stability remark, the Theorem 2 proof (base-2 logs) and the §6 hardware caveat are reworded; the non sequitur in §9 item 1 is dropped.
+  - Added: one line on TD normalisation (model v4, `--td-norm`) after (4c); a note that the (4c'') label is kept.
+  - Structure: new §2.5 "Action readout" ((1d), race, (1e), (1g), (1h), policy limits); the world model stays in §2.4. §4.5's second paragraph is split into three.
+  - Biology (neuroscientist): the hypothesis that crossing costs more is labelled as a hypothesis; (K1) is the per-neuron QIF transfer "as in" the MPR mean field; the race burn-in cites Frank 2006 as a "hold your horses" STN signal; the per-neuron baselines $\bar{g}_j$, $\bar{h}_j$, $\bar{g}^{eff}_j$ are marked as abstractions (Royer & Paré is input-side only); the action broadcast is "plausible but untested"; $\Phi^K$ is not a plausible neuromodulator payload, so it is treated as a peripheral computation; §6 restores the backward (dendritically normalised) walk sentence and adds astrocyte domains [Bushong et al. 2002] and a presynaptic-locus factor; §7's E→E coding is a **Proposal**, with feed-forward PV inhibition [Gabernet et al. 2005] as the caveat. Added Gabernet 2005 and Bushong 2002 to the references.
+  - Pointers: SPEC (controller recurrence) and model.md (Initialisation) now cite §2.5; SPEC's Locality convention cites §6 (Biological locality). Comment and docstring only: `spiking.set_weights` cites "§2.2, constant presynaptic output", `core.modulator` says exempt is the agent's default, and `m3` says "former Eq. 4i". `spiking.pooled` and `spiking.race` cite §2.5 for the race; SPEC §1 cites §2.4–2.5 for the readout.
+
 ## 2026-10-22
+
+### Added (iteration 013 prep: QIF engine, Proposal; gate failed)
+
+- **Code:** `mapstdp/qif.py` (new): quadratic integrate-and-fire engine in θ-form (τ 10 ms, dt 0.1 ms, Lorentzian η per head, exponential synapse τ_s 2 ms, delay 1 ms, fixed per-module PV pools, Bernoulli input pulses, warm start, 1 ms raster bins), numba kernel with a numpy twin, Montbrió–Pazó–Roxin mean field (`mpr`), Brian2 reference (`brian_frame`, lazy import) and self-check. `experiments/m2.py` `Config.engine="qif"`, `Config.qif`, `BOUND_CAL_QIF`; `experiments/m3.py` `--engine qif`, `--q-<field>` flags, file token `qif[...]`, fidelity columns `1-corr_bias`, `1-corr_row`, `1-corr_Jhat`, `S_mod`. Default path unchanged: golden bit-identical, 7 tests pass, ruff clean.
+- **Env:** `environment-brian2.yml` (env `map-stdp-brian2`, numpy < 2.4, brian2 2.9) for the reference check only. Brian2 2.9.0 does not import under numpy 2.4 (`ndarray.ptp`), and pinning `map-stdp` to numpy 2.3 changes the spiking golden case, so the training env is unchanged.
+- **Design** filtered by the neuroscientist; changes made during calibration: Δ 0.25 → 0.05, η truncated at 10, A_ext 3 → 5, fresh noise σ 1, PV pools on by default.
+- **Results (preliminary, scratch only):** numba = numpy = Brian2 spike for spike. Fidelity on initial CartPole networks (16 heads): L1(π̂, π) 0.22 and 1 − corr(κ, J) 0.46, against 0.09 and 0.24 for branching mode. v4 smoke (CartPole, 5 seeds × 300 episodes): QIF 20.7–26.0 (random ≈ 22), branching 216–271. With flow π and J, the QIF race learns (63–99); with QIF π̂ and κ, nothing learns, because the structural rule dissolves the modules. Neuron-level MPR predicts the module shares better than the linear flow (L1 0.10 against 0.20).
+- **Phase A, tune before rebuild (preliminary, scratch only):** qif-path scale fields `QIFParams.lam_scale`, `eta_scale`, `eps_h_scale` (default 1; flags `--q-lam-scale`, `--q-eta-scale`, `--q-eps-h-scale`, `--q-tau`). Matching update RMS to branching does not help (CartPole 20–25). A fidelity sweep (600 configs) finds no point with L1 ≤ 0.10 and corr(E[κ], J) ≥ 0.9; the best, at 0.19 and 0.80, needs strong fresh noise (σ 3.4, τ 3.5 ms), far from the Montbrió–Pazó–Roxin-exact regime. There, CartPole reaches 44–56 (branching 216–271) and Acrobot −291 to −340 (branching −137 to −162). Decision: QIF needs the rebuild (Phase B: π from rates, κ against G·T·r̂, the 4b score on r̂).
+- **Phase B steps 4–5 (preliminary, scratch only):** `qif.rates` (neuron-level MPR fixed point: damped Newton, continuation fallback, returns per-neuron gain G), `qif.MPR_POINT` (σ 0, η̄ −2, Δ 0.5, gain 20, w_ie 15, rate 1, 32 I neurons per pool, τ_s 20), and `m2.Config.backend = "mpr"` (π = r*/Σr*, κ = T·diag(r*), Eq. 1d/1e on module shares). Solver: 6–12 ms per frame, 0 failures, fallbacks below 0.1% of frames. v4 flags, 5 seeds, against flow v4: CartPole 261 vs 500, MountainCar −159.6 vs −132.2, Acrobot −118.2 vs −96.3, LunarLander −24.0 vs 82.4. Gate (within 10%) failed on every task. The cosine of the 4b score with the true policy gradient drops on trained networks from 0.63–0.96 (flow) to 0.07–0.25 (MPR), so the module score, not κ, is the binding problem.
+- **Phase B step 4 gates (passed):** L1 of module shares, rates against QIF spikes, is 0.027 / 0.064 / 0.028 / 0.041 on CartPole / MountainCar / Acrobot / LunarLander (per-neuron corr 0.92–0.95). From 10 starts × 20 random W per task, plus trained W, every solve converges to the same fixed point. Self-checks: residual below 1e-9, and G matches finite differences. A gain-aware credit (a K × K module resolvent with module-mean gains, times each neuron's own gain G_i) reaches cosine 0.94–0.97 with the exact gradient, against 0.07–0.25 for 4b (scratch `psi.py`).
 
 ### Removed / Changed (iteration 013 prep: prune unadopted variants, `m2.Config`)
 

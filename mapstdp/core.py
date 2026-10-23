@@ -137,7 +137,8 @@ def mstar(p, q, clip=20.0):
 
 def modulator(p, q, roles, clip=20.0, routing="none", mu=0.0):
     """K x K table g[b, a] = M*_a I[b != a] (Eq. 6). routing: 'none' | 'exempt' (g = 0 on routing
-    pairs) | 'dual' (subtract mu on routing pairs, Eq. 4a). Both routing options are Proposals."""
+    pairs) | 'dual' (subtract mu on routing pairs, Eq. 4a). 'exempt' is the agent's default
+    (m2.Config, derivation §4.5); 'dual' is an m1-only ablation."""
     g = mstar(p, q, clip)[None, :] * (1 - np.eye(len(p)))
     if routing == "exempt":
         g[route_pairs(roles)] = 0.0

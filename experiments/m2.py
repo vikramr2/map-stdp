@@ -30,6 +30,15 @@ Config (one per run, shared by the m2 and m3 CLIs) holds every option; its defau
   c_ent c[, ent_target f]: entropy term (Eq. 4h), a separate per-frame ungated update W += eta_e c kappa
     (g_b / J^in_b - gbar_j) (core.entropy_score; average W * grad H(P~), P~ the beta = 1 action shares, pi fixed);
     eta_e the annealed task rate. ent_target adapts c SAC-style, log c += ENT_K (f log|A| - H(P~)) per frame (nats).
+  backend='mpr' (Proposal, iteration 013, Phase B): no spikes; pi is the normalised neuron-level MPR fixed point of the
+    QIF network (qif.rates, at qif.MPR_POINT with Config.qif overrides, warm-started from the previous frame), kappa the
+    expected pairings T * pi at those rates, the action from Eq. 1d / 1e as in flow; evaluate() uses the same pi.
+  engine='qif' (Proposal, iteration 013; spiking): mapstdp.qif, QIF neurons with fixed Lorentzian excitabilities drawn
+    at init from their own rng stream (seed, QIF_SEED), Config.qif overriding qif.QIFParams fields. The state is carried
+    across frames (warm start, reset at episode start; QIFParams.warm = False: cold start every frame), the race
+    burn-in is QIFParams.burn bins and kappa uses the QIF pairing window (qif.pairings). The teleportation pulses draw
+    from self.rng as the other engines do; evaluate() races from a reset state per held-out stimulus, after one
+    warm-up frame.
 Both backends share one frame update; they differ only in where pi, kappa and the action come from:
   flow:    pi = n-hop flow, kappa = J (expected pairings), action ~ Eq. 1d;
   spiking: pi = spike shares, kappa = covariance count / spikes in the frame, action = race readout.
@@ -46,7 +55,7 @@ import numpy as np
 
 from experiments.tasks import TASKS, random_states, with_encoder
 from experiments.tasks import critic_layer as critic_layer_fn
-from mapstdp import core
+from mapstdp import core, qif
 from mapstdp import spiking as sp
 
 ALPHA, N_HOPS, K_SPK, RATE, THETA = 0.2, 20, 100, 1.0, 0.5
@@ -58,7 +67,11 @@ ENT_K = 1e-3  # iteration 012: entropy-target gain
 REC_EPIS = 20  # iteration 012: episodes recorded at the end of a run for diag012
 BETA_TAU_F, BETA_TAU_S = 20.0, 100.0  # beta_kappa (Eq. 1g): fast and slow running episode return (episodes)
 TD_TAU = 1000.0  # --td-norm (Proposal): time constant (frames) of the running mean square of delta
+QIF_SEED = 7451  # engine='qif': second rng stream (Lorentzian excitabilities and reset states)
 BOUND_CAL = {16: ((1, 3.1), (2, 3.5), (4, 4.0), (8, 5.0), (16, 6.5), (32, 9.2), (64, 11.5))}  # heads: (theta, beta_eff)
+# engine='qif' at the default QIFParams (iteration 013): same method on flow-v4 W (seed 0; mean of Acrobot, MountainCar,
+# CartPole; warm frames after one warm-up frame); deadline fraction <= 0.03 at 16, 0.02-0.41 at 32, 0.27-0.88 at 64
+BOUND_CAL_QIF = {16: ((1, 1.13), (2, 1.29), (4, 1.49), (8, 1.89), (16, 2.85), (32, 4.70), (64, 5.49))}
 MODEL = "v3"  # the model tag of m2 result files
 ROUTINGS = ("exempt", "none")  # routing pairs exempt from the map term (default, derivation §4.5), or not
 LOG_EVERY = 50  # module sizes are per task (tasks.Task.sizes; CartPole 36, 16, 16, 16, 16)
@@ -78,7 +91,7 @@ class Config:
     la_beta: float = 0.0  # latent-output barrier (Eq. 4e)
     task: str = "CartPole"  # a tasks.TASKS key (M3)
     heads: int = 1  # parallel spiking replicas on shared W, pooled (Proposal, spiking only)
-    engine: str = "snm"  # 'snm' | 'numpy' (sp.run_heads, the same raster)
+    engine: str = "snm"  # 'snm' | 'numpy' (sp.run_heads, the same raster) | 'qif' (mapstdp.qif, Proposal)
     td_norm: float = 0.0  # TD-error normalisation to this RMS (Proposal; 0 = off)
     ablate: dict = dataclasses.field(default_factory=dict)  # learning-rule ablations (iteration 005): wmin, tau_e
     p_cc: float = 0.1  # controller->controller connection probability
@@ -90,6 +103,7 @@ class Config:
     critic_layer: str | None = None  # separate critic RF layer spec (Eq. 4c'')
     c_ent: float = 0.0  # entropy term coefficient (Eq. 4h; 0 = off)
     ent_target: float | None = None  # adapt c_ent toward H(P~) = ent_target log|A|
+    qif: dict = dataclasses.field(default_factory=dict)  # engine='qif': qif.QIFParams overrides
 
 
 def held_out_obs(n=100, seed=12345, task=TASKS["CartPole"]):
@@ -128,10 +142,11 @@ class Agent:
         assert cfg.ent_target is None or cfg.c_ent > 0, "ent_target adapts c_ent multiplicatively: start it above 0"
         assert cfg.routing in ROUTINGS, cfg.routing
         assert cfg.heads == 1 or backend == "spiking", "heads are spiking replicas"
-        assert cfg.engine in ("snm", "numpy"), "numpy: sp.run_heads, the batched branching step (same raster as snm)"
-        assert cfg.readout == "race" or (bound and backend == "spiking" and cfg.heads in BOUND_CAL), "diffbound: cal H"
-        assert cfg.beta == 1.0 or backend == "flow" or bound, "the race readout has no matched sharpened policy"
-        assert not cfg.beta_kappa or backend == "flow" or bound, "adaptive beta: flow or diffbound"
+        assert cfg.engine in ("snm", "numpy", "qif"), "numpy: sp.run_heads, the batched branching step (same as snm)"
+        cal = BOUND_CAL_QIF if cfg.engine == "qif" else BOUND_CAL
+        assert cfg.readout == "race" or (bound and backend == "spiking" and cal.get(cfg.heads)), "diffbound: cal H"
+        assert cfg.beta == 1.0 or backend in ("flow", "mpr") or bound, "the race has no matched sharpened policy"
+        assert not cfg.beta_kappa or backend in ("flow", "mpr") or bound, "adaptive beta: flow, mpr or diffbound"
         self.c_ent, self.ent_target, self.reg_sq = cfg.c_ent, cfg.ent_target, np.zeros(2)  # task, entropy sq sums
         self.crit = critic_layer_fn(self.task, cfg.critic_layer) if cfg.critic_layer else None
         self.wmin, self.tau_e = cfg.ablate.get("wmin", WMIN), cfg.ablate.get("tau_e", TAU_E)
@@ -140,7 +155,7 @@ class Agent:
         self.W, self.m, self.roles, self.mask = core.build_network(self.task.sizes, self.task.roles, p_cc=cfg.p_cc,
                                                                    seed=cfg.seed)
         self.K, self.backend, self.routing, self.lam = len(self.roles), backend, cfg.routing, cfg.lam
-        self.eta = cfg.eta or ETA
+        self.eta, self.eps_h = cfg.eta or ETA, EPS_H
         self.eta_tau = ETA_TAU if cfg.eta_tau is None else cfg.eta_tau
         self.burn, self.ep, self.la_beta, self.gamma = BURN, 0, cfg.la_beta, cfg.gamma
         self.readout, self.bound_n, self.bound_dl, self.bound_th = cfg.readout, 0, 0, 0.0
@@ -158,6 +173,33 @@ class Agent:
         self.snn, self.live = None, backend == "spiking"  # live: evaluate() runs races, so it draws from rng
         if self.live and cfg.engine == "snm":
             self.snn = sp.build(sp.tile_heads(self.W, cfg.heads), 1 - ALPHA, theta=THETA)
+        self.qp, self.qstate, self.r_warm = None, None, None
+        if backend == "mpr":  # rates backend (Phase B): qif.MPR_POINT, Config.qif overriding
+            assert cfg.heads == 1 and cfg.readout == "race", "mpr: no spikes"
+            self.qp = qif.QIFParams(**{**qif.MPR_POINT, **cfg.qif})
+            self.mpr_stats = dict(n=0, it=0, fallback=0, failed=0)
+        if cfg.engine == "qif":  # own rng stream: the default path draws nothing extra
+            self.qp, self.qrng = qif.QIFParams(**cfg.qif), np.random.default_rng((cfg.seed, QIF_SEED))
+            M = qif.n_neurons(len(self.m), self.m, self.roles, self.qp)
+            self.eta_q, self.burn = qif.lorentzian(self.qrng, (cfg.heads, M), self.qp), self.qp.burn
+            self.lam, self.eta = self.lam * self.qp.lam_scale, self.eta * self.qp.eta_scale  # RMS match (Phase A)
+            self.eps_h = self.eps_h * self.qp.eps_h_scale
+
+    def walk(self, v, warm=False):
+        """The frame's flow pi: the n-hop flow (Eq. 1a; flow and spiking backends), or for backend='mpr' the normalised
+        neuron-level MPR fixed point r* / sum r* over the E neurons (qif.rates; warm: start from and keep the training
+        walk's previous solution). Counts the solver's iterations, fallbacks and failures in self.mpr_stats."""
+        if self.backend != "mpr":
+            return core.flow(self.W, v, ALPHA, N_HOPS)
+        r, _, info = qif.rates(self.W, v, self.qp, self.m, self.roles, r0=self.r_warm if warm else None)
+        st = self.mpr_stats
+        st["n"], st["it"] = st["n"] + 1, st["it"] + info["it"]
+        st["fallback"] += bool(info["fallback"])
+        st["failed"] += not info["converged"]
+        if warm:
+            self.r_warm = r
+        rE = r[:len(self.m)]
+        return rE / rE.sum()
 
     def stim(self, o):
         """v(o): the task's encoder over the controller (tasks.Task.stim; CartPole: core.cartpole_stimulus)."""
@@ -168,21 +210,21 @@ class Agent:
         Returns pi, kappa (flow: expected pairings J = T * pi; spiking: covariance pairings / total spikes) and the
         action index into A (flow: sampled from Eq. 1d / 1e; spiking: race after burn-in, uniform if silent)."""
         W = self.W
-        if self.backend == "flow":
-            pi = core.flow(W, v, ALPHA, N_HOPS)
+        if self.backend in ("flow", "mpr"):
+            pi = self.walk(v, warm=True)
             p = np.bincount(self.m, pi, self.K)
             return pi, W / W.sum(0) * pi, int(self.rng.choice(len(self.A), p=core.policy(p, self.roles, self.beta)))
         S = self.spike_frame(v)
         a = sp.race(S, self.race_groups, self.rng, self.burn) if self.readout == "race" else self.bound(S)
         if a is None:
             self.silent, a = self.silent + 1, int(self.rng.integers(len(self.A)))
-        pi, kappa, n = sp.pooled(S, self.heads)
+        pi, kappa, n = sp.pooled(S, self.heads) if self.qp is None else qif.pooled(S, self.heads, self.qp)
         return pi, kappa / max(n, 1), a
 
     def bound(self, S):
         """readout='diffbound' (Eq. 1h, module doc): theta from beta through BOUND_CAL, then sp.diffbound; None if
         silent."""
-        th_cal, b_cal = np.log(np.array(BOUND_CAL[self.heads], float)).T
+        th_cal, b_cal = np.log(np.array((BOUND_CAL_QIF if self.qp is not None else BOUND_CAL)[self.heads], float)).T
         th = float(np.exp(np.interp(np.log(self.beta), b_cal, th_cal)))
         th = np.floor(th) + (self.rng.random() < th - np.floor(th))
         r = sp.diffbound(S, self.race_groups, th, self.rng, self.burn, cap=1, heads=self.heads)
@@ -194,6 +236,10 @@ class Agent:
 
     def spike_frame(self, v):
         """Spike raster of one frame on the current weights, k x (heads N), head h in columns h N .. (h + 1) N - 1."""
+        if self.engine == "qif":
+            if self.qstate is None or not self.qp.warm:
+                self.qstate = qif.init_state(self.eta_q, self.qrng, self.qp)
+            return qif.run_qif(self.W, v, self.heads, self.rng, self.eta_q, self.qstate, self.qp, self.m, self.roles)
         if self.engine == "numpy":
             return sp.run_heads(self.W, v, self.heads, K_SPK, RATE, self.rng, THETA, 1 - ALPHA)
         sp.set_weights(self.snn, sp.tile_heads(self.W, self.heads), 1 - ALPHA)  # output gain (1 - alpha) / d_j
@@ -219,7 +265,7 @@ class Agent:
             if self.la_beta > 0:
                 g = g - core.latent_output_barrier(p, JK, self.roles, self.la_beta)
             self.W = core.structural_update(self.W, self.mask, g, kappa, self.m, self.lam, wmin=self.wmin)
-        self.W = core.homeostasis_update(self.W, self.mask, kappa, EPS_H, self.wmin)
+        self.W = core.homeostasis_update(self.W, self.mask, kappa, self.eps_h, self.wmin)
         if reg is not None:
             self.W = core.clip_weights(self.W + reg, self.mask, self.wmin)
         return e
@@ -270,6 +316,7 @@ class Agent:
         critic, then frame f's task term (so the task update lands one walk late; spike_frame reads W at the start of
         each walk); with beta_kappa, the adaptive beta (Eq. 1g) after the episode."""
         o, _ = env.reset(seed=int(self.rng.integers(1 << 30)))
+        self.qstate = None  # engine='qif': reset at episode start
         pi, kappa, a = self.frame(self.stim(o))
         x, e, R, done = self.feats(pi, o), 0.0, 0, False
         while not done:
@@ -317,7 +364,7 @@ class Agent:
         task-term |delta|, critic V range, share of synapses at the weight bounds, and on the held-out stimuli the
         mean Eq. 1d policy, its mean entropy (bits) and the mean largest action probability."""
         st, n = self.stats, max(self.stats["n"], 1)
-        P = np.array([core.policy(np.bincount(self.m, core.flow(self.W, v, ALPHA, N_HOPS), self.K), self.roles,
+        P = np.array([core.policy(np.bincount(self.m, self.walk(v), self.K), self.roles,
                                   self.beta) for v in self.held])
         w = self.W[self.mask]
         out = dict(td_abs=st["td_abs"] / n, td_rms=float(np.sqrt(st["td_sq"] / n)), td_task_abs=st["td_task_abs"] / n,
@@ -338,7 +385,7 @@ class Agent:
         persist = np.bincount(m, (W * same).sum(0) / W.sum(0), self.K) / np.bincount(m, minlength=self.K)
         P1d = []
         for v in self.held:
-            pi = core.flow(W, v, ALPHA, N_HOPS)
+            pi = self.walk(v)
             p, q, JK, _ = core.module_stats(W, pi, m, self.K)
             rows.append([core.map_equation(p, q, pi), q[self.roles == "C"][0], p[self.A].sum(),
                          core.j_route(JK, self.roles)])
@@ -354,15 +401,20 @@ class Agent:
     def race_fidelity(self, P1d, kl_obs, kl_reps):
         """KL and L1 of the race policy (kl_reps races per held-out stimulus, add-1/2 estimate) against Eq. 1d, and
         the KL floor the race would show if it were exactly Eq. 1d. Draws from self.rng."""
-        kl, l1, floor = [], [], []
+        kl, l1, floor, qstate = [], [], [], self.qstate
         smooth = lambda n: (n + 0.5) / (kl_reps + 1)  # noqa: E731
         for v, P in zip(self.held[:kl_obs], P1d):
+            if self.qp is not None:  # qif: reset state, one warm-up frame
+                self.qstate = None
+                if self.qp.warm:
+                    self.spike_frame(v)
             races = [sp.race(self.spike_frame(v), self.race_groups, self.rng, self.burn) for _ in range(kl_reps)]
             Q = smooth(np.bincount([r for r in races if r is not None], minlength=len(self.A)))
             kl.append(float((P * np.log(P / Q)).sum()))
             l1.append(float(np.abs(P - Q).sum()))
             Qs = smooth(self.rng.multinomial(kl_reps, P, 200))
             floor.append(float((P * np.log(P / Qs)).sum(1).mean()))
+        self.qstate = qstate
         return dict(KL_1d_race=float(np.mean(kl)), KL_floor=float(np.mean(floor)), L1_1d_race=float(np.mean(l1)))
 
 
@@ -398,11 +450,15 @@ def run(cfg, episodes, name=None):
            "evals": evals, "frames": frames, "ms_per_frame": (time.perf_counter() - t0) / frames * 1e3,
            "silent_race_frames": agent.silent,
            "params": dict(alpha=ALPHA, n=N_HOPS, k=K_SPK, rate=RATE, theta=THETA, eta=ETA, tau_e=TAU_E,
-                          gamma=cfg.gamma, eta_v=ETA_V, eps=0.0, eps_h=EPS_H, burn=agent.burn, eta_task=agent.eta,
+                          gamma=cfg.gamma, eta_v=ETA_V, eps=0.0, eps_h=agent.eps_h, burn=agent.burn, eta_task=agent.eta,
                           beta=cfg.beta, eta_tau=agent.eta_tau, sizes=agent.task.sizes)}
     if (cfg.task, cfg.heads) != ("CartPole", 1):
         res.update(task=cfg.task, heads=cfg.heads, engine=cfg.engine, encoder=agent.task.encoder,
                    n_ctrl=agent.task.n_ctrl)
+    if agent.qp is not None:
+        res.update(qif=dataclasses.asdict(agent.qp))
+    if cfg.backend == "mpr":
+        res.update(mpr_stats=agent.mpr_stats)
     if new012:
         res.update({k: v for k, v in (("encoder_spec", cfg.encoder), ("critic_layer", cfg.critic_layer),
                                       ("c_ent", cfg.c_ent), ("ent_target", cfg.ent_target)) if v},

@@ -30,7 +30,7 @@ def build(W, gain=0.8, leak=np.inf, theta=0.5):
 def set_weights(snn, W, gain=0.8, presyn_norm=True):
     """W_snm = gain * W.T. presyn_norm divides each presynaptic neuron's output by d_j (a per-neuron
     output gain, one masked crossbar read), so the network implements T and its rates do not drift with d_j
-    (derivation §2.2, mean-field condition 1). T, hence L and pi, is invariant to this column scaling.
+    (derivation §2.2, constant presynaptic output). T, hence L and pi, is invariant to this column scaling.
     Only synapses created by build (the support of W at build time) are written; new nonzeros are silently ignored."""
     snn.set_weights_from_mat(gain * (W / np.maximum(W.sum(0), 1e-12) if presyn_norm else W).T)
 
@@ -56,7 +56,7 @@ def tile_heads(W, H):
 
 
 def head_groups(groups, H, N):
-    """Neuron groups pooled over H heads, so race() runs one race over all heads' spikes (still Eq. 1d, §2.4)."""
+    """Neuron groups pooled over H heads, so race() runs one race over all heads' spikes (still Eq. 1d, §2.5)."""
     return [np.concatenate([np.asarray(g) + h * N for h in range(H)]) for g in groups]
 
 
@@ -105,7 +105,7 @@ def pi_hat(S):
 
 
 def race(S, groups, rng, burn=0):
-    """Race readout (derivation §2.4): index of the group (list of neuron-index arrays) that spikes first in the
+    """Race readout (derivation §2.5): index of the group (list of neuron-index arrays) that spikes first in the
     frame at or after step `burn` (skips the cold-start transient, so the race matches Eq. 1d); ties within a step
     split in proportion to that step's spike counts. None if no group spikes."""
     cnt = np.stack([S[burn:, g].sum(1) for g in groups], 1)

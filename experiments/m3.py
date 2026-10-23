@@ -1,6 +1,6 @@
 """M3 (docs/SPEC.md §11): model v3 with the opened latents (latent-output barrier Eq. 4e, beta_LA = 0.3) on CartPole,
 MountainCar, Acrobot and LunarLander, flow against spiking with H parallel heads (Proposal). Run from the repo root:
-  python -m experiments.m3 --task {CartPole,MountainCar,Acrobot,LunarLander} --backend {flow,spiking} [--heads H]
+  python -m experiments.m3 --task {CartPole,MountainCar,Acrobot,LunarLander} --backend {flow,spiking,mpr} [--heads H]
     --seed 0 [--episodes E] [--td-norm s] [variant options]
     -> experiments/results/m3_<task>_<backend>[_h<H>]_lb<beta_LA>[_tn<s>][_<variant>]_s<seed>.json
   Every option maps onto an m2.Config field (m2 module doc). Variant tokens, in file-name order:
@@ -8,14 +8,16 @@ MountainCar, Acrobot and LunarLander, flow against spiking with H parallel heads
     lam<l>, pcc<P> (--lam, --p-cc); b<B> (--beta, Eq. 1e); bk<k>m<B> (--beta-kappa, --beta-max: adaptive beta,
     Eq. 1g); g<g> (--gamma, iteration 009); dbc (--readout diffbound, Eq. 1h, spiking, iteration 010);
     enc<SPEC>, crit<SPEC>, ce<c>[H<f>] (--encoder, --critic-layer, --c-ent [--ent-target]: iteration 012, flow);
-    eta<E> (--eta); ep<E> (--episodes off the task's default).
+    eta<E> (--eta); qif[-<field><value>...] (--engine qif and its QIFParams overrides, iteration 013, e.g. qif-tau_s0
+    -inhma-warm0-lags3); ep<E> (--episodes off the task's default).
   Model v4 is the flag set --td-norm 0.04 --p-cc 0 --beta-kappa 0.01 --beta-max 16 --eta 5 (docs/model.md).
   The beta ramp, the beta mean reversion / trace signal / step cap, the score-unit ablation, the TD(lambda) critic,
-  the rich and net critics and the usage term (Eq. 4i) were removed in iteration 013 (not adopted); their result
+  the rich and net critics and the usage term (former Eq. 4i) were removed in iteration 013 (not adopted); their result
   files still load in --summary and --ablations.
   python -m experiments.m3 --summary    -> per task: random, flow and spiking per H (last-100 return over seeds)
   python -m experiments.m3 --ablations  -> flow learning-rule ablations against the --td-norm 0.04 baseline
-  python -m experiments.m3 --fidelity   -> per task and H: error of the pooled pi-hat and kappa against the flow
+  python -m experiments.m3 --fidelity [--engine qif ...]  -> per task and H: error of the pooled pi-hat and kappa
+    against the flow (qif: also the per-postsynaptic-row 1 - corr and the bias 1 - corr(E[kappa], J))
 Heads: H independent spiking replicas of the network on the same W (tasks share one block-diagonal SuperNeuroMAT
 network). Their spikes are pooled: pi-hat from summed counts, kappa the sum of per-head covariance counts divided by
 the total spikes, one race over all heads (still Eq. 1d). H = 1 is the M2 spiking agent."""
@@ -28,7 +30,7 @@ import numpy as np
 
 from experiments import m2
 from experiments.tasks import TASKS
-from mapstdp import core
+from mapstdp import core, qif
 from mapstdp import spiking as sp
 
 LA_BETA, HEADS = 0.3, (1, 2, 4, 8, 16)
@@ -39,24 +41,61 @@ def name(task, backend, heads, la_beta, seed, td_norm=0.0, variant=""):
         (f"_tn{td_norm:g}" if td_norm else "") + (f"_{variant}" if variant else "") + f"_s{seed}"
 
 
-def fidelity(task, Hs=HEADS, reps=20, n_obs=10, seed=0):
+def row_corr(K, J, mask):
+    """Mean over postsynaptic rows (>= 3 synapses, non-constant) of corr(K[i], J[i]) on the mask: insensitive to a
+    per-postsynaptic gain."""
+    c = [np.corrcoef(K[i, mask[i]], J[i, mask[i]])[0, 1] for i in range(len(K)) if mask[i].sum() >= 3]
+    return float(np.nanmean(c))
+
+
+def fidelity(task, Hs=HEADS, reps=20, n_obs=10, seed=0, engine="numpy", qp=None):
     """Learning-signal error of H pooled heads against the flow on the initial W, over held-out stimuli: L1 of pi-hat
-    to the n-hop flow, and 1 - corr of kappa with J (the flow's expected pairings), mean over reps frames."""
+    to the n-hop flow, and 1 - corr of kappa with J (the flow's expected pairings), mean over reps frames.
+    engine='qif' (qp: qif.QIFParams): warm frames after one warm-up frame per stimulus (cold if not qp.warm), eta from
+    the (seed, m2.QIF_SEED) stream as the agent draws it; adds the mean per-row 1 - corr (1-corr_row), the
+    spikes per module per frame (S_mod) and 1 - corr(mean kappa, T * mean pi-hat) (1-corr_Jhat: kappa against the
+    pairings the network's own rates predict). All engines: the bias 1 - corr(mean kappa over reps, J) (1-corr_bias)."""
     agent = m2.Agent(m2.Config("flow", seed=seed, la_beta=LA_BETA, task=task))
-    rows = []
+    rows, N = [], len(agent.W)
     for H in Hs:
-        rng, l1, rk = np.random.default_rng(seed), [], []
+        rng, l1, rk, rr, rb, rh, smod = np.random.default_rng(seed), [], [], [], [], [], []
+        if engine == "qif":
+            qrng = np.random.default_rng((seed, m2.QIF_SEED))
+            eta = qif.lorentzian(qrng, (H, qif.n_neurons(N, agent.m, agent.roles, qp)), qp)
         for v in agent.held[:n_obs]:
             pi = core.flow(agent.W, v, m2.ALPHA, m2.N_HOPS)
             J = agent.W / agent.W.sum(0) * pi
+            if engine == "qif":
+                st = qif.init_state(eta, qrng, qp)
+                if qp.warm:
+                    qif.run_qif(agent.W, v, H, rng, eta, st, qp, agent.m, agent.roles)
+            ks, phs = [], []
             for _ in range(reps):
-                S = sp.run_heads(agent.W, v, H, m2.K_SPK, m2.RATE, rng, m2.THETA, 1 - m2.ALPHA)
-                ph, kap, _ = sp.pooled(S, H)
+                if engine == "qif":
+                    if not qp.warm:
+                        st = qif.init_state(eta, qrng, qp)
+                    S = qif.run_qif(agent.W, v, H, rng, eta, st, qp, agent.m, agent.roles)
+                    ph, kap, _ = qif.pooled(S, H, qp)
+                    smod.append(np.bincount(agent.m, S.reshape(len(S), H, N).sum((0, 1)), agent.K))
+                    rr.append(1 - row_corr(kap, J, agent.mask))
+                else:
+                    S = sp.run_heads(agent.W, v, H, m2.K_SPK, m2.RATE, rng, m2.THETA, 1 - m2.ALPHA)
+                    ph, kap, _ = sp.pooled(S, H)
                 l1.append(np.abs(ph - pi).sum())
                 rk.append(1 - np.corrcoef(kap[agent.mask], J[agent.mask])[0, 1])
-        rows.append({"H": H, "L1_pi": float(np.mean(l1)), "1-corr_kappa_J": float(np.mean(rk))})
-        print(f"{task:12} H={H:2d}  L1(pi_hat, pi) {rows[-1]['L1_pi']:.4f}  1-corr(kappa, J) "
-              f"{rows[-1]['1-corr_kappa_J']:.4f}", flush=True)
+                ks.append(kap)
+                phs.append(ph)
+            rb.append(1 - np.corrcoef(np.mean(ks, 0)[agent.mask], J[agent.mask])[0, 1])
+            Jh = agent.W / agent.W.sum(0) * np.mean(phs, 0)
+            rh.append(1 - np.corrcoef(np.mean(ks, 0)[agent.mask], Jh[agent.mask])[0, 1])
+        rows.append({"H": H, "L1_pi": float(np.mean(l1)), "1-corr_kappa_J": float(np.mean(rk)),
+                     "1-corr_bias": float(np.mean(rb))})
+        if engine == "qif":
+            rows[-1].update({"1-corr_row": float(np.mean(rr)), "1-corr_Jhat": float(np.mean(rh)),
+                             "S_mod": np.mean(smod, 0).tolist()})
+        print(f"{task:12} H={H:2d}  " + "  ".join(f"{k} {x:.4f}" for k, x in rows[-1].items()
+                                                if k not in ("H", "S_mod")) +
+              (f"  S_mod {np.round(rows[-1]['S_mod']).astype(int).tolist()}" if engine == "qif" else ""), flush=True)
     return rows
 
 
@@ -72,6 +111,7 @@ def nondefault(r):
         bool(r.get("critic_lambda")) or r.get("gamma", m2.GAMMA) != m2.GAMMA or \
         r.get("ablate", {}).get("tau_e", m2.TAU_E) != m2.TAU_E or r.get("readout", "race") != "race" or \
         bool(r.get("encoder_spec") or r.get("critic_layer") or r.get("c_ent") or r.get("c_use")) or \
+        r.get("engine") == "qif" or \
         r["episodes"] != TASKS[r.get("task", "CartPole")].episodes
 
 
@@ -85,7 +125,26 @@ def variant_tokens(a):
     t += ([f"enc{a.encoder}"] if a.encoder else []) + ([f"crit{a.critic_layer}"] if a.critic_layer else [])
     t += [f"ce{a.c_ent:g}" + (f"H{a.ent_target:g}" if a.ent_target is not None else "")] if a.c_ent else []
     t += [f"eta{a.eta:g}"] if a.eta is not None else []
+    t += [qif_token(a)] if a.engine == "qif" and a.backend == "spiking" else []
+    t += [qif_token(a).replace("qif", "q", 1)] if a.backend == "mpr" and qif_overrides(a) else []
     return t + ([f"ep{a.episodes}"] if a.episodes and a.episodes != TASKS[a.task].episodes else [])
+
+
+QIF_FLAGS = {"tau_s": float, "inh": str, "warm": int, "lags": int, "tau_plus": float, "gain": float, "rate": float,
+             "a_ext": float, "delta": float, "eta_bar": float, "eta_max": float, "sigma": float, "k": int,
+             "burn": int, "w_ei": float, "w_ie": float, "n_inh": int, "tau": float, "lam_scale": float,
+             "eta_scale": float, "eps_h_scale": float}  # --engine qif: QIFParams fields (--q-<field>)
+
+
+def qif_overrides(a):
+    """QIFParams overrides given on the command line (--q-<field>), in QIF_FLAGS order."""
+    return {k: getattr(a, f"q_{k}") for k in QIF_FLAGS if getattr(a, f"q_{k}") is not None}
+
+
+def qif_token(a):
+    """File-name token of --engine qif: qif, then -<field><value> per override."""
+    o = qif_overrides(a)
+    return "-".join(["qif", *(f"{k}{v if isinstance(v, str) else format(v, 'g')}" for k, v in o.items())])
 
 
 def summary():
@@ -133,12 +192,17 @@ def ablation_summary():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", choices=tuple(TASKS), default=None, help="required to train; --fidelity: default all")
-    ap.add_argument("--backend", choices=("flow", "spiking"), default="flow")
+    ap.add_argument("--backend", choices=("flow", "spiking", "mpr"), default="flow",
+                    help="mpr: rates of the QIF network's MPR fixed point, no spikes (Phase B); --q-<field> overrides")
     ap.add_argument("--heads", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--episodes", type=int, default=None, help="default: the task's (tasks.TASKS)")
-    ap.add_argument("--engine", choices=("numpy", "snm"), default="numpy",
-                    help="spiking engine: numpy = sp.run_heads (SuperNeuroMAT's raster, batched over heads)")
+    ap.add_argument("--engine", choices=("numpy", "snm", "qif"), default="numpy",
+                    help="spiking engine: numpy = sp.run_heads (SuperNeuroMAT's raster, batched over heads); "
+                         "qif = mapstdp.qif (Proposal, iteration 013)")
+    for k, typ in QIF_FLAGS.items():
+        ap.add_argument(f"--q-{k.replace('_', '-')}", dest=f"q_{k}", type=typ, default=None,
+                        help=f"--engine qif: QIFParams.{k} (default {getattr(qif.QIFParams(), k)!r})")
     ap.add_argument("--la-beta", type=float, default=LA_BETA, help="latent-output barrier (Eq. 4e, Proposal)")
     ap.add_argument("--td-norm", type=float, default=0.0, help="TD-error normalisation to this RMS (Proposal; 0 = off)")
     ap.add_argument("--eta-tau", type=float, default=None, help="ablation: task-rate annealing (0 = constant)")
@@ -167,8 +231,11 @@ def main():
     if a.ablations:
         return ablation_summary()
     if a.fidelity:
-        out = {t: fidelity(t) for t in ([a.task] if a.task else TASKS)}
-        (m2.OUT / "m3_fidelity.json").write_text(json.dumps(out, indent=1))
+        qp = qif.QIFParams(**qif_overrides(a)) if a.engine == "qif" else None
+        Hs = (a.heads,) if a.heads != 1 else HEADS
+        out = {t: fidelity(t, Hs, engine=a.engine, qp=qp) for t in ([a.task] if a.task else TASKS)}
+        tag = f"_{qif_token(a)}" if a.engine == "qif" else ""
+        (m2.OUT / f"m3_fidelity{tag}.json").write_text(json.dumps(out, indent=1))
         return
     if a.task is None:
         ap.error("--task is required to train")
@@ -178,7 +245,8 @@ def main():
     cfg = m2.Config(a.backend, "exempt", a.lam, a.seed, beta=a.beta, eta=a.eta, eta_tau=a.eta_tau, la_beta=a.la_beta,
                     task=a.task, heads=a.heads, engine=a.engine, td_norm=a.td_norm, ablate=ablate, p_cc=a.p_cc,
                     beta_kappa=a.beta_kappa, beta_max=a.beta_max, gamma=a.gamma, readout=a.readout,
-                    encoder=a.encoder, critic_layer=a.critic_layer, c_ent=a.c_ent, ent_target=a.ent_target)
+                    encoder=a.encoder, critic_layer=a.critic_layer, c_ent=a.c_ent, ent_target=a.ent_target,
+                    qif=qif_overrides(a) if a.engine == "qif" or a.backend == "mpr" else {})
     r = m2.run(cfg, a.episodes or TASKS[a.task].episodes,
                name=name(a.task, a.backend, a.heads, a.la_beta, a.seed, a.td_norm, variant))
     print(f"done: last100 {np.mean(r['returns'][-100:]):.1f}, {r['frames']} frames, {r['ms_per_frame']:.2f} ms/frame")

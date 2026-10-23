@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The project is research, and the docs lead the code. M1 (flow reference against SuperNeuroMAT) and M2 (CartPole closed loop, model v3) are done; M3 (MountainCar, Acrobot, LunarLander, plus parallel spiking heads) is in progress (iterations 005–012; model v4 is a flag configuration of the M3 runs, and the code defaults still reproduce v3), and M4 (partial observability, carry-over) is next (SPEC §11). The unmerged branch `m4-tmaze` holds an M4 prototype on a T-maze: carry-over with a module-level winner-take-all, Eqs. 1f/4f/4g, `experiments/m4.py` and `docs/iterations/004-m4.md`. Its iteration number collides with `main`'s `004-map-term-ablation.md`, so renumber it on merge. The earlier PyTorch prototype was deleted on purpose; it is in git history at `fcedb0a` if you need it for reference. Do not restore it unless asked.
 
-Research question: can a spiking network's communities serve as its states, giving it a state-space abstraction that solves RL tasks? **Map-STDP** inverts minimum description length: community detection finds the partition that minimises a walk's description length (the map equation, or one of seven alternatives) for a given graph, while Map-STDP fixes the partition and learns the weights. It is a three-factor rule. TD-modulated STDP with an action-gated eligibility trace learns the task. Cost-modulated STDP, whose per-module neuromodulator broadcasts the marginal description cost of each transition, makes the given partition the minimum-description-length one. The communities are a central controller (receives the stimulus), one action community per action, and latent communities. The coarse-grained module chain $T^K(\mathbf o)$ is the extracted, stimulus-conditioned Markov model. Each environment frame is one implicit random walk. Side hypothesis, secondary: description length tracks metabolic/thermodynamic cost.
+Research question: can a spiking network's communities serve as its states, giving it a state-space abstraction that solves RL tasks? **Map-STDP** inverts minimum description length: community detection finds the partition that minimises a walk's description length (the map equation) for a given graph, while Map-STDP fixes the partition and learns the weights. It is a three-factor rule. TD-modulated STDP with an action-gated eligibility trace learns the task. Cost-modulated STDP, whose per-module neuromodulator broadcasts the marginal description cost of each transition, makes the given partition the minimum-description-length one. The communities are a central controller (receives the stimulus), one action community per action, and latent communities. The coarse-grained module chain $T^K(\mathbf o)$ is the extracted, stimulus-conditioned Markov model. Each environment frame is one implicit random walk. Side hypothesis, secondary: description length tracks metabolic/thermodynamic cost.
 
 ## Docs
 
-- `docs/derivation.md` is the **canonical** derivation. Its Appendix B lists the corrections to an earlier version, which had a sign error and inconsistent direction conventions. Put math changes in the markdown.
+- `docs/derivation.md` is the **canonical** derivation. It states the current model only: the walk as the network's linear response (branching mode is the implemented special case), the map-equation rule, and the K-series Proposal for QIF (§5); Appendix A holds the proofs and numerical checks. History goes in the CHANGELOG and iteration records, not in the derivation. Put math changes in the markdown.
 - `docs/SPEC.md` holds the goals, the design considerations (simulator, tasks, stimulus, description length as neuromodulator, memristive hardware), open questions and milestones. Items marked **Proposal** are undecided. Do not treat them as settled.
 - `docs/model.md` is the current implemented model (now v3): every component, its parameter values, and a status tag (impl / spec / Proposal / abstraction). Bump its version and history when the implemented model changes.
 - `docs/iterations/NNN-*.md`: one record per experimental iteration, covering the problem, diagnosis, runs (commands, SLURM job IDs) and results. Numbers stay preliminary until they are reproduced through the repo CLI.
@@ -26,6 +26,7 @@ Research question: can a spiking network's communities serve as its states, givi
   `Config` fields include `task` (a key of `experiments/tasks.py`), `heads` (parallel spiking replicas on shared W, pooled), `engine` (`snm` or `numpy` = `spiking.run_heads`, raster-identical and much faster), `td_norm` and `ablate`; all defaults reproduce M2.
 - `experiments/tasks.py`: the M3 task registry (sizes, encoder, reward, episodes). `experiments/m3.py`: per-task runs and summaries, results in `experiments/results/m3_<task>_<backend>[_h<H>]_lb<β>[_tn<s>][_<variant>]_s<seed>.json`. `experiments/ceiling.py`: the policy-class ceiling (CEM over the flow policy's actions × controller matrix).
 - `experiments/m2_viz.py` + `m2_viz_template.html`: train → record → page pipeline for the replay page (`replay.html`).
+- `mapstdp/tdstdp.py` + `experiments/tdstdp.py` (iteration 013, a baseline, not Map-STDP): the feed-forward TD-STDP actor-critic of Chung & Kozma 2020 (docstrings cite "[CK Eq. n]") on the branching step without presynaptic normalisation, plus a true-LIF control (`--engine lif`, `lif-snm`). Traces are summed in closed form over blocks of frozen W (`block_learn`; block 1 = the per-ms rule). `PRESETS` hold CK Table 1 in CK units, converted by `MV` = 1300. Results go to `experiments/results/tdstdp_<task>[_<tokens>]_s<seed>.json`.
 - Each `mapstdp` module has a `__main__` self-check (Eq. 1a bound, finite-difference gradient, Monte Carlo three-factor average, `W_snm` orientation). Extend it when you add a rule.
 
 **Traps** (each has cost time before):
@@ -40,7 +41,7 @@ Research question: can a spiking network's communities serve as its states, givi
 Run everything from the repo root, as modules:
 
 ```bash
-python -m mapstdp.core                     # self-checks (likewise mapstdp.spiking)
+python -m mapstdp.core                     # self-checks (likewise mapstdp.spiking, mapstdp.tdstdp)
 python -m experiments.m1                   # M1 checks -> experiments/results/m1.json
 python -m experiments.m2 --backend flow --routing exempt --lam 0.05 --seed 0 --episodes 1500   # one M2 run
 python -m experiments.m2 --summary         # results table over seeds, plus the random-policy return
@@ -49,6 +50,8 @@ python -m experiments.m3 --task LunarLander --td-norm 0.04 --p-cc 0 --beta-kappa
 python -m experiments.m3 --task MountainCar --td-norm 0.04 --p-cc 0 --beta-kappa 0.01 --beta-max 16 --eta 5 --encoder g12s0.15 --critic-layer g24 --c-ent 0.01 --ent-target 0.8 --seed 0   # best MountainCar (iteration 012)
 python -m experiments.m3 --summary         # per task: random, flow, spiking per H  (--ablations, --fidelity)
 python -m experiments.ceiling --task CartPole --level 1 --readout 1d                     # policy-class ceiling
+python -m experiments.tdstdp --task CartPole --seed 0 [--adam | --sgd] [--engine lif]  # TD-STDP backbone (iteration 013)
+python -m experiments.tdstdp --summary      # T_f, T_s, solved fraction, last-100 return vs Chung & Kozma and v4
 pytest -q tests                            # behaviour lock (see Tooling)
 pytest -q tests -k "flow-exempt"           # one case, e.g. one golden fingerprint
 ruff check .

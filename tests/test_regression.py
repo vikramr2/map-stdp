@@ -35,7 +35,7 @@ def case_id(case):
     return "-".join(map(str, case))
 
 
-@pytest.mark.parametrize("module", ["mapstdp.core", "mapstdp.spiking"])
+@pytest.mark.parametrize("module", ["mapstdp.core", "mapstdp.spiking", "mapstdp.qif", "mapstdp.tdstdp"])
 def test_self_checks(module):
     assert subprocess.run([sys.executable, "-m", module], capture_output=True).returncode == 0
 
