@@ -4,6 +4,65 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## 2026-10-23
 
+### Added (iteration 013: TD-STDP speed-ups and the flow limit, record §10–§11)
+
+- **Code:**
+  - `tdstdp.block_learn_ck_fast` with `--fast`: the update is summed over copies in one product. It is equal to the default up to summation order.
+  - `tdstdp.flow_step` with `--engine flow`: the branching step's noise-free limit, rates instead of spikes, plus the input-autocorrelation term of z.
+  - The defaults are unchanged and bit-identical. This was checked against the committed E1′ (both engines) and the legacy E1.
+  - New self-checks:
+    - (b″) the fast form equals `block_learn_ck` to $2 \times 10^{-16}$;
+    - (e) the flow update against the Monte Carlo mean of the sampled rule: cosine 0.99997.
+  - Golden is bit-identical, 8 tests pass and ruff is clean. `CLAUDE.md`'s Commands line lists `--block 20`, `--engine flow` and `--fast`.
+- **S1, block sum without Adam** (CartPole, seeds 40–59, B = 20 against B = 1): **passes its gate on both engines.**
+  - LIF: solved 20 against 19, Mann–Whitney p 0.27 on $T_s$ and 0.54 on return.
+  - Branching: solved 6 against 7, p 0.99 and 0.39.
+  - 6.7–7.1× faster.
+- **S2, `--fast`** (LunarLander, seeds 100–104, 400 pooled episodes): the return sequences are identical to the default's. It is 1.8× faster per copy-frame (8.26 against 4.48 ms under load). Env stepping is about 1% of a tick, because the copies already share one batched network step.
+- **S3, flow limit** (CartPole, seeds 60–79): 20/20 solved, $T_s$ 212.7 ± 51.7 and return 467.7 ± 107.8. Against E1′ branching (4/20), Mann–Whitney p $7.4 \times 10^{-8}$ on $T_s$. Escape noise is what fails branching's strict $T_s$.
+
+### Changed (iteration 013: TD-STDP follows the authors' code; E1′, E3′ and E4′)
+
+- **Code** (`mapstdp/tdstdp.py`, `experiments/tdstdp.py`):
+  - `python -m experiments.tdstdp` now defaults to the authors' code (`reference/td_stdp`, BindsNET 0.2.7) wherever it disagrees with the paper. Results carry the token `ck`.
+  - `PRESETS` are their `config_cp.ini` and `config_ll.ini` (η in mV). Weights convert to branching units by `MV` = 13, not 1300.
+  - New `tdstdp.block_learn_ck`: their per-ms order with the $1/\tau_z$ and $1/\tau_q$ trace scale.
+  - New `tdstdp.simulate_bindsnet` (`--engine lif`): their deterministic LIF with W in mV.
+  - New `CKRunner`: their loop. The action is sampled from the response to the current state; p is fixed at the sampling probability; $V' := 0$ only on true termination; each episode has 6 presentations of $s_0$; the update is the mean over all copies; episodes are pooled over copies, with their min/max episode stopping rule.
+  - Also new: their Fourier encoder and bounds; Adam ε mapped to the unit-trace gradient; `calibrate_ck` (the E4′ η rule); and checkpoints for long runs (`*.ckpt.npz`, now in `.gitignore`).
+  - `--legacy` keeps the pre-audit path. It reproduces the committed E1/E2 results bit for bit under their original names.
+  - `--summary` separates the two families and counts the authors'-code episodes pooled. It now reports Mann–Whitney p on $T_f$, $T_s$ and return, plus the number of runs with a last-100 return of at least 475.
+- **Self-check:**
+  - (b′) `block_learn_ck`'s closed form equals a literal per-ms transcription of `FBTDSTDP` to $6 \times 10^{-16}$.
+  - (d′) The actor rule in the authors' order on a bandit has cosine 0.984 with the exact gradient, and 1.0000 per row.
+  - Golden is bit-identical, 8 tests pass and ruff is clean.
+- **Stopped:** the first E3 and E4 (LunarLander) were stopped at the wrong settings: the Adam step was 100× too small, episodes were counted per copy, entropy was 20× too weak, and decay was on. Their partials were moved out of `experiments/results` to the session scratchpad.
+- **E1′** (pre-registered in record §9; CartPole, the authors' config, no Adam, B = 1, seeds 20–39):
+  - **BindsNET LIF passes the gate:** 20/20 solved, $T_f$ 64.0 ± 8.4, $T_s$ 174.8 ± 18.5 (median 168), against CK's 57.0 and 169.5.
+  - **Branching fails it:** 4/20 solved and last-100 306.9 ± 214.7. It has the same $T_f$ (62.6, MW p 0.46), but 7/20 collapse into a constant action after a period of near-perfect play (last-100 against LIF: MW p $6.8 \times 10^{-4}$).
+- **E3′** (LunarLander, the authors' config, Adam, branching, B = 20, seeds 0–9): **passes its gate.**
+  - 7/10 solved; $T_f$ 390.4 ± 99.8 against CK's 383.8.
+  - $T_s$ 6774 ± 1896 pooled episodes against CK's 2575, so 2.6× slower.
+- **E4′** (the same without Adam, η by the pre-registered Adam-equivalent rule): 0/10 solved and last-100 −0.9 ± 45.8. Against E3′, Mann–Whitney p ≤ 0.002 on $T_f$, $T_s$ and return. Adam is load-bearing on LunarLander.
+- **LIF arm** (reported only): seeds 0–3 solved 3/4. Seed 4 was stopped at 5600 of 10000 pooled episodes; it can be resumed from its checkpoint.
+- **Interruption:** all 25 LunarLander runs were killed at about 15:15 by a coordinating agent and resumed from their checkpoints. W, the Adam state, the returns and the rng were restored exactly; fewer than 50 episodes per run and the in-flight episodes were lost (record §5.2).
+- **Docs:**
+  - `docs/iterations/013-tdstdp-backbone.md` is rewritten to the current state. §3 states the corrected units and timing, lists the paper-against-code disagreements, and keeps the pre-audit choices. The pre-fix E1/E2 results are kept and labelled as such. §6's earlier reading that Adam is load-bearing is withdrawn for CartPole; E4′ shows that it holds for LunarLander.
+  - `CLAUDE.md`: the tdstdp Code and Commands lines (`MV` = 13, `--legacy`).
+  - `docs/derivation.md`, `docs/model.md` and `docs/SPEC.md` are unchanged.
+
+### Found (iteration 013: audit against the authors' code, post hoc)
+
+- `docs/iterations/013-tdstdp-backbone.md` §8 (new) compares iteration 013 with `reference/td_stdp` and BindsNET 0.2.7. No repo code changed; the diagnostic runs live in the session scratchpad.
+- **The E1 failure is a reproduction error.** The cause is the η scale:
+  - the authors' traces carry $1/\tau_z$ (critic) and $1/(\tau_z\tau_q)$ (actor), which the paper's Eqs. 72 and 77 omit;
+  - BindsNET adds w mV per spike, so weights convert by ÷13, not ÷1300;
+  - the code's critic η is 0.005.
+  - Our critic step was therefore 10× too small and our actor step 8× too large.
+- **Two loop details caused the collapses:** our action is sampled from the previous observation's response, and $V' := 0$ is also applied on truncation, while the authors bootstrap there.
+- **Post hoc test, 5 seeds:** with all fixes and their deterministic LIF, the run reproduces CK: 5/5 solved, $T_f$ 65.0 ± 7.4, $T_s$ median 185. On the branching engine the same fixes reach a return of 490.4 ± 9.8 with 1/5 solved.
+- **E3 is affected too.** The authors' Adam step is 100× ours, and their episode counts pool the 16 copies.
+
 ### Added (reference code of Chung & Kozma 2020)
 
 - `reference/td_stdp/`: a shallow clone of https://github.com/stephen-chung-mh/td_stdp (commit `a5cb7f4`), the paper authors' BindsNET code, used to compare against the iteration 013 implementation. `reference/` is gitignored; reference only, not imported by the project.

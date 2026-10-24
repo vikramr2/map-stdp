@@ -470,3 +470,9 @@ TSWLatexianTemp*
 
 # SLURM job logs
 logs/
+
+# External reference repos (cloned for comparison, not part of this project)
+reference/
+
+# TD-STDP run checkpoints (experiments/tdstdp.py; deleted when a run completes)
+experiments/results/*.ckpt.npz

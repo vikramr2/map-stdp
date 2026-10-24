@@ -18,6 +18,12 @@ ms t is applied one ms later.
 Block form: weights are frozen for blocks of L ms and the block's per-ms increments are summed in closed form
 (zsum, block_learn); L = 1 is the per-ms rule exactly. The self-check verifies the closed form against the per-ms
 loop.
+Authors' code (reference/td_stdp, BindsNET 0.2.7; iteration 013 §8; the default since the audit): block_learn_ck
+follows the code's per-ms order and trace scale, which the paper's equations omit: z <- e^(-1/tau_z) z + P X / tau_z,
+q <- e^(-1/tau_q) q + (A - p) z(t-1) / tau_q, the update at ms t is delta_t z(t-1) (critic) and delta_t q(t) +
+kap_t z(t-1) (actor), and p is the probability the action was sampled with (fixed over the 20 ms window).
+simulate_bindsnet is BindsNET's LIFNodes (a spike through w adds w mV, threshold 13 mV above rest, no refractory
+period); in branching units w_branching = w_mV / 13.
 Not crossbar-native as a whole (iteration 013 reproduces CK first): softmax readout, signed weights, the per-synapse
 trace pair (z, q) and Adam (per-synapse m, v) are off-hardware; the plan removes them in later steps."""
 import numpy as np
@@ -111,6 +117,19 @@ def simulate_lif(W, x_prev, x, v, leak="exp"):
     return X, v
 
 
+def simulate_bindsnet(W, x_prev, x, v):
+    """BindsNET 0.2.7 LIFNodes as the authors configure them (reference/td_stdp main.py: refrac 0, tc_decay 100),
+    rest = reset = 0, threshold THETA_L = 13 mV: v <- e^(-1/TAU_M) v + W x(t-1) (W in mV, no 1 / tau), spike if
+    v >= THETA_L, reset to 0. Deterministic. v: H x n_post membrane state, carried across blocks. Returns (X, v)."""
+    X, v, xp, a = np.empty((len(x), *v.shape), bool), v.copy(), x_prev, np.exp(-1 / TAU_M)
+    for t in range(len(x)):
+        v = a * v + xp @ W.T
+        X[t] = v >= THETA_L
+        v[X[t]] = 0
+        xp = x[t]
+    return X, v
+
+
 def pre_trace(P0, x, tau_p):
     """Pre traces P(t) for t = 0..L-1 (Eq. 71/75): P <- e^(-1/tau_p) P + x(t)."""
     a, P, out = np.exp(-1 / tau_p), P0, np.empty_like(x)
@@ -188,6 +207,95 @@ def block_learn(z0, q0, P, X, d, c, kap, lay, tau_z, tau_q):
     return np.concatenate([Gc, Ga], 1), np.concatenate([zc, za], 1), qa
 
 
+def block_learn_ck(z0, q0, P, X, d, c, kap, lay, tau_z, tau_q):
+    """One block's summed update direction and end traces in the authors' per-ms order (bindsnet_add.py
+    FBTDSTDP._connection_update; W frozen). Per ms t = 0..L-1, with z = z(t-1) on entry:
+      q <- b q + c_t z / tau_q;  G += sign d_t z (critic rows), sign d_t q + kap_t z (actor rows);
+      z <- a z + X(t) P(t)^T / tau_z   (a = e^(-1/tau_z), b = e^(-1/tau_q)).
+    The 1 / tau_z and 1 / tau_q trace scale is the code's (CK Eqs. 72, 77 omit it). d: L x H TD errors delta_t
+    (delta_t = e^(-1/tau) V_t + e^(-1/2tau) r - V_(t-1), all known inside the block, so there is no lag across blocks);
+    c: L x H x n_act feedback A_k - p_k (p = the sampling probability); kap: L x H x n_act per-post z coefficients
+    (entropy, sign included). z0, q0 and the returned traces are the normalised ones. Closed form with zsum, using
+    sum_t d_t q(t) = b D_0 q0 + sum_s D_s c_s z(s-1) / tau_q, D_s = sum_(t>=s) d_t b^(t-s).
+    Returns (G, z_end, q_end)."""
+    a, b, nc = np.exp(-1 / tau_z), np.exp(-1 / tau_q), lay.n_crit
+    L, H = d.shape
+    Pn, sc, sa, na = P / tau_z, lay.sign[:nc], lay.sign[nc:], lay.n_post - nc
+    e_end = np.zeros((L + 1, H, 1))
+    e_end[L] = 1  # zsum index i <-> z(i - 1): u[i] multiplies z(i - 1), u[L] the end trace z(L - 1)
+    uc = np.zeros((L + 1, H, nc))
+    uc[:L] = d[..., None] * sc
+    Gc, zc = zsum(z0[:, :nc], Pn, X[..., :nc], np.stack([uc, np.broadcast_to(e_end, (L + 1, H, nc))]), a)
+    D = np.empty_like(d)
+    D[L - 1] = d[L - 1]
+    for i in range(L - 2, -1, -1):
+        D[i] = d[i] + b * D[i + 1]
+    ug, uq = np.zeros((L + 1, H, na)), np.zeros((L + 1, H, na))
+    ug[:L] = D[..., None] * sa * c / tau_q + kap
+    uq[:L] = b ** np.arange(L - 1, -1, -1)[:, None, None] * c / tau_q
+    Ga, qa, za = zsum(z0[:, nc:], Pn, X[..., nc:], np.stack([ug, uq, np.broadcast_to(e_end, (L + 1, H, na))]), a)
+    Ga = Ga + b * D[0][:, None, None] * sa[:, None] * q0
+    qa = qa + b ** L * q0
+    return np.concatenate([Gc, Ga], 1), np.concatenate([zc, za], 1), qa
+
+
+def _ucoef(u, a):
+    """zsum's coefficients: U_s = sum_(t>=s) a^(t-s) u_(t+1) (M x L x H x n) and coef0 = u_0 + a U_0 (M x H x n)."""
+    M, L1, H, n = u.shape
+    U, acc = np.empty((M, L1 - 1, H, n)), np.zeros((M, H, n))
+    for s in range(L1 - 2, -1, -1):
+        acc = u[:, s + 1] + a * acc
+        U[:, s] = acc
+    return U, (u[:, 0] + a * U[:, 0] if L1 > 1 else u[:, 0])
+
+
+def block_learn_ck_fast(z0, q0, P, X, d, c, kap, lay, tau_z, tau_q, K=None):
+    """block_learn_ck with the update summed over copies inside one matrix product (iteration 013 §10, S2): returns
+    (G summed over the H copies, n_post x n_in; z_end; q_end). Equal to block_learn_ck(...)[0].sum(0) and its end
+    traces up to floating-point summation order (self-check (b'')). K (H x n_post x n_in, optional): an extra z
+    increment per ms, z <- a z + (X P^T + K) / tau_z, constant over the block (the flow engine's input
+    autocorrelation term, S3)."""
+    a, b, nc = np.exp(-1 / tau_z), np.exp(-1 / tau_q), lay.n_crit
+    L, H = d.shape
+    Pn, sc, sa, n_in = P / tau_z, lay.sign[:nc], lay.sign[nc:], P.shape[-1]
+    u = np.zeros((3, L + 1, H, lay.n_post))  # critic + actor policy/entropy rows, actor q rows (padded), end
+    u[0, :L, :, :nc] = d[..., None] * sc
+    D = np.empty_like(d)
+    D[L - 1] = d[L - 1]
+    for i in range(L - 2, -1, -1):
+        D[i] = d[i] + b * D[i + 1]
+    u[0, :L, :, nc:] = D[..., None] * sa * c / tau_q + kap
+    u[1, :L, :, nc:] = b ** np.arange(L - 1, -1, -1)[:, None, None] * c / tau_q
+    u[2, L] = 1
+    U, c0 = _ucoef(u, a)
+    XU = X[None] * U  # 3 x L x H x n_post
+    G = (XU[0].reshape(L * H, -1).T @ Pn.reshape(L * H, n_in)) + np.einsum("hn,hni->ni", c0[0], z0)
+    G[nc:] += sa[:, None] * np.einsum("h,hni->ni", b * D[0], q0)
+    E = np.concatenate([XU[2], XU[1][..., nc:]], -1).transpose(1, 2, 0)  # H x (n_post + n_act) x L
+    R = np.matmul(E, Pn.transpose(1, 0, 2))
+    z_end = a ** L * z0 + R[:, :lay.n_post]
+    q_end = b ** L * q0 + c0[1][:, nc:, None] * z0[:, nc:] + R[:, lay.n_post:]
+    if K is not None:
+        Kn, Us = K / tau_z, U.sum(1)  # sum over s of U_s: the coefficient of a per-ms constant increment
+        G += np.einsum("hn,hni->ni", Us[0], Kn)
+        z_end += Us[2][..., None] * Kn
+        q_end += Us[1][:, nc:, None] * Kn[:, nc:]
+    return G, z_end, q_end
+
+
+def flow_step(W, f_prev, f, L):
+    """The branching step's noise-free limit (iteration 013 §10, S3): over a block of L ms with input rates f (H x n_in;
+    f_prev for the first ms), X(t) = clip(W f(t-1), 0, 1) (L x H x n_post, a spike probability) and the input
+    autocorrelation term of E[X_j(t) P_i(t)] - E[X_j] E[P_i] = W_ji a_p f_i (1 - f_i) without the factor a_p (the
+    caller multiplies by e^(-1/tau_p)), masked to posts in the linear regime. Returns (x = f broadcast over the block,
+    X, K0 = W_ji f_i (1 - f_i) for the current f, H x n_post x n_in)."""
+    x = np.broadcast_to(f, (L, *f.shape)).copy()  # writable: the runner resets its last row on episode resets
+    p_prev, p = np.clip(f_prev @ W.T, 0, 1), f @ W.T
+    X = np.concatenate([p_prev[None], np.broadcast_to(np.clip(p, 0, 1), (L - 1, *p.shape))])
+    lin = (p > 0) & (p < 1)
+    return x, X, lin[..., None] * W[None] * (f * (1 - f))[:, None, :]
+
+
 class Adam:
     """Adam on the ascent direction g (CK §3.2 comment 2: the per-ms update fed to Adam as its gradient), b1, b2 and
     the step lr per ms. step(G, lr, L) takes the sum G of L per-ms updates (block form) and matches per-ms Adam's
@@ -220,6 +328,20 @@ def _per_ms_reference(z0, q0, P, X, d, c, kap, lay, tau_z, tau_q):
         q = b * q + c[t][..., None] * z[:, nc:]
         G[:, :nc] += d[t + 1][:, None, None] * lay.sign[:nc, None] * z[:, :nc]
         G[:, nc:] += d[t + 1][:, None, None] * lay.sign[nc:, None] * q + kap[t][..., None] * z[:, nc:]
+    return G, z, q
+
+
+def _per_ms_reference_ck(z0, q0, P, X, d, c, kap, lay, tau_z, tau_q, K=0.0):
+    """Literal per-ms transcription of FBTDSTDP._connection_update (bindsnet_add.py:180-224) for the block_learn_ck
+    self-check: the action trace from the old eligibility trace, the update from the old z and the new q, then z."""
+    a, b, nc = np.exp(-1 / tau_z), np.exp(-1 / tau_q), lay.n_crit
+    z, q = z0.copy(), q0.copy()
+    G = np.zeros_like(z0)
+    for t in range(len(P)):
+        q = b * q + c[t][..., None] * z[:, nc:] / tau_q
+        G[:, :nc] += d[t][:, None, None] * lay.sign[:nc, None] * z[:, :nc]
+        G[:, nc:] += d[t][:, None, None] * lay.sign[nc:, None] * q + kap[t][..., None] * z[:, nc:]
+        z = a * z + (X[t][..., None] * P[t][:, None, :] + K) / tau_z
     return G, z, q
 
 
@@ -276,6 +398,21 @@ if __name__ == "__main__":
         err = max(np.abs(g - r).max() / np.abs(r).max() for g, r in zip(got, ref))
         assert err < 1e-12, err
         print(f"(b) block closed form == per-ms loop, L={L:2d}: max rel err {err:.1e}")
+        got, ref = block_learn_ck(*args[:4], d[1:], *args[5:]), _per_ms_reference_ck(*args[:4], d[1:], *args[5:])
+        err = max(np.abs(g - r).max() / np.abs(r).max() for g, r in zip(got, ref))
+        assert err < 1e-12, err
+        print(f"(b') authors' order and trace scale: closed form == per-ms loop, L={L:2d}: max rel err {err:.1e}")
+        K = np.random.default_rng(1).random(z0.shape)  # own stream: keeps (c)-(d) draws unchanged
+        args_ck = (*args[:4], d[1:], *args[5:])
+        Gs, zf, qf = block_learn_ck_fast(*args_ck, K=K)
+        Gr, zr, qr = _per_ms_reference_ck(*args_ck, K=K)
+        err = max(np.abs(g - r).max() / np.abs(r).max() for g, r in ((Gs, Gr.sum(0)), (zf, zr), (qf, qr)))
+        Gs, zf, qf = block_learn_ck_fast(*args_ck)
+        Gd, zd, qd = block_learn_ck(*args_ck)
+        err2 = max(np.abs(g - r).max() / np.abs(r).max() for g, r in ((Gs, Gd.sum(0)), (zf, zd), (qf, qd)))
+        assert max(err, err2) < 1e-12, (err, err2)
+        print(f"(b'') copy-summed fast form == block_learn_ck (rel err {err2:.1e}) and, with a constant z increment K, "
+              f"== the per-ms loop (rel err {err:.1e}), L={L:2d}")
     # (c) STE in branching mode, critic (Theorem 1): E[z] vs the finite-difference gradient of E[V] = alpha mean(W f)
     # (exact in the linear regime, no clipping); delta is a constant here, so E[delta z] is delta E[z].
     lay = Layout(8, 4, 0, 1, 0, 1)
@@ -346,4 +483,55 @@ if __name__ == "__main__":
     ca, cra = _cos(G, fd), _row_cos(G, fd)
     print(f"(d) actor rule on a bandit: cos(E[r(A) q], dE[r]/dW) global {ca:.4f}, per post row {cra:.4f}")
     assert ca > 0.9 and cra > 0.95
+    # (d') the same bandit in the authors' order (block_learn_ck): window k presents the stimulus with (A_(k-1),
+    # p_(k-1), r(A_(k-1))), p fixed at the sampling probability; then A_k ~ p_k = softmax at the window's end
+    z, q = np.zeros((1, lay.n_post, lay.n_in)), np.zeros((1, lay.n_post, lay.n_in))
+    xp, Pt, rho = np.zeros((1, lay.n_in)), np.zeros((1, lay.n_in)), np.tile(W @ f[0], (1, 1)) * 1.025
+    G[:] = 0
+    p0 = softmax(aa * rho @ lay.Ma.T)[0]
+    A = rng.choice(2, p=p0)
+    for blk in range(20000):
+        x, noise = draw(f, 20, lay.n_post, rng)
+        X = simulate(W, xp, x, noise)
+        P = pre_trace(Pt, x, 20)
+        R = rates(rho, X, 20)
+        c = np.broadcast_to(np.eye(2)[A][lay.act] - p0[lay.act], (20, 1, lay.n_post))
+        Gb, z, q = block_learn_ck(z, q, P, X, np.full((20, 1), r_arm[A]), c, np.zeros(c.shape), lay, 20, tq)
+        if blk >= 100:
+            G += Gb[0]
+        xp, Pt, rho = x[-1], P[-1], R[-1]
+        p0 = softmax(aa * rho @ lay.Ma.T)[0]
+        A = rng.choice(2, p=p0)
+    ca, cra = _cos(G, fd), _row_cos(G, fd)
+    print(f"(d') actor rule, authors' order and trace scale: cos(E[r(A) q], dE[r]/dW) global {ca:.4f}, "
+          f"per post row {cra:.4f}")
+    assert ca > 0.9 and cra > 0.95
+    # (e) flow limit (S3): with W, f, delta and the feedback fixed, the Monte Carlo average of the sampled rule's update
+    # (branching step, block_learn_ck) == the flow update (flow_step, block_learn_ck_fast with K)
+    lay = Layout(9, 4, 2, 3, 1, 2)
+    f = rng.uniform(0.1, 0.9, (1, lay.n_in))
+    W = rng.uniform(-0.01, 0.05, (lay.n_post, lay.n_in))
+    assert ((W @ f[0] > 0) & (W @ f[0] < 1)).all()
+    na, L, nb = lay.n_post - lay.n_crit, 20, 5000
+    d, cc = rng.normal(size=(L, 1)), rng.normal(size=(L, 1, na))
+    kap = 0.3 * rng.normal(size=(L, 1, na))
+    zs, qs, Gs = np.zeros((1, lay.n_post, lay.n_in)), np.zeros((1, na, lay.n_in)), np.zeros((lay.n_post, lay.n_in))
+    zf, qf, Gf = zs.copy(), qs.copy(), Gs.copy()
+    xp, Pt, Pf = np.zeros((1, lay.n_in)), np.zeros((1, lay.n_in)), np.zeros((1, lay.n_in))
+    for blk in range(nb):
+        x, noise = draw(f, L, lay.n_post, rng)
+        X = simulate(W, xp, x, noise)
+        P = pre_trace(Pt, x, 20)
+        G, zs, qs = block_learn_ck(zs, qs, P, X, d, cc, kap, lay, 20, 40)
+        xq, Xf, K0 = flow_step(W, f, f, L)
+        Pq = pre_trace(Pf, xq, 20)
+        G2, zf, qf = block_learn_ck_fast(zf, qf, Pq, Xf, d, cc, kap, lay, 20, 40, K=np.exp(-1 / 20) * K0)
+        if blk >= 50:
+            Gs += G[0]
+            Gf += G2
+        xp, Pt, Pf = x[-1], P[-1], Pq[-1]
+    cf = _cos(Gs, Gf)
+    print(f"(e) flow limit: cos(Monte Carlo mean of the sampled update, flow update) {cf:.5f}, "
+          f"norm ratio {np.linalg.norm(Gs) / np.linalg.norm(Gf):.4f}")
+    assert cf > 0.99
     print("tdstdp self-check ok")
