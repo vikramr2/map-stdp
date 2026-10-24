@@ -1,5 +1,6 @@
 data/
 models/NOTES.md
+experiments/results/
 # experiments/results
 
 # Byte-compiled / optimized / DLL files
@@ -476,3 +477,7 @@ reference/
 
 # TD-STDP run checkpoints (experiments/tdstdp.py; deleted when a run completes)
 experiments/results/*.ckpt.npz
+
+# Final-study run checkpoints and partials (experiments/report.py; deleted when a run completes)
+reports/**/*.ckpt.npz
+reports/**/*.partial
