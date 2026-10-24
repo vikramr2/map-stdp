@@ -4,6 +4,7 @@ mapstdp/tdstdp.py) in closed loop on CartPole and LunarLander. Run from the repo
     [--block B] [--episodes E] [--engine {numpy,snm,lif}] [--legacy [--rate0 p] [--engine lif-snm]]
     -> experiments/results/tdstdp_<task>[_ck][_<tokens>]_s<seed>.json   (tokens: options off the preset, in order
        adam | noadam | sgd, B<B>, h<H>, ep<E>, r<rate0> (legacy), engine snm | lif | lifsnm)
+    [--out PATH]   (result path; the default above; experiments.report uses it to write reports/<study>/runs/)
   python -m experiments.tdstdp --summary   -> per group: T_f, T_s, solved fraction, last-100 return, ms per frame,
        next to CK's Table 2 and the model v4 (flow, spiking) returns
 Default (token ck): the authors' code, reference/td_stdp (commit a5cb7f4, BindsNET 0.2.7), where it disagrees with
@@ -455,15 +456,15 @@ def calibrate_ck(cfg):
     return np.array([cfg.eta_c, cfg.eta_a]) / rms, rms
 
 
-def run_ck(cfg, log_every=50):
+def run_ck(cfg, log_every=50, out=None):
     eta_sgd = None
     if cfg.sgd:
         eta_sgd, rms = calibrate_ck(cfg)
         cfg = dataclasses.replace(cfg, eta_c=float(eta_sgd[0]), eta_a=float(eta_sgd[1]))
         print(f"sgd calibration: per-ms update RMS {rms}, eta (mV) {eta_sgd}", flush=True)
     r, wall0, resumes = CKRunner(cfg), 0.0, 0
-    OUT.mkdir(exist_ok=True)
-    fn = OUT / f"{name(cfg)}.json"
+    fn = pathlib.Path(out) if out else OUT / f"{name(cfg)}.json"
+    fn.parent.mkdir(parents=True, exist_ok=True)
     ck = fn.with_suffix(".ckpt.npz")
     if ck.exists():
         wall0, resumes = r.load(ck)
@@ -530,17 +531,19 @@ def solve_times(task, returns_heads):
     return Tf, Ts, ret.tolist()
 
 
-def run(cfg, log_every=50):
+def run(cfg, log_every=50, out=None):
+    """Run cfg; the result goes to `out` (a .json path; .partial and .ckpt.npz alongside) or, by default, to
+    experiments/results/<name(cfg)>.json."""
     if cfg.ck:
-        return run_ck(cfg, log_every)
+        return run_ck(cfg, log_every, out)
     eta_sgd = None
     if cfg.sgd:
         eta_sgd, rms = calibrate(cfg)
         cfg = dataclasses.replace(cfg, eta_c=float(eta_sgd[0]), eta_a=float(eta_sgd[1]))
         print(f"sgd calibration: per-ms update RMS {rms}, eta (CK units) {eta_sgd}", flush=True)
     r, t0, nxt = Runner(cfg), time.perf_counter(), log_every
-    OUT.mkdir(exist_ok=True)
-    fn = OUT / f"{name(cfg)}.json"
+    fn = pathlib.Path(out) if out else OUT / f"{name(cfg)}.json"
+    fn.parent.mkdir(parents=True, exist_ok=True)
     while not r.done.all():
         r.tick()
         e = min(len(x) for x in r.returns)
@@ -593,8 +596,35 @@ def trailing_mean_time(ret, thr):
     return int(hit[0]) + 100 if len(hit) else None
 
 
-def summary():
+def group_stats(task, rs, ref=None):
+    """Summary statistics of one group of runs (result dicts) on `task`, shared by --summary and experiments.report:
+    T_f / T_s (CK definitions) mean, sd (ddof 0) and count over runs that reach them; median T_s with unsolved =
+    infinite; T_m = first episode whose trailing-100 mean reaches M_THR; last-100 return mean, sd and the count >=
+    M_THR; mean ms per frame. With ref (another group's runs): two-sided Mann-Whitney p on T_f, T_s (never reached =
+    episode cap + 1) and the last-100 return."""
     from scipy.stats import mannwhitneyu
+    Tf = [r["T_f"] for r in rs if r["T_f"] is not None]
+    Ts = [r["T_s"] for r in rs if r["T_s"] is not None]
+    Tm = [t for t in (trailing_mean_time(r["returns"], M_THR[task]) for r in rs) if t is not None]
+    R = [float(np.mean(r["returns"][-100:])) for r in rs]
+    ms = lambda x: (float(np.mean(x)), float(np.std(x))) if x else (float("nan"),) * 2  # noqa: E731
+    out = {"n": len(rs), "solved": len(Ts), "T_f_mean": ms(Tf)[0], "T_f_sd": ms(Tf)[1], "T_f_n": len(Tf),
+           "T_s_mean": ms(Ts)[0], "T_s_sd": ms(Ts)[1],
+           "T_s_median": float(np.median([r["T_s"] if r["T_s"] is not None else np.inf for r in rs])),
+           "T_m_mean": ms(Tm)[0], "T_m_sd": ms(Tm)[1], "T_m_n": len(Tm), "ret_mean": float(np.mean(R)),
+           "ret_sd": float(np.std(R)), "ret_ge_M": sum(x >= M_THR[task] for x in R),
+           "ms_per_frame": float(np.mean([r["ms_per_frame"] for r in rs]))}
+    if ref is not None:
+        cap = lambda r: (r["config"].get("max_eps") or r["config"]["episodes"]) + 1  # noqa: E731
+        cens = lambda rr, k: [r[k] or cap(r) for r in rr]  # noqa: E731
+        R0 = [np.mean(r["returns"][-100:]) for r in ref]
+        out |= {"mw_T_f": float(mannwhitneyu(cens(rs, "T_f"), cens(ref, "T_f")).pvalue),
+                "mw_T_s": float(mannwhitneyu(cens(rs, "T_s"), cens(ref, "T_s")).pvalue),
+                "mw_ret": float(mannwhitneyu(R, R0).pvalue)}
+    return out
+
+
+def summary():
     print("T_f / T_s (CK definitions, pre-registered): mean +- sd over runs that reach it [n]; median T_s counts "
           "unsolved as infinite. Authors'-code groups (ck) count episodes pooled over copies (main.py); legacy "
           "LunarLander groups count per copy (copy-mean returns). Secondary: T_m = first episode whose trailing-100 "
@@ -604,8 +634,7 @@ def summary():
     groups = {}
     for f in sorted(glob.glob(str(OUT / "tdstdp_*.json"))):
         groups.setdefault(pathlib.Path(f).stem.rsplit("_s", 1)[0], []).append(json.loads(pathlib.Path(f).read_text()))
-    ms = lambda x: f"{np.mean(x):6.1f} +- {np.std(x):5.1f}" if x else "   nan          "  # noqa: E731
-    cap = lambda r: (r["config"].get("max_eps") or r["config"]["episodes"]) + 1  # noqa: E731
+    ms = lambda m, s: f"{m:6.1f} +- {s:5.1f}" if m == m else "   nan          "  # noqa: E731
     for task in PAPER:
         if not any(g.split("_")[1] == task for g in groups):
             continue
@@ -620,22 +649,14 @@ def summary():
                 continue
             print("  authors' code (default):" if ck else "  pre-audit code (--legacy):")
             for g, rs in sorted(gs.items(), key=lambda kv: (kv[0] != base, kv[0])):
-                Tf = [r["T_f"] for r in rs if r["T_f"] is not None]
-                Ts = [r["T_s"] for r in rs if r["T_s"] is not None]
-                Tm = [t for t in (trailing_mean_time(r["returns"], M_THR[task]) for r in rs) if t is not None]
-                med = np.median([r["T_s"] if r["T_s"] is not None else np.inf for r in rs])
-                R = [np.mean(r["returns"][-100:]) for r in rs]
-                line = (f"  {g:28} n={len(rs):2d} solved {len(Ts):2d}/{len(rs):2d}  T_f {ms(Tf)} [{len(Tf):2d}]  "
-                        f"T_s {ms(Ts)} median {med:5.0f}  T_m {ms(Tm)} [{len(Tm):2d}]  ret {np.mean(R):6.1f} +- "
-                        f"{np.std(R):5.1f} >=M {sum(x >= M_THR[task] for x in R):2d}  "
-                        f"ms/fr {np.mean([r['ms_per_frame'] for r in rs]):5.2f}")
-                if g != base and base in gs:
-                    rb = gs[base]
-                    cens = lambda rr, k: [r[k] or cap(r) for r in rr]  # noqa: E731
-                    R0 = [np.mean(r["returns"][-100:]) for r in rb]
-                    line += (f"  MW {mannwhitneyu(cens(rs, 'T_f'), cens(rb, 'T_f')).pvalue:.2g} / "
-                             f"{mannwhitneyu(cens(rs, 'T_s'), cens(rb, 'T_s')).pvalue:.2g} / "
-                             f"{mannwhitneyu(R, R0).pvalue:.2g}")
+                st = group_stats(task, rs, gs[base] if g != base and base in gs else None)
+                line = (f"  {g:28} n={st['n']:2d} solved {st['solved']:2d}/{st['n']:2d}  T_f "
+                        f"{ms(st['T_f_mean'], st['T_f_sd'])} [{st['T_f_n']:2d}]  T_s {ms(st['T_s_mean'], st['T_s_sd'])}"
+                        f" median {st['T_s_median']:5.0f}  T_m {ms(st['T_m_mean'], st['T_m_sd'])} [{st['T_m_n']:2d}]  "
+                        f"ret {st['ret_mean']:6.1f} +- {st['ret_sd']:5.1f} >=M {st['ret_ge_M']:2d}  "
+                        f"ms/fr {st['ms_per_frame']:5.2f}")
+                if "mw_T_f" in st:
+                    line += f"  MW {st['mw_T_f']:.2g} / {st['mw_T_s']:.2g} / {st['mw_ret']:.2g}"
                 print(line)
 
 
@@ -656,6 +677,7 @@ def main():
                     help="lif: BindsNET's LIF (legacy: CK Eq. 1); lif-snm (legacy): SuperNeuroMAT's subtractive leak; "
                          "flow: the branching step's noise-free limit")
     ap.add_argument("--fast", action="store_true", help="update summed over copies in one product (not bit-identical)")
+    ap.add_argument("--out", default=None, help="result .json path (default experiments/results/<name>.json)")
     ap.add_argument("--summary", action="store_true")
     a = ap.parse_args()
     if a.summary:
@@ -670,7 +692,7 @@ def main():
         kw.update(adam=False, sgd=True)
     elif a.adam is not None:
         kw["adam"] = a.adam
-    run(preset(a.task, legacy=a.legacy, seed=a.seed, engine=a.engine, **kw))
+    run(preset(a.task, legacy=a.legacy, seed=a.seed, engine=a.engine, **kw), out=a.out)
 
 
 if __name__ == "__main__":

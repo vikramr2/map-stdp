@@ -3,7 +3,7 @@
 # compact, column-aligned numpy style, and a repo-wide reformat would bury real changes in the diff.
 line-length = 120
 target-version = "py311"
-extend-exclude = ["docs/superneuro", "experiments/results", "logs", "papers", ".codegraph"]
+extend-exclude = ["docs/superneuro", "docs/iterations", "experiments/results", "logs", "papers", ".codegraph"]
 
 [lint]
 select = ["E", "F", "W", "I", "B"]

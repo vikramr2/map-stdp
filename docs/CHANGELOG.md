@@ -2,7 +2,60 @@
 
 This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. The project is research, so entries are dated rather than versioned. Record decisions and reversals here as well as file changes.
 
+## 2026-10-24
+
+### Added (explainer `docs/neuron-variants.md` and the LIF walk diagnostic)
+
+- **`docs/neuron-variants.md` (new):** a plain-language guide to Map-STDP on the four engines (flow, branching, LIF, QIF). It covers what the rule assumes (pairings in proportion to link flow, flow matching the walk, subcriticality), how each engine meets those assumptions, the limitations of LIF and QIF, a side-by-side table, and a glossary. It explains the derivation and does not replace it.
+- **LIF diagnostic** (frozen weights, `docs/iterations/013-tdstdp-backbone.md` §13; pre-registration, scripts and text outputs archived in `docs/iterations/013-lifdiag/`):
+  - Model v4's recurrent network on the TD-STDP LIF fails the walk checks as it is. With input noise of 2–4 mV/√ms it passes subcriticality, the structural-rule direction (cos 0.94–0.95) and settling, but no operating point makes the pairing count proportional (slope 0.5–0.75), so task credit is 20–35% off.
+  - On trained, nearly sealed weights the structural rule loses direction even on the branching engine (cos 0.44–0.89), from module-level co-fluctuation in κ on cross-module synapses. This needs a closed-loop check.
+- `ruff.toml` excludes `docs/iterations` (archived diagnostic scripts).
+- `CLAUDE.md` lists `docs/neuron-variants.md` under Docs.
+
+### Changed (`reports/tdstdp-baseline/`: CartPole Adam groups dropped)
+
+- **Decision (user):** `CartPole_adam_lif` and `CartPole_adam_branching` are dropped from the reported baseline. Both solved 0/20, because the authors' Adam step (the per-ms SGD η) is 40–160× LunarLander's for CartPole and collapses the policy at once. CK report no CartPole Adam configuration, and CartPole solves without Adam (20/20 on `lif`).
+- `experiments/report.py`: studies take a `dropped` map (group → reason). `summarize` leaves those groups out of `summary.csv` and the tables, and lists them under "Dropped groups". Their run files stay in `runs/`.
+- The study README has a dated amendment, and `summary.csv` and `summary.md` were regenerated. No other group, gate or statistic changed. 9 tests pass and ruff is clean.
+
 ## 2026-10-23
+
+### Added (final-results layout and the reported TD-STDP baseline, `reports/tdstdp-baseline/`)
+
+- **Layout (decided):**
+  - `experiments/results/` is now, by documentation, the intermediates store: every dev, tuning and diagnostic run, and the default output of every CLI. No file was moved or renamed.
+  - New top-level `reports/<study>/` holds only final reported outputs:
+    - `README.md`, the pre-registration;
+    - `manifest.json`: git HEAD, the sha256 of the uncommitted code in `mapstdp/` and `experiments/` (untracked files included, results excluded), with `code.patch`; versions; per-run commands;
+    - `runs/<group>/s<seed>.json`;
+    - `summary.csv` and `summary.md`.
+  - Checkpoints and partials there are gitignored.
+- **Code:**
+  - New `experiments/report.py`: `run <study> [--workers N]` (launch, skip finished runs, resume checkpointed ones, refuse on a code-state change) and `summarize <study>` (from `runs/` only). Studies are declared in `STUDIES`.
+  - `experiments/tdstdp.py`:
+    - `--out PATH` (default unchanged);
+    - `group_stats`, factored out of `summary()`. The `--summary` output is byte-identical before and after.
+  - New `tests/test_report.py`: `summarize` on a tiny fake study gives the expected csv.
+  - Golden is bit-identical, 9 tests pass and ruff is clean.
+- **Docs:**
+  - `CLAUDE.md`: the results layout, the `report` commands, and the trap "final numbers come only from `reports/`; never hand-copy results there".
+  - Record 013: new §12, and a status line. The E1′, E3′, E4′ and S1–S3 numbers stay as development results.
+  - Fixed three `\times` in record 013 §5.2 that had been corrupted to a tab followed by `imes`.
+- **Study `tdstdp-baseline`** (pre-registered in its README):
+  - Settings: the authors'-code path, B = 20, `--fast`, fresh seeds.
+  - CartPole: {no Adam, Adam} × {lif, branching}, seeds 1000–1019.
+  - LunarLander: {Adam, `--sgd`} × {lif, branching}, seeds 1000–1009.
+  - 120 runs, 7.3 h, 0 resumes.
+  - **Gates:**
+    - CartPole no-Adam lif: 20/20, pass;
+    - LunarLander Adam lif: 8/10, pass.
+  - Reported:
+    - CartPole branching: 5/20.
+    - CartPole Adam: 0/20 on both engines. The authors' Adam step equals the SGD η, which collapses CartPole; this is not a code fault, because B = 1 behaves the same.
+    - LunarLander Adam branching: 6/10.
+    - LunarLander SGD: 0/10 on both engines.
+  - The numbers are in `reports/tdstdp-baseline/summary.md`.
 
 ### Added (iteration 013: TD-STDP speed-ups and the flow limit, record §10–§11)
 

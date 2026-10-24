@@ -14,6 +14,7 @@
   - **E4′:** without Adam it solves 0/10.
   - **Speed-ups (§10–§11):** the no-Adam block sum passes its gate (7× faster), and `--fast` is 1.8× faster with identical returns.
   - **Flow limit:** solves CartPole 20/20, so escape noise is what fails branching's strict $T_s$.
+  - **Reported baseline:** `reports/tdstdp-baseline/` (§12). The numbers in §5 and §11 are development results.
 
 ## 1. Goal
 
@@ -182,9 +183,9 @@ Episodes are pooled over the 16 copies, and runs stop when solved with at least 
   - **$T_s$ is 2.6× CK's** (6774 against 2575), with 3/10 unsolved against CK's 10/10.
   - Candidate causes, none tested: B = 20 rather than the authors' per-ms Adam (§3.1 item 6); LunarLander-v3 instead of v2; the branching escape noise (CartPole: §11.3).
 - **E4′ against E3′** (Mann–Whitney):
-  - $T_f$: p $1.8 	imes 10^{-4}$;
-  - $T_s$ (unsolved = 10001): p $2.2 	imes 10^{-3}$;
-  - last-100 return: p $3.3 	imes 10^{-4}$.
+  - $T_f$: p $1.8 \times 10^{-4}$;
+  - $T_s$ (unsolved = 10001): p $2.2 \times 10^{-3}$;
+  - last-100 return: p $3.3 \times 10^{-4}$.
   - Its η came from the pre-registered rule: 1.0–1.4e-3 mV for the critic and 1.5–2.0e-3 for the actor, per seed. Without Adam, and with that η, the rule learns to about 0 return and plateaus.
 - **LIF arm** (reported only):
   - Seeds 0–3 solved 3/4, with $T_s$ 2635, 1386 and 8236; seed 1 reached 10000 unsolved.
@@ -304,6 +305,7 @@ python -m experiments.tdstdp --task CartPole --seed S [--engine lif] [--block 20
 python -m experiments.tdstdp --task LunarLander --seed S --episodes 400 [--fast]     # S2 (§10), S = 100..104
 python -m experiments.tdstdp --task CartPole --seed S --engine flow                 # S3 (§10), S = 60..79
 python -m experiments.tdstdp --summary
+python -m experiments.report run tdstdp-baseline --workers 40   # the reported baseline (§12) -> reports/tdstdp-baseline/
 # pre-audit runs (§5.3), reproducible bit for bit
 python -m experiments.tdstdp --legacy --task CartPole --seed S                   # E1, S = 0..19
 python -m experiments.tdstdp --legacy --task CartPole --seed S --engine lif      # true-LIF control (also lif-snm), S = 0..4
@@ -484,3 +486,62 @@ All runs are from §10's pre-registration and are in `--summary`. Columns are as
 - **Flow against LIF** (not pre-registered): p 0.034 on $T_s$, so flow is somewhat slower to the strict criterion. On return, p 0.52.
 - **Reading:** removing the escape noise, and nothing else, turns 4/20 solved into 20/20. Escape noise is what fails branching's strict $T_s$ and causes most of its collapses.
   - One flow run (seed 75) still collapsed after solving, so the absorbing state is reachable without neuron noise too: the action sampling remains stochastic.
+
+## 12. Reported baseline: `reports/tdstdp-baseline/`
+
+- **The reported TD-STDP baseline is the study in `reports/tdstdp-baseline/`.**
+  - Its design and gates were pre-registered in its `README.md` before launch (2026-10-23, 22:37 EDT).
+  - Its numbers are in `summary.md` and `summary.csv`, built by `python -m experiments.report summarize tdstdp-baseline` from the raw runs there only.
+  - The E1′, E3′, E4′ and S1–S3 numbers above are development results. They stay in `experiments/results/`, and the paper does not cite them.
+- **Design:**
+  - The authors'-code path with B = 20 and `--fast` (both passed in §11), on fresh seeds (CartPole 1000–1019, LunarLander 1000–1009).
+  - CartPole crosses {no Adam (paper config), Adam} with {`lif`, branching}.
+  - LunarLander crosses {Adam (paper config), no Adam with the E4′ η rule} with {`lif`, branching}.
+  - The Mann–Whitney reference is the paper config on `lif` for each task.
+  - Gates: CartPole no-Adam `lif` at least 18/20 solved, and LunarLander Adam `lif` at least 6/10.
+- **Code state:** one, recorded in its `manifest.json` (HEAD `675e49e` plus `code.patch`: `--out`, `tdstdp.group_stats`, `experiments/report.py`).
+- **Run:** 120 runs, local, 40 workers, 2026-10-23 22:38 to 2026-10-24 05:57 EDT (7.3 h), 0 failures, 0 resumes.
+- **Gate outcomes** (from `summary.md`):
+  - G1 (CartPole no-Adam `lif`, at least 18/20): **pass**, 20/20.
+  - G2 (LunarLander Adam `lif`, at least 6/10): **pass**, 8/10.
+- **Note on the CartPole Adam arm** (post hoc, a reading of the declared config, not a code fault):
+  - It solves 0/20 on both engines, with returns of 11–15.
+  - The authors' Adam steps ν mV per ms, so with CartPole's SGD η (0.005 and 0.01 mV) the step is 40–160× LunarLander's.
+  - A scratchpad check at B = 1 without `--fast` (seeds 1000–1001, 60 episodes) gives the same constant-action returns of 9–10 from the first episodes. B = 20 and `--fast` are therefore not the cause.
+  - **Dropped (2026-10-24, user's decision):** CK report no CartPole Adam configuration and CartPole needs no Adam, so both CartPole Adam groups are left out of the reported baseline. Their runs stay in `runs/` (study README, amendment).
+
+## 13. Diagnostic: the Map-STDP walk on the TD-STDP LIF neuron (frozen weights)
+
+Run 2026-10-24, scratch only (no closed loop, nothing in `reports/`). Pre-registration, scripts and text outputs are archived in `docs/iterations/013-lifdiag/` (`PREREG.md`, two amendments logged before the affected data was read). The scripts' paths point at the session scratchpad, so they need editing to rerun. The plain-language reading is in `docs/neuron-variants.md` §5.
+
+- **Question.** Does the derivation's linear-response walk (§2.1, K1–K9) hold for model v4's network, with recurrence, simulated on the TD-STDP LIF (τ 100 ms, threshold 13 mV above rest, reset, 1 ms steps, W in mV)?
+- **Setup.**
+  - Recurrent weights are χ·T in mV, with χ = 10.4 mV for a nominal offspring mean of 0.8. Stimulus: Poisson input at 4 mV per spike and rate R·v, with R = 21.5 (CartPole) and 41.9 (LunarLander), giving rates of 0.12–0.22/ms.
+  - Gains come from open-loop replay with common random numbers.
+  - Four networks: CartPole and LunarLander, at initialisation and with trained flow-v4 weights.
+  - Frames: 200 ms reset and 20 ms persistent. The branching engine is the control.
+- **Results on initial weights** (reset frames; ranges over CartPole and LunarLander; ✓ = pass at the pre-registered threshold):
+
+| Operating point | TV vs K3 (≤ 0.05) | κ vs $J^\Lambda$ corr / slope | ρ (gain CV) | rule cos (≥ 0.9) | κΦ / (4b) cos (≥ 0.9) | settle, cold / switch (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| branching | 0.02 ✓ | 0.98 / 0.87 ✓ | 0.80 (0.03) ✓ | 0.99 ✓ | 0.98 / 0.73–0.79 | 6 / 1 ✓ |
+| LIF, deterministic | 0.20–0.28 | 0.57–0.76 / 0.55–0.70 | 0.65 (0.31) ✓ | 0.88–0.90 | 0.64–0.80 / 0.55–0.73 | 82–118 / 1 |
+| LIF, σ = 1 mV/√ms | 0.04–0.08 | 0.66–0.84 / 0.54–0.72 | 0.65 ✓ | 0.96 ✓ | 0.70–0.83 | 20–21 / 1 |
+| LIF, σ = 2 | 0.03–0.07 | 0.64–0.82 / 0.51–0.71 | 0.65 ✓ | 0.95 ✓ | 0.68–0.81 | 15–16 / 1–2 ✓ |
+| LIF, σ = 4 | 0.04–0.09 | 0.65–0.81 / 0.50–0.68 | 0.60 ✓ | 0.94–0.95 ✓ | 0.67–0.80 | 4–5 / 2–4 ✓ |
+| LIF, escape Δ = 2 mV | 0.13–0.14 | 0.66–0.77 / 0.58–0.72 | 0.64 ✓ | 0.92 ✓ | 0.64–0.67 | 16–18 / 1 ✓ |
+| LIF, χ = 6.5 mV | 0.35–0.37 | 0.49–0.79 | 0.47 ✓ | 0.68–0.82 | 0.59–0.86 | never |
+| LIF, χ = 12.35 mV | 0.24 | 0.60–0.67 / 0.64 | 0.68 ✓ | 0.85 | 0.63–0.70 | 34–37 / 1 |
+
+- **No LIF operating point passes every check.** The best, σ = 2–4 mV/√ms, passes subcriticality, the rule direction and settling, and passes the flow check on CartPole only. It fails the pairing and task-credit checks on every network.
+- **Mechanism.**
+  - The cascade is weaker than nominal (about 0.64 offspring per spike, against 0.8), because of leak and reset.
+  - The lag-1 pairing count carries one factor per postsynaptic neuron (its window efficiency) and one per presynaptic neuron (regularity). Together they explain 98–99.5% of its variance with noise, but make it non-proportional.
+- **Trained weights** (flow-v4 weights, nearly sealed modules).
+  - Every engine fails the rule and credit checks, the branching control included: rule cos 0.44–0.89, κΦ 0.04–0.47. The split-half reliability is 0.89–0.99, so this is bias, not noise.
+  - Cause: on weak cross-module synapses, κ picks up whole-module co-fluctuation that does not scale with the synapse, and $M^\ast$ amplifies it.
+  - Appendix A samples pairings in proportion to J, so it cannot detect this. Restricted to within-module synapses, the rule cos is 0.87–0.93.
+- **Reading.**
+  - The deterministic LIF does not support the walk.
+  - With input noise of about 2 mV/√ms, the structural (map) term is usable, with χ raised to about 13 mV or the K3 walk taken with measured gains. The task term is then empirical-only, with credit 20–35% off.
+  - The trained-weight bias on the branching engine needs a closed-loop check.
