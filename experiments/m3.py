@@ -9,7 +9,14 @@ MountainCar, Acrobot and LunarLander, flow against spiking with H parallel heads
     Eq. 1g); g<g> (--gamma, iteration 009); dbc (--readout diffbound, Eq. 1h, spiking, iteration 010);
     enc<SPEC>, crit<SPEC>, ce<c>[H<f>] (--encoder, --critic-layer, --c-ent [--ent-target]: iteration 012, flow);
     eta<E> (--eta); qif[-<field><value>...] (--engine qif and its QIFParams overrides, iteration 013, e.g. qif-tau_s0
-    -inhma-warm0-lags3); ep<E> (--episodes off the task's default).
+    -inhma-warm0-lags3); lif[-<field><value>...] (--engine lif, rule emergent only, and its LIFParams overrides
+    --lif-<field>); emergent[-ot<T>][-ebmod][-stk] (--rule emergent, Eqs. 8-12, and its options --obs-tau,
+    --ebar module, --step-stat kappa); ls<x>, es<x> (--lam-scale, --eta-scale), ms (--match-scales); ep<E> (--episodes
+    off the task's default).
+  Run plumbing: --out PATH (result file; its .ckpt.npz checkpoint alongside, resumed if present), --save-model PATH
+    (compressed float32 .npz of W at episode 0, every 250 episodes and the end, with mask, m, roles, config, u),
+    --match-scales (m2.match_scales: lam and eta scales from the RMS of the structural and task increments at the
+    initial W against flow's; printed, applied and recorded in the result).
   Model v4 is the flag set --td-norm 0.04 --p-cc 0 --beta-kappa 0.01 --beta-max 16 --eta 5 (docs/model.md).
   The beta ramp, the beta mean reversion / trace signal / step cap, the score-unit ablation, the TD(lambda) critic,
   the rich and net critics and the usage term (former Eq. 4i) were removed in iteration 013 (not adopted); their result
@@ -22,6 +29,7 @@ Heads: H independent spiking replicas of the network on the same W (tasks share 
 network). Their spikes are pooled: pi-hat from summed counts, kappa the sum of per-head covariance counts divided by
 the total spikes, one race over all heads (still Eq. 1d). H = 1 is the M2 spiking agent."""
 import argparse
+import dataclasses
 import glob
 import json
 import pathlib
@@ -30,7 +38,7 @@ import numpy as np
 
 from experiments import m2
 from experiments.tasks import TASKS
-from mapstdp import core, qif
+from mapstdp import core, lif, qif
 from mapstdp import spiking as sp
 
 LA_BETA, HEADS = 0.3, (1, 2, 4, 8, 16)
@@ -104,20 +112,23 @@ def nondefault(r):
     iteration 013 (beta_end, score_unit, beta_eps, beta_signal, beta_step_cap, critic_lambda, c_use), so their
     committed files stay out of the baseline groups."""
     eta0 = m2.ETA if r["backend"] == "flow" else r["params"]["eta_task"]
-    return r.get("lam", 0.05) != 0.05 or r.get("p_cc", 0.1) != 0.1 or r.get("beta", 1.0) != 1.0 or \
+    return r.get("lam", 0.05) != 0.05 or r.get("p_cc", 0.1) != 0.1 or r.get("p_cross", 0.05) != 0.05 or \
+        r.get("beta", 1.0) != 1.0 or \
         r.get("beta_end") is not None or \
         r.get("eta_task", eta0) != eta0 or bool(r.get("beta_kappa")) or bool(r.get("score_unit")) or \
         bool(r.get("beta_eps")) or r.get("beta_signal", "episode") != "episode" or bool(r.get("beta_step_cap")) or \
         bool(r.get("critic_lambda")) or r.get("gamma", m2.GAMMA) != m2.GAMMA or \
         r.get("ablate", {}).get("tau_e", m2.TAU_E) != m2.TAU_E or r.get("readout", "race") != "race" or \
         bool(r.get("encoder_spec") or r.get("critic_layer") or r.get("c_ent") or r.get("c_use")) or \
-        r.get("engine") == "qif" or \
+        r.get("engine") in ("qif", "lif") or r.get("rule", "v4") != "v4" or r.get("lam_scale", 1.0) != 1.0 or \
+        r.get("eta_scale", 1.0) != 1.0 or \
         r["episodes"] != TASKS[r.get("task", "CartPole")].episodes
 
 
 def variant_tokens(a):
     """File-name tokens of the variants (module doc), in file-name order; empty on the defaults."""
     t = ([f"lam{a.lam:g}"] if a.lam != 0.05 else []) + ([f"pcc{a.p_cc:g}"] if a.p_cc != 0.1 else [])
+    t += [f"px{a.p_cross:g}"] if a.p_cross != 0.05 else []
     t += [f"b{a.beta:g}"] if a.beta != 1.0 else []
     t += [f"bk{a.beta_kappa:g}m{a.beta_max:g}"] if a.beta_kappa else []
     t += [f"g{a.gamma:g}"] if a.gamma != m2.GAMMA else []
@@ -126,7 +137,13 @@ def variant_tokens(a):
     t += [f"ce{a.c_ent:g}" + (f"H{a.ent_target:g}" if a.ent_target is not None else "")] if a.c_ent else []
     t += [f"eta{a.eta:g}"] if a.eta is not None else []
     t += [qif_token(a)] if a.engine == "qif" and a.backend == "spiking" else []
+    t += [lif_token(a)] if a.engine == "lif" and a.backend == "spiking" else []
     t += [qif_token(a).replace("qif", "q", 1)] if a.backend == "mpr" and qif_overrides(a) else []
+    if a.rule != "v4":
+        t += ["-".join([a.rule] + ([f"ot{a.obs_tau:g}"] if a.obs_tau else [])
+                       + (["ebmod"] if a.ebar == "module" else []) + (["stk"] if a.step_stat == "kappa" else []))]
+    t += ([f"ls{a.lam_scale:g}"] if a.lam_scale != 1.0 else []) + ([f"es{a.eta_scale:g}"] if a.eta_scale != 1.0 else [])
+    t += ["ms"] if a.match_scales else []
     return t + ([f"ep{a.episodes}"] if a.episodes and a.episodes != TASKS[a.task].episodes else [])
 
 
@@ -145,6 +162,26 @@ def qif_token(a):
     """File-name token of --engine qif: qif, then -<field><value> per override."""
     o = qif_overrides(a)
     return "-".join(["qif", *(f"{k}{v if isinstance(v, str) else format(v, 'g')}" for k, v in o.items())])
+
+
+LIF_FLAGS = {"tau_m": float, "dt": float, "tau_ref": float, "mu_bg": float, "sigma_V": float, "delta_V": float,
+             "rho0": float, "reset": int, "chi": float, "a_ext": float, "ext_rate": float, "k": int, "window": float,
+             "counter": str, "omega": float, "gain_tau": float, "reg_tau": float, "reg_min": int, "warm": int,
+             "warmup": int, "lam_scale": float, "eta_scale": float,
+             "eps_h_scale": float}  # --engine lif: LIFParams fields (--lif-<field>)
+
+
+def lif_overrides(a):
+    """LIFParams overrides given on the command line (--lif-<field>), in LIF_FLAGS order (int flags of bool fields
+    become bools)."""
+    o = {k: getattr(a, f"lif_{k}") for k in LIF_FLAGS if getattr(a, f"lif_{k}") is not None}
+    return {k: bool(v) if isinstance(getattr(lif.LIFParams(), k), bool) else v for k, v in o.items()}
+
+
+def lif_token(a):
+    """File-name token of --engine lif: lif, then -<field><value> per override."""
+    o = {k: getattr(a, f"lif_{k}") for k in LIF_FLAGS if getattr(a, f"lif_{k}") is not None}
+    return "-".join(["lif", *(f"{k}{v if isinstance(v, str) else format(v, 'g')}" for k, v in o.items())])
 
 
 def summary():
@@ -197,9 +234,12 @@ def main():
     ap.add_argument("--heads", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--episodes", type=int, default=None, help="default: the task's (tasks.TASKS)")
-    ap.add_argument("--engine", choices=("numpy", "snm", "qif"), default="numpy",
+    ap.add_argument("--engine", choices=("numpy", "snm", "qif", "lif"), default="numpy",
                     help="spiking engine: numpy = sp.run_heads (SuperNeuroMAT's raster, batched over heads); "
-                         "qif = mapstdp.qif (Proposal, iteration 013)")
+                         "qif = mapstdp.qif (Proposal, iteration 013); lif = mapstdp.lif (noisy LIF, --rule emergent)")
+    for k, typ in LIF_FLAGS.items():
+        ap.add_argument(f"--lif-{k.replace('_', '-')}", dest=f"lif_{k}", type=typ, default=None,
+                        help=f"--engine lif: LIFParams.{k} (default {getattr(lif.LIFParams(), k)!r})")
     for k, typ in QIF_FLAGS.items():
         ap.add_argument(f"--q-{k.replace('_', '-')}", dest=f"q_{k}", type=typ, default=None,
                         help=f"--engine qif: QIFParams.{k} (default {getattr(qif.QIFParams(), k)!r})")
@@ -210,6 +250,8 @@ def main():
     ap.add_argument("--tau-e", type=float, default=None, help="ablation: eligibility time constant (default 3)")
     ap.add_argument("--lam", type=float, default=0.05, help="structural (map) term rate; 0 = map-term ablation")
     ap.add_argument("--p-cc", type=float, default=0.1, help="controller->controller connection probability")
+    ap.add_argument("--p-cross", type=float, default=0.05,
+                    help="cross-module (non-routing) connection probability; 0 = sealed modules (iteration 014)")
     ap.add_argument("--beta", type=float, default=1.0, help="sharpened policy exponent (Eq. 1e, Proposal; flow)")
     ap.add_argument("--eta", type=float, default=None, help="task rate (default: model v3's)")
     ap.add_argument("--beta-kappa", type=float, default=0.0, help="causal adaptive beta gain (Eq. 1g; 0 = off)")
@@ -222,6 +264,19 @@ def main():
     ap.add_argument("--critic-layer", default=None, help="separate critic RF layer spec (Eq. 4c'', iteration 012)")
     ap.add_argument("--c-ent", type=float, default=0.0, help="entropy term coefficient (Eq. 4h; 0 = off)")
     ap.add_argument("--ent-target", type=float, default=None, help="adapt c_ent toward H(P~) = this x log|A|")
+    ap.add_argument("--rule", choices=("v4", "emergent"), default="v4",
+                    help="plasticity rule: v4 (models v3/v4) or emergent (observed walk + signed counter, Eqs. 8-12)")
+    ap.add_argument("--obs-tau", type=float, default=0.0,
+                    help="emergent, spiking: running averages of the walk statistics over this many frames (0 = frame)")
+    ap.add_argument("--ebar", choices=("obs", "module"), default="obs", help="emergent ablation: structural baseline")
+    ap.add_argument("--step-stat", choices=("c", "kappa"), default="c",
+                    help="emergent ablation: structural step factor")
+    ap.add_argument("--lam-scale", type=float, default=1.0, help="structural rate x this (any engine)")
+    ap.add_argument("--eta-scale", type=float, default=1.0, help="task rate x this (any engine)")
+    ap.add_argument("--match-scales", action="store_true",
+                    help="set --lam-scale/--eta-scale by m2.match_scales (RMS match to flow at the initial W)")
+    ap.add_argument("--out", default=None, help="result path (default experiments/results/<name>.json)")
+    ap.add_argument("--save-model", default=None, help="write the trained model (.npz, m2.save_model) here")
     ap.add_argument("--summary", action="store_true")
     ap.add_argument("--ablations", action="store_true", help="summary of the flow learning-rule ablations")
     ap.add_argument("--fidelity", action="store_true")
@@ -244,11 +299,23 @@ def main():
     variant = "_".join(variant + variant_tokens(a))
     cfg = m2.Config(a.backend, "exempt", a.lam, a.seed, beta=a.beta, eta=a.eta, eta_tau=a.eta_tau, la_beta=a.la_beta,
                     task=a.task, heads=a.heads, engine=a.engine, td_norm=a.td_norm, ablate=ablate, p_cc=a.p_cc,
-                    beta_kappa=a.beta_kappa, beta_max=a.beta_max, gamma=a.gamma, readout=a.readout,
+                    p_cross=a.p_cross, beta_kappa=a.beta_kappa, beta_max=a.beta_max, gamma=a.gamma, readout=a.readout,
                     encoder=a.encoder, critic_layer=a.critic_layer, c_ent=a.c_ent, ent_target=a.ent_target,
-                    qif=qif_overrides(a) if a.engine == "qif" or a.backend == "mpr" else {})
+                    qif=qif_overrides(a) if a.engine == "qif" or a.backend == "mpr" else {}, rule=a.rule,
+                    lif=lif_overrides(a) if a.engine == "lif" else {},
+                    lam_scale=a.lam_scale, eta_scale=a.eta_scale, obs_tau=a.obs_tau, ebar=a.ebar,
+                    step_stat=a.step_stat)
+    scales = None
+    if a.match_scales:
+        assert (a.q_lam_scale or 1.0) == 1.0 and (a.q_eta_scale or 1.0) == 1.0, "--match-scales: QIFParams scales 1"
+        assert (a.lif_lam_scale or 1.0) == 1.0 and (a.lif_eta_scale or 1.0) == 1.0, "--match-scales: LIFParams scales 1"
+        scales = m2.match_scales(cfg)
+        cfg = dataclasses.replace(cfg, lam_scale=cfg.lam_scale * scales["lam_scale"],
+                                  eta_scale=cfg.eta_scale * scales["eta_scale"])
+        print("match_scales: " + " ".join(f"{k} {v:.4g}" for k, v in scales.items()), flush=True)
     r = m2.run(cfg, a.episodes or TASKS[a.task].episodes,
-               name=name(a.task, a.backend, a.heads, a.la_beta, a.seed, a.td_norm, variant))
+               name=name(a.task, a.backend, a.heads, a.la_beta, a.seed, a.td_norm, variant), out=a.out,
+               save_model_path=a.save_model, scales=scales)
     print(f"done: last100 {np.mean(r['returns'][-100:]):.1f}, {r['frames']} frames, {r['ms_per_frame']:.2f} ms/frame")
 
 

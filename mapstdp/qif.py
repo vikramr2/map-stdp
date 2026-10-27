@@ -17,11 +17,16 @@ Frames: k bins of `bin` ms; the raster is binned (k x (H N) bool, E only), so sp
 Order inside one step s (matches Brian2's schedule groups -> thresholds -> synapses -> resets -> end): integrate
   (theta clamped at -pi, _rk2), threshold/reset (theta wrapped mod 2 pi, at most one spike per step), deliver recurrent
   spikes emitted at s - D and the external pulses of step s, apply the jumps.
+Rule 'emergent' (derivation Eqs. 8, 11b): run_qif(inputs=True) also returns each E neuron's measured frame input
+  (frame_inputs, no extra draws, same raster); window_pairs gives the raw pair counts of the walk in the pairing window
+  (E neurons only: the pools are fixed and outside W, so not in the walk), mean_counter the counter
+  c = tau G_i b_ij n_j with G from GainEstimator (regression of rate on the fresh-noise current across frames).
 Only numpy is required; numba (if importable) runs the batched kernel, brian2 is imported by brian_frame only.
 Self-check: python -m mapstdp.qif [--brian2] (the Brian2 part runs in the map-stdp-brian2 env)."""
 import dataclasses
 import math
 import sys
+import time
 
 import numpy as np
 
@@ -250,16 +255,49 @@ else:
     _kernel = _kernel_np
 
 
-def run_qif(W, v, H, rng, eta, state, p, m=None, roles=None, kernel=None):
+def run_qif(W, v, H, rng, eta, state, p, m=None, roles=None, kernel=None, inputs=False):
     """Frame of H heads on the current W (k x H N bool E raster, head h in columns h N .. (h + 1) N - 1, as
     sp.run_heads). eta, state: (H, M) arrays of the agent (M = N + inhibitory neurons; m, roles needed for pools).
-    Draws the teleportation pulses from rng; mutates state."""
+    Draws the teleportation pulses from rng; mutates state.
+    inputs=True: returns (S, inp) with inp = frame_inputs(...) (the measured input of every E neuron; the same draws and
+    the same raster: the kernel records all M neurons and the E columns are returned)."""
     N = len(W)
     A = weights(W, p, pools(m, roles, p.inh) if p.inh else ())
     ev = draw_events(v, H, N, len(A), rng, p)
-    S = np.zeros((p.k, H, N), bool)
+    if not inputs:
+        S = np.zeros((p.k, H, N), bool)
+        (kernel or _kernel)(*state, eta, A, *ev, S, p.nsub, p.D, p.dt, p.tau, p.tau_s, p.a_ext)
+        return S.reshape(p.k, H * N)
+    I0, b0 = state[1].copy(), state[2].sum(0)
+    S = np.zeros((p.k, H, len(A)), bool)
     (kernel or _kernel)(*state, eta, A, *ev, S, p.nsub, p.D, p.dt, p.tau, p.tau_s, p.a_ext)
-    return S.reshape(p.k, H * N)
+    return S[:, :, :N].reshape(p.k, H * N), frame_inputs(S, A, ev, I0, b0, state, N, p)
+
+
+def frame_inputs(S, A, ev, I0, b0, state, N, p):
+    """Measured input of a frame per head and E neuron, from quantities the neuron receives (no rng):
+      x_rec: frame-mean recurrent + fresh-noise current, [tau_s (I_s(0) - I_s(T)) + tau sum_j A_ji n^del_j +
+             integral of the noise] / T, with n^del the spikes delivered in the frame (in flight at the start, plus
+             emitted, minus in flight at the end; E and I neurons). The RK2 update of I_s makes the first two terms
+             exactly the summed midpoint current the theta step integrates; with tau_s = 0 the kicks are jumps of
+             area tau w, the same second term;
+      n_ext: teleportation pulses received;  x: x_rec + tau a_ext n_ext / T (each pulse a jump of area tau a_ext);
+      xi: the frame-mean fresh-noise current alone (zero mean, variance sigma^2 tau / T; GainEstimator's regressor);
+      n: E spike counts (H, N);  T: frame length (ms)."""
+    H, M = S.shape[1], S.shape[2]
+    T = p.k * p.bin
+    n_all = S.sum(0).astype(float)
+    delivered = b0 + n_all - state[2].sum(0)
+    area = np.einsum("hj,ji->hi", delivered, A) * p.tau
+    if p.tau_s > 0:
+        area += p.tau_s * (I0 - state[1])
+    ptr, _, ev_i, xn = ev
+    xi = xn.sum(0) / len(xn)
+    area += xi * T
+    n_ext = np.zeros((H, M))
+    np.add.at(n_ext, (np.repeat(np.arange(H), np.diff(ptr)), ev_i), 1.0)
+    x_rec, n_ext = area[:, :N] / T, n_ext[:, :N]
+    return dict(x_rec=x_rec, n_ext=n_ext, x=x_rec + p.tau * p.a_ext * n_ext / T, xi=xi[:, :N], n=n_all[:, :N], T=T)
 
 
 def n_neurons(N, m, roles, p):
@@ -289,6 +327,91 @@ def pooled(S, H, p):
     from mapstdp import spiking as sp
     Sh = S.reshape(len(S), H, -1)
     return sp.pi_hat(Sh.sum(1)), sum(pairings(Sh[:, h], p)[2] for h in range(H)), int(S.sum())
+
+
+GAIN_TAU = 500.0  # frames: memory of the gain regression's running sums (exponential)
+GAIN_SHRINK = 1000.0  # frames: prior weight of the module gain in each neuron's gain (per-neuron data overtakes it
+#   after ~GAIN_SHRINK frames; measured: per-frame slope noise sd 0.04 / ms against a between-neuron sd of 0.001)
+GAIN_PRIOR = 5.0  # neuron-frames: prior weight of the MPR transfer gain in the module gain (used for the first frame)
+
+
+class GainEstimator:
+    """Per-neuron gain G = dr/dI of the E neurons of every head (rule 'emergent', Eq. 11b), by regression of the frame
+    rate r on the frame-mean fresh-noise current xi across frames (running sums over ~GAIN_TAU frames).
+    Why the noise and not the whole measured input: at the default operating point the mean input is dominated by the
+    pools' inhibition, which the neuron's own spikes recruit, so rate regressed on total input has the wrong sign
+    (-0.0004 against a finite-difference f-I slope of +0.0029 / ms on CartPole's initial W; E-input only: +18% bias,
+    corr 0.70 across neurons). The noise is exogenous and zero-mean, so its slope is unbiased (within 1%, corr 0.95).
+    Estimate, hierarchical shrinkage (both crossbar-native: per-neuron sums and a K-vector of module sums):
+      module  G_k  = (sum_{h, i in k} Sxr + GAIN_PRIOR v <G0>_k) / (sum_{h, i in k} Sxx + GAIN_PRIOR v),
+      neuron  G_hi = (Sxr_hi + GAIN_SHRINK v G_k) / (Sxx_hi + GAIN_SHRINK v),   clipped at 0,
+    Sxr = sum xi (r - rbar), Sxx = sum xi^2 (discounted by 1 - 1/GAIN_TAU per frame), v = sigma^2 tau / T the
+    expected per-frame variance of xi, G0 the MPR transfer gain at the measured input (transfer; with sigma = 0 there
+    is no instrument and G = the module mean of G0). G0 is a poor prior at fluctuation-driven points (~0 at the
+    default QIFParams, where the mean input is far below rheobase), but it carries weight for one frame only."""
+
+    def __init__(self, H, N, m, K, p):
+        self.m, self.K, self.n = np.asarray(m), K, 0
+        self.v = p.sigma ** 2 * p.tau / (p.k * p.bin)
+        self.sxr, self.sxx, self.rbar = np.zeros((H, N)), np.zeros((H, N)), np.zeros((H, N))
+
+    def gains(self, g0):
+        """(H, N) gain estimate from the sums so far, g0 (H, N) the prior (MPR transfer gain)."""
+        msum = lambda x: np.bincount(self.m, x.sum(0), self.K)  # noqa: E731
+        nk = np.bincount(self.m, minlength=self.K) * len(g0)
+        Gk = msum(g0) / nk  # module mean of the prior
+        if self.v == 0:  # no fresh noise: no instrument, the prior alone
+            return np.maximum(np.broadcast_to(Gk[self.m], g0.shape).copy(), 0.0)
+        Gk = (msum(self.sxr) + GAIN_PRIOR * self.v * Gk) / (msum(self.sxx) + GAIN_PRIOR * self.v)
+        return np.maximum((self.sxr + GAIN_SHRINK * self.v * Gk[self.m]) / (self.sxx + GAIN_SHRINK * self.v), 0.0)
+
+    def update(self, xi, r):
+        """Add one frame: xi (H, N) frame-mean noise current, r (H, N) frame rate (per ms)."""
+        if self.n == 0:  # the first frame only sets the rate baseline (an Sxx without Sxr would bias G to 0)
+            self.rbar = r.copy()
+        else:  # centred on the earlier frames' mean (independent of this frame's xi, so unbiased)
+            d = 1 - 1 / GAIN_TAU
+            self.sxr = d * self.sxr + xi * (r - self.rbar)
+            self.sxx = d * self.sxx + xi ** 2
+            self.rbar = self.rbar + (r - self.rbar) / min(self.n + 1, GAIN_TAU)
+        self.n += 1
+
+    STATE = ("sxr", "sxx", "rbar", "n")  # checkpoint arrays (m2.Agent.state)
+
+
+def prior_gain(inp, p):
+    """MPR transfer gain at the frame's measured input (transfer: phi at x_rec plus the pulses' forcing term)."""
+    return transfer(inp["x_rec"], inp["n_ext"] / inp["T"], p)[1]
+
+
+def window_pairs(S, H, p, tail=None):
+    """Raw pair counts of the QIF window (Eq. 8), summed over heads, cross-head pairs excluded: kappa[i, j] =
+    sum_t x_j(t) N_i(t, t + w] with the window of pairings (flat lags 1..p.lags, or with tau_plus > 0 the exponential
+    weights exp(-(lag - 1) / tau_plus)). tail carries the previous frame of a warm-started head: the last p.lags bins
+    (flat) or the presynaptic trace (exponential), so pairs that straddle the frame boundary are counted; None = no
+    earlier spikes (cold start). Returns (kappa (N, N) [post, pre], the tail for the next frame)."""
+    k = len(S)
+    S3 = S.reshape(k, H, -1).astype(float)
+    N = S3.shape[2]
+    if p.tau_plus <= 0:
+        L = p.lags
+        X = np.concatenate([np.zeros((L, H, N)) if tail is None else tail, S3])
+        kap = sum(np.tensordot(S3, X[L - lag:L - lag + k], ([0, 1], [0, 1])) for lag in range(1, L + 1))
+        return kap, X[-L:].copy()
+    g = np.exp(-1 / p.tau_plus)
+    tr = np.empty_like(S3)
+    tr[0] = 0.0 if tail is None else tail
+    for t in range(1, k):
+        tr[t] = S3[t - 1] + g * tr[t - 1]
+    return np.tensordot(S3, tr, ([0, 1], [0, 1])), S3[-1] + g * tr[-1]
+
+
+def mean_counter(S, W, H, G, p):
+    """Eq. 11b summed over heads: c_ij = tau b_ij sum_h G_hi n_hj, with b_ij = gain W_ij / d_j the kick (V units) j
+    gives i (weights) and n_hj the frame's spike counts. G (H, N). Excitatory W only (the pools are outside W)."""
+    n = S.reshape(len(S), H, -1).sum(0).astype(float)
+    b = p.gain * W / np.maximum(W.sum(0), 1e-12)
+    return p.tau * b * (G.T @ n)
 
 
 def coupling(A, groups):
@@ -543,6 +666,70 @@ def _copy(st):
     return tuple(x.copy() for x in st)
 
 
+def _check_counter(p, H=32, F=300, F_test=20, n_syn=40, n_fd=20, dI=0.5, seed=0):
+    """Rule 'emergent' self-check on a frozen CartPole-sized W (CLLAA, p_cc = 0), H heads, F warm frames on random
+    ring stimuli, the gain estimate updated every frame as in training. On the last F_test frames, with common random
+    numbers (stored state and events): the counter c (Eq. 11b, the estimate of that frame) against the direct offspring
+    of n_syn random synapses by removal (A[j, i] = 0, the change of i's spikes in the frame); the final gain estimate
+    against the finite-difference f-I slope (eta_i +- dI, all heads) of n_fd neurons; rates per module; the stability
+    monitor max Re lambda (Eq. 12, continuous form) of the module offspring Lambda^K. Returns a dict."""
+    from mapstdp import core
+    W, m, roles, mask = core.build_network((36, 16, 16, 16, 16), "CLLAA", p_cc=0.0, seed=seed)
+    rng = np.random.default_rng(seed)
+    N, K, T = len(W), len(roles), p.k * p.bin
+    pls = pools(m, roles, p.inh) if p.inh else ()
+    A = weights(W, p, pls)
+    M = len(A)
+    eta = lorentzian(rng, (H, M), p)
+    st, est, tail = init_state(eta, rng, p), GainEstimator(H, N, m, K, p), None
+    keep, ns, lam = [], np.zeros(N), []
+    for f in range(F):
+        ev = draw_events(core.stimulus(rng.random(), m, roles), H, N, M, rng, p)
+        s0, I0, b0 = _copy(st), st[1].copy(), st[2].sum(0)
+        S = np.zeros((p.k, H, M), bool)
+        _kernel(*st, eta, A, *ev, S, p.nsub, p.D, p.dt, p.tau, p.tau_s, p.a_ext)
+        inp = frame_inputs(S, A, ev, I0, b0, st, N, p)
+        SE = S[:, :, :N].reshape(p.k, H * N)
+        kraw, tail = window_pairs(SE, H, p, tail)
+        G = est.gains(prior_gain(inp, p))
+        est.update(inp["xi"], inp["n"] / T)
+        if f >= F - F_test:
+            c = mean_counter(SE, W, H, G, p)
+            nf = inp["n"].sum(0)
+            pk = np.bincount(m, nf, K) / nf.sum()
+            L = core.module_offspring(c / nf.sum(), pk, m, K)[0]
+            lam.append(np.linalg.eigvals(L).real.max())
+            keep.append((s0, ev, c, inp["n"].sum(0)))
+            ns += nf
+    pre, post = np.nonzero(mask.T)  # mask [post, pre]: pairs (j, i)
+    pick = rng.choice(len(pre), n_syn, replace=False)
+    cs, truth = np.zeros(n_syn), np.zeros(n_syn)
+    for q, (j, i) in enumerate(zip(pre[pick], post[pick])):
+        A2 = A.copy()
+        A2[j, i] = 0.0
+        for s0, ev, c, n0 in keep:
+            S = np.zeros((p.k, H, M), bool)
+            _kernel(*_copy(s0), eta, A2, *ev, S, p.nsub, p.D, p.dt, p.tau, p.tau_s, p.a_ext)
+            truth[q] += n0[i] - S[:, :, i].sum()
+            cs[q] += c[i, j]
+    Gh = est.gains(np.zeros((H, N)))
+    fd_idx = rng.choice(N, n_fd, replace=False)
+    Gfd = np.zeros(n_fd)
+    for q, i in enumerate(fd_idx):
+        for s0, ev, _, _ in keep:
+            for sgn in (1, -1):
+                et = eta.copy()
+                et[:, i] += sgn * dI
+                S = np.zeros((p.k, H, M), bool)
+                _kernel(*_copy(s0), et, A, *ev, S, p.nsub, p.D, p.dt, p.tau, p.tau_s, p.a_ext)
+                Gfd[q] += sgn * S[:, :, i].sum() / (2 * dI * T * H * len(keep))
+    rate = np.bincount(m, ns, K) / np.bincount(m, minlength=K) / (H * len(keep) * T) * 1e3
+    return dict(corr_c=float(np.corrcoef(cs, truth)[0, 1]), ratio_c=float(cs.sum() / truth.sum()),
+                corr_G=float(np.corrcoef(Gh[:, fd_idx].mean(0), Gfd)[0, 1]),
+                ratio_G=float(Gh[:, fd_idx].mean() / Gfd.mean()), G_fd=float(Gfd.mean()), rate_hz=rate,
+                lam_max=float(np.max(lam)), mpr_prior=float(prior_gain(inp, p).mean()))
+
+
 if __name__ == "__main__":
     p0 = QIFParams()
     cur, r, r0 = _check_fi(p0, _kernel)
@@ -583,6 +770,14 @@ if __name__ == "__main__":
         print(f"kernel vs numpy {kw}: {len(l1[0])} / {len(l2[0])} spikes, "
               f"matched within 1 bin {f:.4f}")
         assert len(l1[0]) > 50 and f >= 0.99 and abs(len(l1[0]) - len(l2[0])) <= 0.01 * len(l1[0])
+    t0 = time.time()
+    ck = _check_counter(p0)
+    print(f"emergent counter (Eq. 11b) vs synapse-removal offspring: corr {ck['corr_c']:.3f}, sum ratio "
+          f"{ck['ratio_c']:.3f}; gain vs FD f-I slope: corr {ck['corr_G']:.3f}, mean ratio {ck['ratio_G']:.3f} "
+          f"(FD {ck['G_fd'] * 1e3:.2f} Hz per unit, MPR prior {ck['mpr_prior'] * 1e3:.2g}); max Re lambda(Lambda^K) "
+          f"{ck['lam_max']:.3f}; rates (Hz) {np.round(ck['rate_hz'], 1).tolist()} [{time.time() - t0:.0f} s]")
+    assert ck["corr_c"] >= 0.75 and 0.7 <= ck["ratio_c"] <= 1.4 and 0.7 <= ck["ratio_G"] <= 1.4, ck
+    assert ck["lam_max"] < 1 and (ck["rate_hz"] > 0.5).all() and (ck["rate_hz"] < 100).all(), ck
     if "--brian2" in sys.argv:
         for kw in CASES:
             p = dataclasses.replace(p0, **kw)

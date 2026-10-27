@@ -1,5 +1,101 @@
 # Changelog
 
+## 2026-10-27
+
+### Changed (study `emergent-v4`, CartPole only; not launched)
+
+- `experiments/report.py`, `STUDIES["emergent-v4"]`:
+  - CartPole only (1500 episodes, seeds 2000–2019);
+  - arms on / off / sealed (`--lam 0 --p-cross 0`) on four engines, 12 groups, 240 runs;
+  - 8 heads.
+- `M3_ENGINE_FLAG` no longer fixes `--heads`; each study passes it.
+- Pairs take an optional family, `(a, b, family)`, with Holm applied within a family. On vs off is `primary`; on vs sealed is `sealed`.
+- The summary's pair table now has Group / Against / Family columns, and `experiments/structure.py` accepts 3-tuples and labels its pair table generically. The test is updated.
+- **Added:** `m2.BOUND_CAL_QIF[8]` (0.67–4.26), from `experiments.bound_cal --engine qif --heads 8` on the pilot014 flow CartPole models. The same models at 16 heads give 1.01–5.11, within 11% of `BOUND_CAL_QIF[16]`. Without it, QIF could not run diffbound at 8 heads.
+- `reports/emergent-v4/README.md` was rewritten as a draft pre-registration. It covers:
+  - P1 (AUC) and P2 (L_obs), on vs off, Holm over 4 engines;
+  - S, on vs sealed, its own Holm family;
+  - frozen-W returns and structure as secondary results;
+  - 32 workers, run from a frozen worktree.
+
+### Results (iteration 014, second pilot; development)
+
+- `docs/iterations/014-emergent-v4.md` §10: CartPole, 3 seeds × 500 episodes.
+  - The map term raises AUC on every spiking engine (branching 94 → 204, QIF 79 → 182, LIF 174 → 235) and lowers L_obs on all four. Flow is unchanged in AUC.
+  - Sealed (λ = 0, `--p-cross 0`) matches on for AUC, but on reaches lower L_obs than sealed on the spiking engines.
+- **Decided:**
+  - 8 heads adopted (same returns at half the cost);
+  - LIF 20 ms window harmless, not adopted;
+  - QIF homeostasis ×2 dropped.
+- **Reversal (user decision):** the LunarLander part of the pilot was cancelled; 7 runs were stopped with checkpoints. The `emergent-v4` study becomes CartPole-only, and LunarLander moves to the TD-STDP backbone study (iteration 015).
+
+### Changed (iteration 014 wording)
+
+- `docs/iterations/014-emergent-v4.md` §7: the sealed control is reframed as learned versus prescribed structure (sealing is the minimum-description structure for the given partition), not structure versus sealing. The readings now cover sealed ≈ on, on > sealed (with candidate mechanisms), sealed > on, and what a sealed fix of the collapse implies, given that routing pairs are exempt in both arms. No change to the pilot or study design.
+
+### Changed (canonical derivation: the emergent walk)
+
+- `docs/derivation.md` is rewritten from the user's emergent-walk drafts (`docs/derivation-guide-emergent.md`, `docs/derivation-details-emergent.md`, PDF). The walk is observed from spikes: pair counts κ set the walk and the baseline ē^obs, a signed counter c sets each synapse's step (Lemma E, Eq. 9; Theorem E, Eq. 10), and homeostasis is −ε_h (d_j − 1) π_j W_ij / d_j (Eq. 4d). Section §5 is now the four engines (flow, branching, LIF, QIF) with their counters (11a–11c), and §7 the E–I stability condition (12). The K-series Proposal (K1–K9) is dropped. The flow engine is the special case a = X = 0 and its rule is unchanged.
+- Equation map: 1–7, 4a–4h keep their meaning, rewritten for the observed walk (4b now uses the signed counter; 4d as above); new 8–12.
+- Corrections to the drafts: the column-sum stability bound with inhibition is max(χ_E, χ_I) G_max < 1, not the sum (D10 Step 4); homeostasis pulls d_j toward 1 rather than conserving it; the branching counter is bounded by n_j |b_ij| / 2θ rather than proportional to W_ij, so Dale's law holds for small steps, with the w_min clip in code.
+- **Open:** the mean counter (11b) and Eq. 4d make updates proportional to W_ij, which conflicts with the old crossbar rule against weight-proportional decay (§6, marked Open).
+- Neuroscientist review (accepted with changes, folded in): c is presynaptic arrival × postsynaptic sensitivity (voltage-based plasticity), Siegert gain and homeostasis are tagged abstractions, the module-activity signal is own-module plus global activity (not a neuromodulator), chance caps M* and pulls ē^obs toward 1 − p_m, running estimates of ē^obs and M* over 10–50 frames are allowed.
+- Checks (`/derivation-check`, new `fdcheck.py --emergent`, Appendix A F1–F4): Lemma E vs finite differences 3.8 × 10⁻⁷ (excitatory) and 3.7 × 10⁻⁷ (4 of 16 inhibitory); Theorem E cosine 1.0000000; reduction to the old Lemma 1.0 × 10⁻¹⁷; Monte Carlo of the sampled rule 0.999999 / 0.999998.
+### Added (code: the emergent-walk rule, behind `rule="emergent"`; default `"v4"` keeps `tests/golden.json` bit-identical)
+
+- `mapstdp/core.py`: `observed_walk` (Eq. 8, module rows only, silent columns fall back to T), `structural_update_emergent` (Eq. 4 with ḡ^obs), `homeostasis_update_emergent` (4d), `eligibility_step_emergent` (4b, one-hop credit from the observed walk), `module_offspring` (Eq. 12 monitor), `mstar_ceiling`, `lemma_e_grad` (Eq. 9); self-check adds Lemma E vs finite differences (4.4 × 10⁻⁷) and Theorem E.
+- `mapstdp/spiking.py`: `run_heads(..., return_drive=True)` (no extra draws, raster unchanged) and `branching_counters` (exact counter, Eq. 11a; firing probability clip(u/2θ, 0, 1), forced external spikes contribute 0). Monte Carlo on frozen branching W: cosine 0.999995 with −E_j W ⊙ ∇L (κ as the step: 0.907).
+- `experiments/m2.py`: Config `rule`, `lam_scale`, `eta_scale`, `obs_tau` (running observed-walk statistics), ablations `ebar` (`obs` | `module`) and `step_stat` (`c` | `kappa`); per-episode monitors (L_obs, M* and its chance ceiling, ē^obs, ρ(Λ̂^K), causal share, clip rate, silent frames, block weight shares); held-out L_obs in `evaluate`; `match_scales` (step sizes RMS-matched to flow at initial W); checkpoints every 50 episodes with resume (`resumes` in the result); `save_model` (W at episode 0, every 250 and final, float32 npz). Flow under `rule="emergent"` is bit-identical to v4.
+- `experiments/m3.py`: `--rule`, `--obs-tau`, `--ebar`, `--step-stat`, `--lam-scale`, `--eta-scale`, `--match-scales`, `--out`, `--save-model`.
+- `experiments/report.py`: studies take `runner` (`tdstdp` | `m3`); the m3 runner saves models under `reports/<study>/models/`, `summarize_m3` writes summary.csv, pairs.csv (Mann–Whitney with Holm per metric over declared pairs) and summary.md. tdstdp summaries are byte-identical (tested).
+- `tests/test_emergent_rule.py` (10 tests).
+- `mapstdp/lif.py` (new): noisy LIF engine, normalised units (θ = 1), τ_m 20 ms, dt 0.5 ms, OU background σ_V 0.2, 100 ms frames, window 60 ms with pairs straddling frames credited once, warm-up of 60 ms at episode start; counters `siegert` (default, Eq. 11b with 11c plus a discrete-time threshold correction), `psi`, `regression`; `siegert_gain` (also used by `tests/test_emergent.py`, whose import of the absent `test_eligibility` it replaces). **Offspring χG = 0.5, not 0.8:** the convex excitatory-only LIF ignites a high-rate state near 0.8. Checks: Siegert rate and gain within 1%; counter vs weight-scaled derivative corr 0.945, ratio 1.04; vs finite removal 0.94, 1.54; pair counts are about 99% chance; 17 / 29 ms per frame (CartPole / LunarLander, 16 heads).
+- `mapstdp/qif.py`: emergent counter (Eq. 11b) with raw pair counts in the existing window (pairs straddling frames counted), E neurons only; gain from a running regression of rate on the injected noise current (total input gives the wrong sign, because the fixed pools respond to the neuron's own spikes), shrunk to module and mean-field gains. Checks: counter vs removal corr 0.89, ratio 1.04; gain vs finite differences corr 0.93, ratio 1.01. `--match-scales` should use ≥ 50 frames on QIF.
+- `experiments/m2.py`, `m3.py`: `engine="lif"` (`--engine lif`, `--lif-<field>` overrides; requires `rule="emergent"`), burn-in 40 steps (20 ms), per-episode LIF state with any carried gain checkpointed; evaluation streams never touch training state. `match_scales` defaults to 50 frames on spiking engines (CartPole: LIF λ × 1.48, η × 1.09; QIF 0.98, 0.86; branching 1.26, 0.91).
+- `experiments/bound_cal.py` (new): the iteration-010 diffbound calibration as a CLI (trained flow models, 20 held-out stimuli × 200 warm frames, β_eff by maximum likelihood to Eq. 1e). It reproduces `BOUND_CAL_QIF` within 6%. New `BOUND_CAL_LIF` (H = 16): β_eff 0.47, 0.61, 0.78, 1.06, 1.63, 2.20, 2.35 at θ = 1–64. **The LIF readout saturates at β ≈ 2.35** (background spikes reach every bound), and at θ = 64 69–84% of frames hit the deadline, so v4's `--beta-max 16` is unreachable on LIF.
+- `docs/neuron-variants.md` rewritten for the observed walk: chance as teleportation, why two statistics, one section per engine with measured numbers, LIF and QIF limitations in one place, and a side-by-side table. `CLAUDE.md`: the derivation description, the `rule="emergent"` code map and commands.
+- `experiments/structure.py` (new): from saved models, per snapshot the block weight shares, the K × K module weight table and L_W (map equation of the trained W's own walk under uniform teleportation, engine-free); on-vs-off Mann–Whitney per declared pair; heatmaps of the mean final module table per arm and on − off (`structure_<on>.png`). Smoke (flow CartPole, seed 0, 300 episodes, dev): L_W 4.37 bits with the map term against 6.12 without; within-module weight 63% against 46%; latent → action weight about 0.5% with the map term (the neuroscientist's predicted disconnection). Models are about 22 KB each, so they are committed with a study.
+- `docs/derivation.md` §5.3–§5.4 and Appendix A: the counter estimates the weight-scaled derivative (finite removal is about 0.65 of it on the v4 LIF network); the ψ counter is exact only without reset; the LIF offspring and chance share; the QIF noise-instrument gain.
+- `ruff.toml`: per-file ignores for the user's standalone `tests/test_emergent.py`. Its `test_lif_inhibitory_kick` fails until `siegert_gain` exists (it imported the absent `test_eligibility.py`).
+
+### Results (iteration 014 pilot, development: 56 runs, 2 seeds, 300 episodes, `experiments/results/pilot014/`)
+
+- `docs/iterations/014-emergent-v4.md` (new): pilot design, results, decisions.
+- The map term lowers description length on all four engines and both tasks: held-out D 6.5 → 4.0–4.5 bits (CartPole) and 7.4 → 3.8–4.5 (LunarLander), against 5.8–6.5 and 6.6–7.6 without it. L_obs falls too, by only about 0.3 bits on LIF, whose pair counts are about 99% chance. Non-routing cross-module weight falls from 15–37% of the total to under 1.3%.
+- Performance is mixed at this length. The map term is ahead in AUC for branching, QIF and LIF on CartPole and for QIF and LIF on LunarLander, and behind or mixed for flow and for branching on LunarLander.
+- QIF with the map term runs at ρ(Λ̂^K) ≈ 1.0 (5% silent-module frames on LunarLander).
+- Decisions:
+  - LIF uses diffbound with β ≤ 1.6. With β ≤ 16, 36–61% of frames hit the deadline, past BOUND_CAL_LIF's 2.35 saturation. Race scores about 30 on CartPole.
+  - The rule ablations `--ebar module` and `--step-stat kappa` do not replace the defaults.
+
+### Found (iteration 014 §7: the action collapse)
+
+- In the map-term-off spiking arms, the weights swing for 20–60 episodes at a time to one action. Controller→A1 weight reached 2.7–9× controller→A2, and the flow policy on the same W also collapses, so the readout is not the cause.
+- The map term prevents this by sealing the modules (every action module's within-module offspring is 0.80). Part of its task benefit on spiking engines is therefore sealing, not a better abstraction.
+- Training returns can hide a collapsed W: branching off seed 0 had a training return of 295 over its last 30 episodes and 10 with frozen weights.
+
+### Added (iteration 014 §7–§8: a sealed control and runtime)
+
+- `m2.Config.p_cross` and `m3 --p-cross`: the SBM's cross-module connection probability outside the routing pairs. The default 0.05 is unchanged. 0 builds the modules sealed: the λ = 0 control for "sealed modules help". The draws are the same; only the mask differs. Results record `p_cross` only when it is not the default.
+- `core.build_network`: casts `p_cross` to float. An integer 0 had made the whole probability table integer, so every connection probability truncated to 0.
+- `mapstdp/lif.py`:
+  - numba loop `_kernel_nb`. `LIFParams.kernel`: `nbf` (default) draws variance-matched Irwin–Hall(4) noise from a xorshift64* generator, `nb` Gaussian noise, `np` the numpy reference.
+  - External pulses are drawn as one Poisson count per head and step, split by v. One seed per frame comes from the frame's rng.
+  - numba `pair_counts` (identical integer counts).
+  - A LIF frame now takes 2.6 ms instead of 19 ms. LIF runs are not bit-identical to the pilot's: the stream differs, the distributions do not (module rates within 0.4%; the self-check passes).
+- `mapstdp/spiking.py`: numba `branching_counters` over the synapses j → i only. Equal to the numpy path up to summation order. Per frame 8.4 → 1.3 ms (CartPole) and 12.2 → 2.0 ms (LunarLander).
+- `experiments/report.py`: runs set `NUMBA_NUM_THREADS=1`. QIF's `parallel=True` kernel had started up to 72 threads in each of 40 processes.
+- `tests/test_emergent_rule.py`: numba paths against numpy, the three LIF kernels' rates, and the sealed build.
+- Worker benchmark (iteration 014 §8): throughput peaks at about 60 concurrent runs (3726 frames/s) and is 91% of that at 48. Under load, branching costs 12 ms/frame, LIF 10 and QIF 36, against 53–112 in the pilot.
+- `m2.frozen_returns`, called at the end of every `rule="emergent"` run (`frozen_returns` in the result): 20 episodes with W frozen, on a deep copy of the agent, from the stream (seed, `FROZEN_SEED` = 7331). `report.m3_stats` and the pairs gain `frozen` (summary column "Frozen").
+- `m2.BOUND_CAL[8]`, `BOUND_CAL_LIF[8]`: diffbound tables for 8 heads, from the pilot014 flow CartPole models (iteration 014 §9).
+- Second pilot launched (`experiments/results/pilot014b/`, 116 runs): sealed control, LIF 20 ms window, QIF homeostasis ×2, 8 heads, LunarLander at 3000 episodes.
+
+### Added (study `emergent-v4`, declared, not launched)
+
+- `experiments/report.py`: `STUDIES["emergent-v4"]`: {LunarLander 1000, CartPole 1500 episodes} × {flow, branching, QIF, LIF} × λ {0.05, 0} × seeds 2000–2019 (320 runs, LunarLander queued first), with 8 on/off pairs.
+- `reports/emergent-v4/README.md`: pre-registration draft, awaiting the user's approval. P1 is AUC and P2 is end-of-run held-out L_obs, each on vs off by two-sided Mann–Whitney with Holm over the 8 cells.
+
 This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. The project is research, so entries are dated rather than versioned. Record decisions and reversals here as well as file changes.
 
 ## 2026-10-24

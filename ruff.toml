@@ -10,3 +10,7 @@ select = ["E", "F", "W", "I", "B"]
 # B905 off: code relies on zip truncation (e.g. m2.Agent.evaluate zips 20 held-out stimuli with 100 policies),
 # so strict=True would raise.
 ignore = ["B905"]
+
+[lint.per-file-ignores]
+# the user's standalone derivation checks (Derivation Details D12), kept in their compact script style
+"tests/test_emergent.py" = ["E702", "E731", "E741", "E401", "I001", "F841", "B007"]

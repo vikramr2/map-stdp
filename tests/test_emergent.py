@@ -324,7 +324,7 @@ def learn_branching_ei(seed=4, blocks=40, steps=5000, factor="c_ex", step_frac=0
 
 def check_lif_kick(mu, w, sig=0.25, N=60000, seed=21, tau_m=0.02, th=1.0, vr=0.0, dt=1e-4, burn=0.2, win=0.6):
     """Single noisy LIF neuron: extra spikes caused by one kick (signed), paired runs with common noise."""
-    from test_eligibility import siegert_gain
+    from mapstdp.lif import siegert_gain
     rng = np.random.default_rng(seed)
     nb, nw = int(burn / dt), int(win / dt)
     V = mu + sig * rng.standard_normal(N); V2 = V.copy()

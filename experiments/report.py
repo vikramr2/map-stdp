@@ -8,7 +8,11 @@ intermediates store: dev, tuning and diagnostic runs, and the default output of 
 Studies are declared in STUDIES: groups -> (task, engine, flags, seeds), a reference group per task (Mann-Whitney) and
 gates (minimum solved count). A reference "<study>/<group>" names a group of another study (a companion study added
 under a later code state compares against it without rerunning it). Statistics are experiments.tdstdp.group_stats,
-the same as tdstdp --summary."""
+the same as tdstdp --summary.
+A study's `runner` is "tdstdp" (default: experiments.tdstdp, the statistics above) or "m3" (experiments.m3 with
+M3_ENGINE_FLAG[engine], --out and --save-model reports/<study>/models/<group>/s<seed>.npz; statistics m3_stats; a
+study's `pairs` lists (on, off[, family]) groups compared by two-sided Mann-Whitney, Holm-adjusted per metric within
+a family)."""
 import argparse
 import concurrent.futures as cf
 import csv
@@ -22,13 +26,20 @@ import subprocess
 import sys
 import time
 
-from experiments import tdstdp
+import numpy as np
+
+from experiments import m2, tdstdp
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 REPORTS = ROOT / "reports"
 LOGS = ROOT / "logs" / "report"
 ENGINE_FLAG = {"lif": ["--engine", "lif"], "branching": [],  # branching = the numpy engine (tdstdp default)
                "flow": ["--engine", "flow"]}
+M3_ENGINE_FLAG = {"flow": ["--backend", "flow"],  # runner 'm3': engine -> experiments.m3 flags (heads per study)
+                  "branching": ["--backend", "spiking", "--engine", "numpy"],
+                  "qif": ["--backend", "spiking", "--engine", "qif"],
+                  "lif": ["--backend", "spiking", "--engine", "lif"]}
+M3_THR = {"CartPole": 475.0, "LunarLander": 200.0}  # trailing-100 mean thresholds of m3_stats
 
 _CP, _LL = range(1000, 1020), range(1000, 1010)
 # Display names (2026-10-24): "sgd" read as backprop SGD; the arm is the local rule without Adam (--sgd = --eta-cal).
@@ -80,18 +91,56 @@ STUDIES = {
         labels=_NOADAM_LABELS,
     ),
 }
+
+
+def _emergent_v4():
+    """emergent-v4 (iteration 014, CartPole only after the second pilot, §10): engine x map term on (lam 0.05) / off
+    (lam 0) / sealed (lam 0 on a network built without cross-module synapses, --p-cross 0), v4 flags, rule emergent.
+    Spiking engines: 8 heads, diffbound readout (BOUND_CAL[8]), step sizes matched to flow; LIF caps beta at 1.6
+    (pilot: v4's 16 put 36-61% of LIF frames on the deadline, beyond its calibration range, BOUND_CAL_LIF)."""
+    v4 = ["--rule", "emergent", "--td-norm", "0.04", "--p-cc", "0", "--beta-kappa", "0.01", "--eta", "5"]
+    sp = ["--heads", "8", "--readout", "diffbound", "--match-scales"]
+    eng = {"flow": ["--beta-max", "16"], "branching": ["--beta-max", "16", *sp], "qif": ["--beta-max", "16", *sp],
+           "lif": ["--beta-max", "1.6", *sp]}
+    arms = {"on": ["--lam", "0.05"], "off": ["--lam", "0"], "sealed": ["--lam", "0", "--p-cross", "0"]}
+    groups, pairs = {}, []
+    for e, f in eng.items():
+        for arm, a in arms.items():
+            groups[f"CartPole_{e}_{arm}"] = dict(task="CartPole", engine=e, seeds=range(2000, 2020),
+                                                 flags=[*v4, *f, *a, "--episodes", "1500"])
+        pairs += [(f"CartPole_{e}_on", f"CartPole_{e}_off"), (f"CartPole_{e}_on", f"CartPole_{e}_sealed", "sealed")]
+    return dict(title="Emergent-walk Map-STDP on v4, CartPole: map term on vs off vs sealed, four engines",
+                runner="m3", groups=groups, pairs=pairs, reference={}, gates={})
+
+
+STUDIES["emergent-v4"] = _emergent_v4()
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
            "T_s_sd", "T_s_median", "T_m_mean", "T_m_sd", "T_m_n", "ret_mean", "ret_sd", "ret_ge_M", "ms_per_frame",
            "resumes", "mw_ref", "mw_T_f", "mw_T_s", "mw_ret", "gate_min_solved", "gate_pass"]
 
 
-def command(g, seed, out):
+def command(g, seed, out, runner="tdstdp", model=None):
+    """The run's command line: experiments.tdstdp, or for runner 'm3' experiments.m3 (model: --save-model path)."""
+    if runner == "m3":
+        return [sys.executable, "-m", "experiments.m3", "--task", g["task"], "--seed", str(seed),
+                *M3_ENGINE_FLAG[g["engine"]], *g["flags"], "--out", str(out), "--save-model", str(model)]
     return [sys.executable, "-m", "experiments.tdstdp", "--task", g["task"], "--seed", str(seed),
             *ENGINE_FLAG[g["engine"]], *g["flags"], "--out", str(out)]
 
 
 def run_path(study, group, seed, root=REPORTS):
     return root / study / "runs" / group / f"s{seed}.json"
+
+
+def model_path(study, group, seed, root=REPORTS):
+    return root / study / "models" / group / f"s{seed}.npz"
+
+
+def study_command(study, k, sd):
+    """command() of group k, seed sd of a declared study, with repo-relative paths."""
+    s = STUDIES[study]
+    return command(s["groups"][k], sd, run_path(study, k, sd).relative_to(ROOT), s.get("runner", "tdstdp"),
+                   model_path(study, k, sd).relative_to(ROOT))
 
 
 def code_state():
@@ -118,11 +167,11 @@ def manifest(study, workers):
     patch, sha = code_state()
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     groups = {k: {"task": g["task"], "engine": g["engine"], "flags": g["flags"], "seeds": list(g["seeds"]),
-                  "commands": [" ".join(["python", *command(g, sd, run_path(study, k, sd).relative_to(ROOT))[1:]])
-                               for sd in g["seeds"]]} for k, g in s["groups"].items()}
+                  "commands": [" ".join(["python", *study_command(study, k, sd)[1:]]) for sd in g["seeds"]]}
+              for k, g in s["groups"].items()}
     return {"study": study, "title": s["title"], "created": datetime.datetime.now().astimezone().isoformat(),
             "git_head": head, "dirty": bool(patch), "code_sha256": sha, "code_patch": "code.patch" if patch else None,
-            "versions": versions(), "env": {"OMP_NUM_THREADS": "1"}, "workers": workers,
+            "versions": versions(), "env": {"OMP_NUM_THREADS": "1", "NUMBA_NUM_THREADS": "1"}, "workers": workers,
             "reference": s["reference"], "gates": s["gates"], "groups": groups, "launches": []}, patch, d
 
 
@@ -146,13 +195,13 @@ def run(study, workers):
                                                                 for k, sd in todo)})
     mf.write_text(json.dumps(m, indent=1))
     (LOGS / study).mkdir(parents=True, exist_ok=True)
-    env = os.environ | {"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
+    env = os.environ | {f"{k}_NUM_THREADS": "1" for k in ("OMP", "MKL", "OPENBLAS", "NUMBA")}
 
     def one(k, sd):
-        g, out = STUDIES[study]["groups"][k], run_path(study, k, sd)
+        out = run_path(study, k, sd)
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(LOGS / study / f"{k}_s{sd}.log", "a") as log:
-            rc = subprocess.run(command(g, sd, out.relative_to(ROOT)), cwd=ROOT, env=env, stdout=log,
+            rc = subprocess.run(study_command(study, k, sd), cwd=ROOT, env=env, stdout=log,
                                 stderr=subprocess.STDOUT).returncode
         print(f"{time.strftime('%H:%M:%S')} {k} s{sd} rc {rc}", flush=True)
         return rc
@@ -186,6 +235,8 @@ def load_runs(d, k):
 def summarize(study, root=REPORTS, studies=None):
     """summary.csv and summary.md of reports/<study>/ from runs/ only (finished runs, s<seed>.json)."""
     s, d = (studies or STUDIES)[study], root / study
+    if s.get("runner", "tdstdp") == "m3":
+        return summarize_m3(study, s, d)
     runs = {k: load_runs(d, k) for k in s["groups"]}
     for ref in s["reference"].values():  # "<study>/<group>": a group of another study
         if "/" in ref:
@@ -250,6 +301,129 @@ def summarize(study, root=REPORTS, studies=None):
         md += ["## Dropped groups", "",
                "Declared and run, then dropped after the run; their files stay in `runs/`.", ""]
         md += [f"- `{k}`: {why}." for k, why in dropped.items()] + [""]
+    (d / "summary.md").write_text("\n".join(md))
+    return rows
+
+
+def m3_stats(task, rs):
+    """Summary statistics of one group of experiments.m3 runs: AUC = mean return over all episodes (training
+    efficiency), last-100 return, the frozen-W return (mean of each run's frozen_returns), the count of runs whose
+    trailing-100 mean reaches M3_THR[task] (and the first such episode, T_m), the held-out L_obs and D at the first
+    and last evaluation (mean, and sd at the end), ms per frame and resumes. Means and sds over runs (ddof 0)."""
+    ms = lambda x: (float(np.mean(x)), float(np.std(x))) if len(x) else (float("nan"),) * 2  # noqa: E731
+    auc = [float(np.mean(r["returns"])) for r in rs]
+    R = [float(np.mean(r["returns"][-100:])) for r in rs]
+    thr = M3_THR.get(task)
+    Tm = [t for t in (tdstdp.trailing_mean_time(r["returns"], thr) for r in rs) if t is not None] if thr else []
+    ev = lambda i, k: [r["evals"][i][k] for r in rs if k in r["evals"][i]]  # noqa: E731
+    F = [float(np.mean(r["frozen_returns"])) for r in rs if r.get("frozen_returns")]
+    out = {"n": len(rs), "auc_mean": ms(auc)[0], "auc_sd": ms(auc)[1], "ret_mean": ms(R)[0], "ret_sd": ms(R)[1],
+           "frozen_mean": ms(F)[0], "frozen_sd": ms(F)[1],
+           "thr": thr, "thr_n": len(Tm), "T_m_mean": ms(Tm)[0], "T_m_sd": ms(Tm)[1]}
+    for k in ("L_obs", "D"):
+        out |= {f"{k}_first": ms(ev(0, k))[0], f"{k}_last_mean": ms(ev(-1, k))[0], f"{k}_last_sd": ms(ev(-1, k))[1]}
+    return out | {"ms_per_frame": float(np.mean([r["ms_per_frame"] for r in rs])),
+                  "resumes": sum(r.get("resumes", 0) for r in rs)}
+
+
+M3_COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "auc_mean", "auc_sd", "ret_mean", "ret_sd",
+              "frozen_mean", "frozen_sd", "thr",
+              "thr_n", "T_m_mean", "T_m_sd", "L_obs_first", "L_obs_last_mean", "L_obs_last_sd", "D_first",
+              "D_last_mean", "D_last_sd", "ms_per_frame", "resumes"]
+M3_PAIR_METRICS = {"auc": lambda r: float(np.mean(r["returns"])), "ret": lambda r: float(np.mean(r["returns"][-100:])),
+                   "frozen": lambda r: float(np.mean(r["frozen_returns"])) if r.get("frozen_returns") else None,
+                   "L_obs_last": lambda r: r["evals"][-1].get("L_obs"), "D_last": lambda r: r["evals"][-1].get("D")}
+
+
+def holm(ps):
+    """Holm step-down adjusted p-values (None stays None)."""
+    idx = sorted((i for i, p in enumerate(ps) if p is not None), key=lambda i: ps[i])
+    out, run = list(ps), 0.0
+    for r, i in enumerate(idx):
+        run = max(run, min(1.0, (len(idx) - r) * ps[i]))
+        out[i] = run
+    return out
+
+
+def m3_pairs(s, runs):
+    """Per declared pair (on, off[, family]) and metric: means, difference on - off, two-sided Mann-Whitney p, and the
+    Holm adjustment of p over the pairs of the same family (per metric; family 'primary' if not given)."""
+    from scipy.stats import mannwhitneyu
+    rows = []
+    for on, off, *fam in s.get("pairs", []):
+        row = {"on": on, "off": off, "family": fam[0] if fam else "primary", "n_on": len(runs.get(on, [])),
+               "n_off": len(runs.get(off, []))}
+        for k, f in M3_PAIR_METRICS.items():
+            a = [x for x in map(f, runs.get(on, [])) if x is not None]
+            b = [x for x in map(f, runs.get(off, [])) if x is not None]
+            row |= {f"{k}_on": float(np.mean(a)) if a else None, f"{k}_off": float(np.mean(b)) if b else None,
+                    f"{k}_p": float(mannwhitneyu(a, b).pvalue) if a and b else None}
+            row[f"{k}_diff"] = row[f"{k}_on"] - row[f"{k}_off"] if a and b else None
+        rows.append(row)
+    for k in M3_PAIR_METRICS:
+        for fam in dict.fromkeys(r["family"] for r in rows):
+            fr = [r for r in rows if r["family"] == fam]
+            for row, p in zip(fr, holm([r[f"{k}_p"] for r in fr])):
+                row[f"{k}_p_holm"] = p
+    return rows
+
+
+def summarize_m3(study, s, d):
+    """summary.csv, pairs.csv and summary.md of an m3-runner study from runs/ only."""
+    runs = {k: load_runs(d, k) for k in s["groups"]}
+    rows = []
+    for k, g in s["groups"].items():
+        row = {"group": k, "task": g["task"], "engine": g["engine"], "flags": " ".join(g["flags"]),
+               "n_declared": len(g["seeds"]), "n": len(runs[k])}
+        rows.append(row | (m3_stats(g["task"], runs[k]) if runs[k] else {}))
+    with open(d / "summary.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, M3_COLUMNS)
+        w.writeheader()
+        w.writerows([{c: (repr(r[c]) if isinstance(r.get(c), float) else r.get(c, "")) for c in M3_COLUMNS}
+                     for r in rows])
+    pairs = m3_pairs(s, runs)
+    if pairs:
+        with open(d / "pairs.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, list(pairs[0]))
+            w.writeheader()
+            w.writerows([{c: (repr(v) if isinstance(v, float) else v) for c, v in r.items()} for r in pairs])
+    mf = d / "manifest.json"
+    man = json.loads(mf.read_text()) if mf.exists() else {}
+    md = [f"# {study}: summary", "",
+          f"Generated by `python -m experiments.report summarize {study}` from `runs/` only. Code: git "
+          f"`{man.get('git_head', '?')[:7]}`, patch sha256 `{man.get('code_sha256', '?')[:12]}`.", "",
+          "Columns: AUC = mean return over all episodes; return = last-100 mean; frozen = mean return of "
+          f"{m2.FROZEN_EPIS} end-of-run episodes with W frozen; each mean ± sd over seeds (ddof 0); "
+          "thr = runs whose trailing-100 mean reaches the threshold, $T_m$ the first such episode; $L_{obs}$ and $D$ = "
+          "held-out description length (bits) of the engine's observed walk and of the flow walk, first eval → last "
+          "eval (sd).", ""]
+    for task in dict.fromkeys(g["task"] for g in s["groups"].values()):
+        md += [f"## {task}", "", "| Group | n | AUC | Return | Frozen | thr | $T_m$ | $L_{obs}$ | $D$ | ms/frame |",
+               "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+        for r in (r for r in rows if r["task"] == task):
+            if not r["n"]:
+                md.append(f"| `{r['group']}` | 0/{r['n_declared']} | | | | | | | | |")
+                continue
+            lo, D = (f"{fmt(r[k + '_first'], 3)} → {fmt(r[k + '_last_mean'], 3)} ({fmt(r[k + '_last_sd'], 3)})"
+                     for k in ("L_obs", "D"))
+            tm = f"{fmt(r['T_m_mean'])} ± {fmt(r['T_m_sd'])}" if r["thr_n"] else "–"
+            md.append(f"| `{r['group']}` | {r['n']}/{r['n_declared']} | {fmt(r['auc_mean'])} ± {fmt(r['auc_sd'])} | "
+                      f"{fmt(r['ret_mean'])} ± {fmt(r['ret_sd'])} | {fmt(r['frozen_mean'])} ± {fmt(r['frozen_sd'])} | "
+                      f"{r['thr_n']}/{r['n']} (≥ {fmt(r['thr'], 0)}) | "
+                      f"{tm} | {lo} | {D} | {r['ms_per_frame']:.2f} |")
+        md.append("")
+    if pairs:
+        md += ["## Pairs", "", "Two-sided Mann–Whitney p, Holm-adjusted per metric over the pairs of one family; "
+               "diff = first group − second.", "",
+               "| Group | Against | Family | n | AUC diff (p, Holm) | Return diff (p, Holm) | Frozen diff (p, Holm) "
+               "| $L_{obs}$ diff (p, Holm) | $D$ diff (p, Holm) |",
+               "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+        cell = lambda r, k: "–" if r[f"{k}_p"] is None else \
+            f"{r[f'{k}_diff']:+.3g} ({r[f'{k}_p']:.2g}, {r[f'{k}_p_holm']:.2g})"  # noqa: E731
+        for r in pairs:
+            md.append(f"| `{r['on']}` | `{r['off']}` | {r['family']} | {r['n_on']}/{r['n_off']} | "
+                      + " | ".join(cell(r, k) for k in M3_PAIR_METRICS) + " |")
+        md.append("")
     (d / "summary.md").write_text("\n".join(md))
     return rows
 
