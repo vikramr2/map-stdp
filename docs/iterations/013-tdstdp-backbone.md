@@ -545,3 +545,30 @@ Run 2026-10-24, scratch only (no closed loop, nothing in `reports/`). Pre-regist
   - The deterministic LIF does not support the walk.
   - With input noise of about 2 mV/√ms, the structural (map) term is usable, with χ raised to about 13 mV or the K3 walk taken with measured gains. The task term is then empirical-only, with credit 20–35% off.
   - The trained-weight bias on the branching engine needs a closed-loop check.
+
+## 14. Reported flow arms: `reports/tdstdp-baseline-flow/`
+
+- **Why:** the baseline covered `lif` and branching only. Flow (§10 S3) is the engine on which Map-STDP's derivation is exact, so the columns-plus-map-term comparison needs a TD-STDP flow baseline.
+- **Study:** `tdstdp-baseline-flow`, a companion study (a study uses one code state, and the baseline ran at `675e49e`). Its README was pre-registered on 2026-10-24 at 15:20 EDT, before launch.
+  - Groups: CartPole no Adam at B = 20; CartPole no Adam at B = 1 (block-sum control); LunarLander with Adam; LunarLander with the E4′ SGD rule measured on flow. All use `--fast` and the baseline's seeds.
+  - Mann–Whitney tests compare against `tdstdp-baseline`'s reference groups, through the runner's new cross-study reference.
+- **Development evidence for the block-1 control:**
+  - On dev seeds 60–79, flow at B = 20 solves 16/20 CartPole runs. The other 4 collapse by episode 100–150 to a one-action policy (entropy about 0.06, return about 10).
+  - At block 1, all 20 reach $T_s$.
+  - The B = 20 gate (§11 S1) was measured on branching only.
+- **Run:** 60 runs, local, 40 workers, 2026-10-24 15:19 to 22:45 EDT (7.4 h), 0 failures, 0 resumes.
+- **Results** (from the study's `summary.md`; MW against the baseline's `lif` reference of each task):
+
+| Group | Solved | $T_s$ (median) | Last-100 return | vs `lif` reference |
+| --- | --- | --- | --- | --- |
+| CartPole, no Adam, B = 20 | 17/20 | 207.5 ± 56.3 (219) | 415.6 ± 175.0 | $T_s$ p 0.44 |
+| CartPole, no Adam, B = 1 | 18/20 | 211.9 ± 65.1 (216) | 401.1 ± 195.8 | $T_s$ p 0.62 |
+| LunarLander, Adam | 3/10 | 3990.7 ± 1396.0 (inf) | 132.5 ± 46.5 | $T_s$ p 0.075 |
+| LunarLander, no Adam (η calibrated) | 0/10 | – (inf) | −24.2 ± 20.0 | return p 0.00025 |
+
+- **Reading rule 2 (block sum on flow):** 17/20 at B = 20 against 18/20 at B = 1, Fisher p = 1.0. The block sum does not change flow's outcome, so `CartPole_noadam_flow` (B = 20) is the CartPole flow entry. The dev split (16/20 against 20/20 on seeds 60–79) was chance.
+- **Reading:**
+  - **CartPole:** flow solves 17/20, against 20/20 for `lif` and 5/20 for branching. Removing the escape noise recovers most of what branching loses. The 3 failures are a one-action collapse within the first 100–150 episodes (return about 10), which also occurs at B = 1 (2 never learn, 2 collapse after solving).
+  - **LunarLander with Adam:** 3/10 solved, against 8/10 for `lif` and 6/10 for branching. Three more runs peak within 5 of the threshold (trailing-100 of 196–198) without crossing it.
+  - **LunarLander without Adam:** 0/10, as on `lif` and branching. The trailing-100 return peaks at 67–103 (episodes 3700–6700), then falls to −24 ± 20 by 10000. A fixed η is unstable late in training on flow, and the noise-free engine does not remove the need for Adam.
+- **Naming:** the no-Adam LunarLander groups were run as `LunarLander_sgd_<engine>` (`--sgd`). From 2026-10-24 they are shown as `LunarLander_noadam_<engine>`, and the flag is `--eta-cal` (`--sgd` is a hidden alias). "SGD" suggested backprop; the arm is the local rule with a calibrated fixed η. Earlier sections of this record keep the names that ran.

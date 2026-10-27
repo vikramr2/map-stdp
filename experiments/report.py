@@ -6,7 +6,9 @@ intermediates store: dev, tuning and diagnostic runs, and the default output of 
        from the code state recorded in the manifest; summarizes at the end
   python -m experiments.report summarize <study>   -> reports/<study>/summary.csv, summary.md, from runs/ only
 Studies are declared in STUDIES: groups -> (task, engine, flags, seeds), a reference group per task (Mann-Whitney) and
-gates (minimum solved count). Statistics are experiments.tdstdp.group_stats, the same as tdstdp --summary."""
+gates (minimum solved count). A reference "<study>/<group>" names a group of another study (a companion study added
+under a later code state compares against it without rerunning it). Statistics are experiments.tdstdp.group_stats,
+the same as tdstdp --summary."""
 import argparse
 import concurrent.futures as cf
 import csv
@@ -25,9 +27,13 @@ from experiments import tdstdp
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 REPORTS = ROOT / "reports"
 LOGS = ROOT / "logs" / "report"
-ENGINE_FLAG = {"lif": ["--engine", "lif"], "branching": []}  # branching = the numpy engine (tdstdp default)
+ENGINE_FLAG = {"lif": ["--engine", "lif"], "branching": [],  # branching = the numpy engine (tdstdp default)
+               "flow": ["--engine", "flow"]}
 
 _CP, _LL = range(1000, 1020), range(1000, 1010)
+# Display names (2026-10-24): "sgd" read as backprop SGD; the arm is the local rule without Adam (--sgd = --eta-cal).
+# The keys stay the run directories and the recorded commands.
+_NOADAM_LABELS = {f"LunarLander_sgd_{e}": f"LunarLander_noadam_{e}" for e in ("lif", "branching", "flow")}
 STUDIES = {
     "tdstdp-baseline": dict(
         title="TD-STDP baseline (Chung & Kozma 2020, authors' code path), block sum B = 20, --fast",
@@ -49,11 +55,29 @@ STUDIES = {
                                               flags=["--sgd", "--block", "20", "--fast"], seeds=_LL),
         },
         reference={"CartPole": "CartPole_noadam_lif", "LunarLander": "LunarLander_adam_lif"},
+        labels=_NOADAM_LABELS,
         gates={"CartPole_noadam_lif": 18, "LunarLander_adam_lif": 6},
         # Declared and run, then dropped (2026-10-24): kept in runs/, left out of summary.csv and the tables.
-        dropped={k: "the authors' Adam step is the per-ms SGD eta, 40-160x LunarLander's for CartPole, and collapses "
+        dropped={k: "the authors' Adam step is the per-ms eta, 40-160x LunarLander's for CartPole, and collapses "
                     "the policy from the first episodes; CK report no CartPole Adam config and CartPole needs no Adam"
                  for k in ("CartPole_adam_lif", "CartPole_adam_branching")},
+    ),
+    "tdstdp-baseline-flow": dict(
+        title="TD-STDP baseline, flow engine (the branching step's noise-free limit), block sum B = 20, --fast",
+        groups={
+            "CartPole_noadam_flow": dict(task="CartPole", engine="flow", flags=["--block", "20", "--fast"], seeds=_CP),
+            # block-sum control: B = 20 was gated on branching only (iteration 013 §11, S1)
+            "CartPole_noadam_flow_b1": dict(task="CartPole", engine="flow", flags=["--block", "1", "--fast"],
+                                            seeds=_CP),
+            "LunarLander_adam_flow": dict(task="LunarLander", engine="flow", flags=["--block", "20", "--fast"],
+                                          seeds=_LL),
+            "LunarLander_sgd_flow": dict(task="LunarLander", engine="flow", flags=["--sgd", "--block", "20", "--fast"],
+                                         seeds=_LL),
+        },
+        reference={"CartPole": "tdstdp-baseline/CartPole_noadam_lif",
+                   "LunarLander": "tdstdp-baseline/LunarLander_adam_lif"},
+        gates={},
+        labels=_NOADAM_LABELS,
     ),
 }
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
@@ -154,22 +178,31 @@ def pm(r, a):
     return f"{fmt(r[a + '_mean'])} ± {fmt(r[a + '_sd'])} [{r[a + '_n']}]" if r[a + "_n"] else "–"
 
 
+def load_runs(d, k):
+    """Finished runs (s<seed>.json) of group k in study directory d."""
+    return [json.loads(p.read_text()) for p in sorted((d / "runs" / k).glob("s*.json"))]
+
+
 def summarize(study, root=REPORTS, studies=None):
     """summary.csv and summary.md of reports/<study>/ from runs/ only (finished runs, s<seed>.json)."""
     s, d = (studies or STUDIES)[study], root / study
-    runs = {k: [json.loads(p.read_text()) for p in sorted((d / "runs" / k).glob("s*.json"))] for k in s["groups"]}
+    runs = {k: load_runs(d, k) for k in s["groups"]}
+    for ref in s["reference"].values():  # "<study>/<group>": a group of another study
+        if "/" in ref:
+            runs[ref] = load_runs(root / ref.split("/")[0], ref.split("/")[1])
     rows = []
     dropped = s.get("dropped", {})
+    label = lambda k: s.get("labels", {}).get(k, k)  # noqa: E731
     for k, g in s["groups"].items():
         if k in dropped:
             continue
         ref = s["reference"].get(g["task"])
-        row = {"group": k, "task": g["task"], "engine": g["engine"], "flags": " ".join(g["flags"]),
+        row = {"group": label(k), "task": g["task"], "engine": g["engine"], "flags": " ".join(g["flags"]),
                "n_declared": len(g["seeds"]), "n": len(runs[k])}
         if runs[k]:
             st = tdstdp.group_stats(g["task"], runs[k], runs[ref] if k != ref and runs.get(ref) else None)
             row |= st | {"resumes": sum(r.get("resumes", 0) for r in runs[k])}
-            row["mw_ref"] = ref if "mw_T_f" in st else ""
+            row["mw_ref"] = label(ref) if "mw_T_f" in st else ""
         if k in s["gates"]:
             row["gate_min_solved"] = s["gates"][k]
             done = row["n"] == row["n_declared"]
@@ -191,7 +224,8 @@ def summarize(study, root=REPORTS, studies=None):
     for task in dict.fromkeys(g["task"] for g in s["groups"].values()):
         p = tdstdp.PAPER[task]
         md += [f"## {task}", "", f"CK 2020 (10 runs, all solved): $T_f$ {p['T_f'][0]:.1f} ± {p['T_f'][1]:.1f}, "
-               f"$T_s$ {p['T_s'][0]:.1f} ± {p['T_s'][1]:.1f}. Reference group: `{s['reference'].get(task, '-')}`. "
+               f"$T_s$ {p['T_s'][0]:.1f} ± {p['T_s'][1]:.1f}. "
+               f"Reference group: `{label(s['reference'].get(task, '-'))}`. "
                f"$T_m$ threshold: {tdstdp.M_THR[task]:g}.", "",
                "| Group | n | Solved | $T_f$ | $T_s$ (median) | $T_m$ | Return | ms/frame "
                "| MW $T_f$ / $T_s$ / return | Gate |",
@@ -209,6 +243,9 @@ def summarize(study, root=REPORTS, studies=None):
                       f"{ts} | {pm(r, 'T_m')} | {fmt(r['ret_mean'])} ± {fmt(r['ret_sd'])} | {r['ms_per_frame']:.2f} | "
                       f"{mw} | {gate} |")
         md.append("")
+    if s.get("labels"):
+        md += ["## Display names", "", "Groups shown under a later name; `runs/<key>/` and the manifest keep the key.",
+               ""] + [f"- `{v}` = `{k}`" for k, v in s["labels"].items() if k in s["groups"]] + [""]
     if dropped:
         md += ["## Dropped groups", "",
                "Declared and run, then dropped after the run; their files stay in `runs/`.", ""]

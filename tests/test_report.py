@@ -35,3 +35,16 @@ def test_summarize_fake_study(tmp_path):
     assert float(alt["mw_T_s"]) == mannwhitneyu([401, 401], [100, 102]).pvalue  # never reached = cap + 1
     assert float(alt["mw_ret"]) == mannwhitneyu([10.0, 20.0], [500.0, 500.0]).pvalue
     assert alt["gate_pass"] == "" and "| `ref` | 2/2 | 2/2 |" in (tmp_path / "fake" / "summary.md").read_text()
+
+
+def test_summarize_cross_study_reference(tmp_path):
+    studies = STUDY | {"comp": dict(title="comp", reference={"CartPole": "fake/ref"}, gates={},
+                                    groups={"new": dict(task="CartPole", engine="flow", flags=[], seeds=[0])})}
+    for st, g, r in (("fake", "ref", fake(1, 100, [500.0] * 150, 1.0)),
+                     ("comp", "new", fake(None, None, [10.0] * 150, 1.0))):
+        (tmp_path / st / "runs" / g).mkdir(parents=True)
+        (tmp_path / st / "runs" / g / "s0.json").write_text(json.dumps(r))
+    report.summarize("comp", root=tmp_path, studies=studies)
+    row = next(csv.DictReader(open(tmp_path / "comp" / "summary.csv")))
+    assert row["group"] == "new" and row["mw_ref"] == "fake/ref"
+    assert float(row["mw_ret"]) == mannwhitneyu([10.0], [500.0]).pvalue

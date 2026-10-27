@@ -1,9 +1,9 @@
 """Iteration 013 step 1: the feed-forward TD-STDP actor-critic of Chung & Kozma 2020 [CK] (arXiv:2008.13044,
 mapstdp/tdstdp.py) in closed loop on CartPole and LunarLander. Run from the repo root:
-  python -m experiments.tdstdp --task {CartPole,LunarLander} --seed 0 [--adam | --no-adam | --sgd] [--heads H]
+  python -m experiments.tdstdp --task {CartPole,LunarLander} --seed 0 [--adam | --no-adam | --eta-cal] [--heads H]
     [--block B] [--episodes E] [--engine {numpy,snm,lif}] [--legacy [--rate0 p] [--engine lif-snm]]
     -> experiments/results/tdstdp_<task>[_ck][_<tokens>]_s<seed>.json   (tokens: options off the preset, in order
-       adam | noadam | sgd, B<B>, h<H>, ep<E>, r<rate0> (legacy), engine snm | lif | lifsnm)
+       adam | noadam | sgd (= --eta-cal), B<B>, h<H>, ep<E>, r<rate0> (legacy), engine snm | lif | lifsnm)
     [--out PATH]   (result path; the default above; experiments.report uses it to write reports/<study>/runs/)
   python -m experiments.tdstdp --summary   -> per group: T_f, T_s, solved fraction, last-100 return, ms per frame,
        next to CK's Table 2 and the model v4 (flow, spiking) returns
@@ -48,7 +48,7 @@ class Config:
     seed: int = 0
     episodes: int = 400
     adam: bool = False
-    sgd: bool = False  # E4: SGD with eta from the Adam-equivalent step at init
+    sgd: bool = False  # E4 (--eta-cal): no Adam; the local rule with eta from the Adam-equivalent step at init
     heads: int = 1
     block: int = 1
     engine: str = "numpy"  # numpy | snm (SuperNeuroMAT, slow; smoke runs only) | lif | lif-snm (true-LIF control)
@@ -461,7 +461,7 @@ def run_ck(cfg, log_every=50, out=None):
     if cfg.sgd:
         eta_sgd, rms = calibrate_ck(cfg)
         cfg = dataclasses.replace(cfg, eta_c=float(eta_sgd[0]), eta_a=float(eta_sgd[1]))
-        print(f"sgd calibration: per-ms update RMS {rms}, eta (mV) {eta_sgd}", flush=True)
+        print(f"eta calibration: per-ms update RMS {rms}, eta (mV) {eta_sgd}", flush=True)
     r, wall0, resumes = CKRunner(cfg), 0.0, 0
     fn = pathlib.Path(out) if out else OUT / f"{name(cfg)}.json"
     fn.parent.mkdir(parents=True, exist_ok=True)
@@ -540,7 +540,7 @@ def run(cfg, log_every=50, out=None):
     if cfg.sgd:
         eta_sgd, rms = calibrate(cfg)
         cfg = dataclasses.replace(cfg, eta_c=float(eta_sgd[0]), eta_a=float(eta_sgd[1]))
-        print(f"sgd calibration: per-ms update RMS {rms}, eta (CK units) {eta_sgd}", flush=True)
+        print(f"eta calibration: per-ms update RMS {rms}, eta (CK units) {eta_sgd}", flush=True)
     r, t0, nxt = Runner(cfg), time.perf_counter(), log_every
     fn = pathlib.Path(out) if out else OUT / f"{name(cfg)}.json"
     fn.parent.mkdir(parents=True, exist_ok=True)
@@ -668,7 +668,9 @@ def main():
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--adam", action="store_true", default=None)
     g.add_argument("--no-adam", dest="adam", action="store_false")
-    g.add_argument("--sgd", action="store_true", help="E4: no Adam, eta from the Adam-equivalent step at init")
+    g.add_argument("--eta-cal", dest="sgd", action="store_true",
+                   help="E4: no Adam; the local rule with eta calibrated to Adam's step at init")
+    g.add_argument("--sgd", dest="sgd", action="store_true", help=argparse.SUPPRESS)  # old name, in recorded commands
     ap.add_argument("--heads", type=int, default=None)
     ap.add_argument("--block", type=int, default=None)
     ap.add_argument("--legacy", action="store_true", help="pre-audit implementation (E1, E2, first E3/E4)")

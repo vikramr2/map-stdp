@@ -4,6 +4,25 @@ This file follows the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) f
 
 ## 2026-10-24
 
+### Changed (no-Adam arm renamed: `sgd` → `noadam`, `--sgd` → `--eta-cal`)
+
+- "SGD" read as backprop's stochastic gradient descent, which is non-local. The arm is the local three-factor rule without Adam, with a fixed η per population calibrated once at initialisation (E4′ rule).
+- `experiments/tdstdp.py`: the flag is `--eta-cal`; `--sgd` stays as a hidden alias, because manifests and the 013 record contain it. The result-file token stays `sgd`, so existing intermediates keep their names.
+- `experiments/report.py`: a study's `labels` map run keys to display names. `summary.*` show `LunarLander_noadam_<engine>`, with a "Display names" section. Run directories and manifests are unchanged.
+- Both study READMEs carry an amendment. Both summaries were rebuilt from the same `runs/`, and no number changed.
+
+### Results (`reports/tdstdp-baseline-flow/`, 60 runs, 0 failures)
+
+- CartPole, no Adam: 17/20 solved at B = 20 and 18/20 at B = 1 (Fisher p = 1.0), so B = 20 stands.
+- LunarLander: 3/10 solved with Adam; 0/10 without Adam. The no-Adam return peaks at 67–103 and then falls to −24.
+- Record 013 §14.
+
+### Added (flow-engine arms of the TD-STDP baseline, `reports/tdstdp-baseline-flow/`)
+
+- New companion study `tdstdp-baseline-flow`, pre-registered in its README: TD-STDP on the flow engine (the branching step's noise-free limit) for CartPole without Adam, and LunarLander with Adam and with SGD, on the baseline's seeds. It is a separate study because the baseline ran at `675e49e` and a study uses one code state.
+- A CartPole block-1 group is the control for the block sum, which was gated on branching only. On dev seeds 60–79, flow at B = 20 collapsed 4/20 CartPole runs to a one-action policy, against 0/20 at block 1.
+- `experiments/report.py`: `ENGINE_FLAG` gains `flow`; a study's `reference` may name another study's group as `"<study>/<group>"` (`load_runs`). New test `test_summarize_cross_study_reference`.
+
 ### Added (explainer `docs/neuron-variants.md` and the LIF walk diagnostic)
 
 - **`docs/neuron-variants.md` (new):** a plain-language guide to Map-STDP on the four engines (flow, branching, LIF, QIF). It covers what the rule assumes (pairings in proportion to link flow, flow matching the walk, subcriticality), how each engine meets those assumptions, the limitations of LIF and QIF, a side-by-side table, and a glossary. It explains the derivation and does not replace it.

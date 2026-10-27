@@ -97,3 +97,9 @@ Per-run logs go to `logs/report/tdstdp-baseline/`, which is gitignored.
 - **Why.** The authors' Adam step is the per-ms SGD η. For CartPole that is 40–160× LunarLander's step, and it collapses the policy from the first episodes. The same collapse occurs at B = 1 without `--fast`, so it is the configuration, not the speed settings. CK report no CartPole Adam configuration, and CartPole needs no Adam (`CartPole_noadam_lif`, 20/20).
 - **What changed.** The groups are marked `dropped` in `experiments/report.py`. Their run files stay in `runs/`, and `summarize` leaves them out of `summary.csv` and the tables, listing them under "Dropped groups". No other group, gate or statistic changed.
 - `report.py` was edited after the study ran, so `manifest.json`'s code hash no longer matches the working tree and `run` would refuse a relaunch. The run code (`mapstdp/`, `experiments/tdstdp.py`) is unchanged.
+
+## Amendment (2026-10-24, after the runs): `sgd` groups shown as `noadam`
+
+- **What:** the LunarLander groups `LunarLander_sgd_<engine>` are shown in `summary.md` and `summary.csv` as `LunarLander_noadam_<engine>`, by the study's `labels` in `experiments/report.py`. The run directories (`runs/LunarLander_sgd_<engine>/`), the manifest and its recorded commands (`--sgd`) keep the old name.
+- **Why:** "SGD" reads as backprop's stochastic gradient descent, a non-local algorithm. The arm is the same local three-factor rule as the Adam arm, with Adam removed and a fixed η per population (critic, actor) calibrated once before training (the E4′ rule). The CLI flag is now `--eta-cal`; `--sgd` stays as a hidden alias so the recorded commands still run.
+- **Effect on results:** none. Only names change; `summary.*` was rebuilt from the same `runs/`.

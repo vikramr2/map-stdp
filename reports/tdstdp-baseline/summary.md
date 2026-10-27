@@ -21,12 +21,19 @@ CK 2020 (10 runs, all solved): $T_f$ 383.8 ± 71.5, $T_s$ 2575.2 ± 666.5. Refer
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `LunarLander_adam_lif` | 10/10 | 8/10 | 1290.0 ± 1544.1 [10] | 4586.4 ± 2483.6 (6330) | 4586.4 ± 2483.6 [8] | 164.5 ± 56.9 | 5.10 | ref | ≥ 6: **pass** |
 | `LunarLander_adam_branching` | 10/10 | 6/10 | 346.4 ± 104.6 [10] | 4248.3 ± 1777.2 (6566) | 4248.3 ± 1777.2 [6] | 160.1 ± 46.4 | 5.37 | 0.73 / 0.57 / 0.43 |  |
-| `LunarLander_sgd_lif` | 10/10 | 0/10 | 788.3 ± 175.9 [10] | – (inf) | – | 48.3 ± 38.6 | 4.79 | 0.16 / 0.00075 / 0.0017 |  |
-| `LunarLander_sgd_branching` | 10/10 | 0/10 | 966.1 ± 190.8 [10] | – (inf) | – | -8.8 ± 18.8 | 4.37 | 0.14 / 0.00075 / 0.00044 |  |
+| `LunarLander_noadam_lif` | 10/10 | 0/10 | 788.3 ± 175.9 [10] | – (inf) | – | 48.3 ± 38.6 | 4.79 | 0.16 / 0.00075 / 0.0017 |  |
+| `LunarLander_noadam_branching` | 10/10 | 0/10 | 966.1 ± 190.8 [10] | – (inf) | – | -8.8 ± 18.8 | 4.37 | 0.14 / 0.00075 / 0.00044 |  |
+
+## Display names
+
+Groups shown under a later name; `runs/<key>/` and the manifest keep the key.
+
+- `LunarLander_noadam_lif` = `LunarLander_sgd_lif`
+- `LunarLander_noadam_branching` = `LunarLander_sgd_branching`
 
 ## Dropped groups
 
 Declared and run, then dropped after the run; their files stay in `runs/`.
 
-- `CartPole_adam_lif`: the authors' Adam step is the per-ms SGD eta, 40-160x LunarLander's for CartPole, and collapses the policy from the first episodes; CK report no CartPole Adam config and CartPole needs no Adam.
-- `CartPole_adam_branching`: the authors' Adam step is the per-ms SGD eta, 40-160x LunarLander's for CartPole, and collapses the policy from the first episodes; CK report no CartPole Adam config and CartPole needs no Adam.
+- `CartPole_adam_lif`: the authors' Adam step is the per-ms eta, 40-160x LunarLander's for CartPole, and collapses the policy from the first episodes; CK report no CartPole Adam config and CartPole needs no Adam.
+- `CartPole_adam_branching`: the authors' Adam step is the per-ms eta, 40-160x LunarLander's for CartPole, and collapses the policy from the first episodes; CK report no CartPole Adam config and CartPole needs no Adam.

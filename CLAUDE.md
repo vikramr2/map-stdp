@@ -28,7 +28,7 @@ Research question: can a spiking network's communities serve as its states, givi
 - `experiments/tasks.py`: the M3 task registry (sizes, encoder, reward, episodes). `experiments/m3.py`: per-task runs and summaries, results in `experiments/results/m3_<task>_<backend>[_h<H>]_lb<β>[_tn<s>][_<variant>]_s<seed>.json`. `experiments/ceiling.py`: the policy-class ceiling (CEM over the flow policy's actions × controller matrix).
 - `experiments/m2_viz.py` + `m2_viz_template.html`: train → record → page pipeline for the replay page (`replay.html`).
 - `mapstdp/tdstdp.py` + `experiments/tdstdp.py` (iteration 013, a baseline, not Map-STDP): the feed-forward TD-STDP actor-critic of Chung & Kozma 2020 (docstrings cite "[CK Eq. n]") on the branching step without presynaptic normalisation, plus BindsNET's LIF as a control (`--engine lif`) and the branching step's noise-free limit (`--engine flow`). The default follows the authors' code (`reference/td_stdp`, gitignored) where it disagrees with the paper: `PRESETS` are their `config_cp.ini` and `config_ll.ini` in mV, converted to branching units by `MV` = 13, and `CKRunner` and `block_learn_ck` transcribe their loop and rule. Traces are summed in closed form over blocks of frozen W (block 1 = the per-ms rule). `--legacy` reproduces the pre-audit runs (CK Table 1, `MV_LEGACY` = 1300). Results go to `experiments/results/tdstdp_<task>[_ck][_<tokens>]_s<seed>.json`.
-- `experiments/report.py`: the final-study runner. Studies are declared in `STUDIES` (groups → task, engine, flags, seeds; a reference group per task; gates). `run` launches the declared runs through `--out` and resumes checkpointed ones; `summarize` rebuilds the summary from `runs/` only, with `tdstdp.group_stats` (the statistics `tdstdp --summary` uses).
+- `experiments/report.py`: the final-study runner. Studies are declared in `STUDIES` (groups → task, engine, flags, seeds; a reference group per task; gates). `run` launches the declared runs through `--out` and resumes checkpointed ones; `summarize` rebuilds the summary from `runs/` only, with `tdstdp.group_stats` (the statistics `tdstdp --summary` uses); a study's reference may be another study's group, `"<study>/<group>"`.
 - **Results layout.**
   - `experiments/results/` is the **intermediates** store: every dev, tuning and diagnostic run, and the default output of every CLI. Existing files stay where they are, because tests and iteration records reference them.
   - `reports/<study>/` holds **only final reported outputs**, one directory per study:
@@ -61,10 +61,11 @@ python -m experiments.m3 --task LunarLander --td-norm 0.04 --p-cc 0 --beta-kappa
 python -m experiments.m3 --task MountainCar --td-norm 0.04 --p-cc 0 --beta-kappa 0.01 --beta-max 16 --eta 5 --encoder g12s0.15 --critic-layer g24 --c-ent 0.01 --ent-target 0.8 --seed 0   # best MountainCar (iteration 012)
 python -m experiments.m3 --summary         # per task: random, flow, spiking per H  (--ablations, --fidelity)
 python -m experiments.ceiling --task CartPole --level 1 --readout 1d                     # policy-class ceiling
-python -m experiments.tdstdp --task CartPole --seed 0 [--adam | --sgd] [--block 20] [--engine lif | flow] [--fast] [--legacy] [--out PATH]  # TD-STDP backbone (iteration 013)
+python -m experiments.tdstdp --task CartPole --seed 0 [--adam | --eta-cal] [--block 20] [--engine lif | flow] [--fast] [--legacy] [--out PATH]  # TD-STDP backbone (iteration 013)
 python -m experiments.tdstdp --summary      # T_f, T_s, solved fraction, last-100 return vs Chung & Kozma and v4
 python -m experiments.report run tdstdp-baseline --workers 40   # a final study -> reports/<study>/ (resumes; then summarizes)
 python -m experiments.report summarize tdstdp-baseline          # rebuild reports/<study>/summary.csv and .md from runs/
+python -m experiments.report summarize tdstdp-baseline-flow     # the flow-engine arms (companion study)
 pytest -q tests                            # behaviour lock (see Tooling)
 pytest -q tests -k "flow-exempt"           # one case, e.g. one golden fingerprint
 ruff check .
