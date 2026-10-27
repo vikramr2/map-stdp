@@ -244,7 +244,35 @@ The excitation-only bound avoids the problem entirely, at the cost of excluding 
 
 **Subtractive and divisive inhibition both fit.** The walk is observed, so the form of inhibition only changes the counter's gain. Divisive (shunting) inhibition lowers G\_i. Subtractive inhibition lowers the input and, through rectification, G\_i as well. The excitatory–inhibitory branching process (Corral López et al.) and transmission neural networks (Gao and Caines) are literature models that keep firing probabilities non-negative in these two ways.
 
-## 10. What changed, what is open, what to test
+## 10. Hybrid with TD-STDP
+
+TD-STDP's backbone stays: Fourier input spikes, a feed-forward controller, TD error times an action-gated eligibility, and a spiking critic. Map-STDP adds recurrent modules inside the actor, shaped by the map term, and under the new walk those modules can contain inhibitory neurons.
+
+&#91;embedded content: TD-STDP backbone with Map-STDP modules · 4 broadcast signals\]
+
+Solid arrows carry spikes and the dashed arrow carries the broadcasts. Routing out of the controller learns from the TD error alone. Inside the shaded block the structure term also acts. Decision units read column spikes but send nothing back, so they stay outside the walk.
+
+**Which rule acts on which synapses**
+
+| Block | Structure term | Task term | Note |
+| --- | --- | --- | --- |
+| C → A, C → L (routing) | exempt | δ × eligibility | TD-STDP's own pathway |
+| Excitatory, within a module | strengthens | δ × eligibility | persistent column activity feeds the race |
+| Excitatory, across modules | weakens | δ × eligibility | separates columns and latent states |
+| Inhibitory, within a module | weakens, or exempt in the inhibition-stabilised regime | δ × eligibility | see Section 9 |
+| Inhibitory, across modules | strengthens (lateral inhibition) | δ × eligibility | new under the observed walk |
+| Inputs → critic | none | critic rule | outside the walk |
+| Columns → decision units | fixed | none | outside the walk |
+
+**What changed from the previous guide's Section 14**
+
+- **Inhibition among action columns.** It used to be excluded because it put negative entries into the walk. Under the observed walk it is allowed, and the map term grows it. The decision units' mutual inhibition still sits outside the walk, because they do not project back.
+- **Eligibility.** The task eligibility is e\_ij += c^tot\_ij Φ, with the signed counter. For the exact Hawkes-LIF the counter is presynaptic-only.
+- **A fourth broadcast.** Module activity lets each neuron estimate ē^obs\_j (Details, D5 Step 9).
+- **Stability monitor.** The 2K × 2K module-level E–I offspring matrix is checked each frame (Details, D10 Step 7).
+- **Neuron.** Noisy LIF or Hawkes-LIF first, QIF later, as before.
+
+## 11. What changed, what is open, what to test
 
 The reframing changes the walk and the baseline, splits the rule's statistics into two jobs, and admits inhibition. Everything else carries over.
 
