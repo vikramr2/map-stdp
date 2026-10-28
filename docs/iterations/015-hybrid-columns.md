@@ -202,6 +202,7 @@ The arm passes on the letter of the criteria, so it stays in the study as pre-se
   - `cols_sealed` +8.8 [+4.7, +12.9] (Holm 0.0014).
   
   T_f: 1100–1290 with columns vs 1546 for base. The early lead seen in pilot C and at mid-run is real, but base catches up by 10000 episodes.
+  - **Qualified later (iteration 016 §10–11):** most of this early lead is a starting-gain effect. The column arms started at a higher rate and a sharper policy; with the starts matched (`--rate-match-rec --ent-match-rec`, dev seeds 10–15) the gain fell to +3 to +6 and was not significant.
 - **CartPole solved:** 20/20 for every column arm (`lat_on` 19/20) vs 16/20 for base. Final last-100: 499.7–500.0 vs 491.4.
 - **Module structure of R** (`rec.RK`, share of R's weight within columns, from first to last snapshot, mean over 20 seeds):
 
@@ -215,3 +216,5 @@ The arm passes on the letter of the criteria, so it stays in the study as pre-se
   - **LunarLander:** the task term builds a hub. 60% of R's weight crosses columns, and 97% of that goes into the main-engine column, about equally from the no-op, left and right columns (sd of the within share 0.02 over seeds). The map term prunes this hub (within share 0.996).
   - **Performance converges although the structure diverges:** a hub (`cols_lam0`), modular (`cols_on`) and sealed (`cols_sealed`) reach the same final return and the same early speed-up (secondary contrasts all null).
   - **`lat_on`:** the within share over the whole table, latents included, rises from 0.44 to 0.64 (LunarLander) and from 0.38 to 0.52 (CartPole).
+
+**What the sealed and map-term arms test (expert review, 2026-10-28; iteration 016 §13):** in the sealed arm, and in `cols_on` once sealed, the one-hop credit on R is zero and the map term barely acts within modules, so R is a fixed random within-column amplifier: these arms test recurrence, not learned column structure. The map term shapes only the cross-column weights.

@@ -230,6 +230,7 @@ class HybridRec:
                                                                                 eps_h, wmin)
         self.Ws = self.p.W_steps
         self.e = np.zeros((H, self.nR, self.nR))
+        self.kc = np.zeros((K, self.nR, self.nR))  # pair counts by the copies' executed action (class_table)
         self.tail = np.zeros((self.Ws, H, self.nR), bool)
         self.Gprev, self.nprev = np.zeros((H, self.nR)), np.zeros((H, self.nR))
         self.run_obs = None
@@ -253,9 +254,11 @@ class HybridRec:
         """Episode reset of copies rs (code 2): eligibility, carried tail and the pending window statistics."""
         self.e[rs], self.tail[:, rs], self.Gprev[rs], self.nprev[rs] = 0, False, 0, 0
 
-    def window(self, XR, xsum, xsq):
+    def window(self, XR, xsum, xsq, cls=None):
         """One window of the R population: XR (L x H x nR raster), xsum, xsq (H x nR input sums over its L steps).
-        Accumulates the frame's kappa, counter and spikes; returns (G, n) per copy (H x nR)."""
+        Accumulates the frame's kappa, counter and spikes; returns (G, n) per copy (H x nR). cls (H ints, the copies'
+        executed action): the same integer pair counts are also split by class into self.kc, the stimulus-conditioned
+        walk (iteration 016 §15; a monitor, it changes nothing else)."""
         p, L = self.p, len(XR)
         m1 = xsum / L
         G = lif.gain_markov(p.mu_bg + m1 / (1 - p.a), np.sqrt(np.maximum(xsq / L - m1 * m1, 0.0)), p)
@@ -263,7 +266,13 @@ class HybridRec:
         full = np.concatenate([self.tail, XR])
         self.tail = full[-self.Ws:].copy()
         a = self.acc
-        a["kappa"] += lif.pair_counts(full, self.Ws, self.Ws)
+        if cls is None:
+            a["kappa"] += lif.pair_counts(full, self.Ws, self.Ws)
+        else:  # per head the counts are independent integers, so the split sums to the one call exactly
+            for k in np.unique(cls):
+                kk = lif.pair_counts(full[:, cls == k], self.Ws, self.Ws)
+                self.kc[k] += kk
+                a["kappa"] += kk
         a["c"] += p.tau_eff * self.b() * (G.T @ n)
         a["n"] += n.sum(0)
         a["G"] += float(G.mean())
@@ -313,6 +322,16 @@ class HybridRec:
             self.R = core.clip_weights(self.R + self.lam * dS, self.mask, self.wmin)
         self.R = core.homeostasis_update_emergent(self.R, self.mask, pi, self.eps_h, self.wmin)
         return dS
+
+    def class_table(self):
+        """The stimulus-conditioned walk since the last call: per class (executed action) the module-level pair table
+        [post module, pre module] as a share of the class's pairs (zeros if none) and the class's pair count; resets
+        self.kc. Returns dict(share=(K x Kr x Kr), n=(K,))."""
+        Hm = np.eye(self.Kr)[self.m]
+        n = self.kc.sum((1, 2))
+        share = np.einsum("ia,kij,jb->kab", Hm, self.kc, Hm) / np.maximum(n, 1)[:, None, None]
+        self.kc[:] = 0
+        return dict(share=share, n=n)
 
     def apply_task(self, dR):
         self.R = core.clip_weights(self.R + dR, self.mask, self.wmin)
@@ -370,12 +389,14 @@ class HybridRec:
         """Arrays for a checkpoint (load_state restores them)."""
         ro = self.run_obs or [np.zeros(0), np.zeros(0)]
         return dict(rec_R=self.R, rec_e=self.e, rec_tail=self.tail, rec_Gprev=self.Gprev, rec_nprev=self.nprev,
-                    rec_ro0=ro[0], rec_ro1=ro[1], rec_kappa=self.acc["kappa"], rec_c=self.acc["c"],
+                    rec_ro0=ro[0], rec_ro1=ro[1], rec_kappa=self.acc["kappa"], rec_c=self.acc["c"], rec_kc=self.kc,
                     rec_n=self.acc["n"], rec_G=self.acc["G"], rec_w=self.acc["w"], rec_steps=self.acc["steps"],
                     rec_log=json.dumps(self.log))
 
     def load_state(self, c):
         self.R, self.e, self.tail = c["rec_R"].copy(), c["rec_e"].copy(), c["rec_tail"].copy()
+        if "rec_kc" in c:
+            self.kc = c["rec_kc"].copy()
         self.Gprev, self.nprev = c["rec_Gprev"].copy(), c["rec_nprev"].copy()
         self.run_obs = [c["rec_ro0"].copy(), c["rec_ro1"].copy()] if c["rec_ro0"].size else None
         self.acc = dict(kappa=c["rec_kappa"].copy(), c=c["rec_c"].copy(), n=c["rec_n"].copy(), G=float(c["rec_G"]),

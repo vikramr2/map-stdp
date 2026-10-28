@@ -164,6 +164,33 @@ def _hybrid_columns_2():
 
 
 STUDIES["hybrid-columns-2"] = _hybrid_columns_2()
+
+
+def _hybrid_columns_3():
+    """hybrid-columns-3 (iteration 016 §15): the regimes of hybrid-columns on CartPole, LunarLander and Acrobot with
+    matched starts and the normalised action scores in every arm (--rate-match-rec --ent-match-rec --norm-logits;
+    no-ops for base except the normalisation, iteration 016 §10-13); --eta-cal on LunarLander and Acrobot, CK's preset
+    eta on CartPole as in hybrid-columns (its preset eta are SGD rates, not Adam steps). Primary: last-100 on
+    LunarLander, AUC on the others. Pairs as hybrid-columns-2 (without lat_on). Its base is the study's reference; the
+    CK-faithful bases are hybrid-columns' and hybrid-columns-2's."""
+    rec = ["--chi-rec", "0.3", "--rec"]
+    arms = {"base": [], "cols_lam0": [*rec, "cols", "--lam", "0"], "cols_on": [*rec, "cols", "--lam", "1"],
+            "cols_sealed": [*rec, "cols", "--rec-seal", "--lam", "0"]}
+    tasks = ("CartPole", "LunarLander", "Acrobot")
+    groups = {f"{t}_{a}": dict(task=t, engine="nlif", seeds=range(5000, 5020),
+                               flags=["--rate-target", "40", "--block", "20", "--fast",
+                                      *([] if t == "CartPole" else ["--eta-cal"]),
+                                      "--rate-match-rec", "--ent-match-rec", "--norm-logits", *af])
+              for t in tasks for a, af in arms.items()}
+    pairs = [(f"{t}_{a}", f"{t}_{b}") for t in tasks for a, b in
+             (("cols_lam0", "base"), ("cols_on", "base"), ("cols_sealed", "base"))]
+    pairs += [(f"{t}_{a}", f"{t}_{b}", "secondary") for t in tasks for a, b in
+              (("cols_on", "cols_lam0"), ("cols_on", "cols_sealed"), ("cols_lam0", "cols_sealed"))]
+    return dict(title="Map-STDP columns in the TD-STDP backbone on three tasks, matched starts, normalised scores",
+                groups=groups, pairs=pairs, reference={t: f"{t}_base" for t in tasks}, gates={})
+
+
+STUDIES["hybrid-columns-3"] = _hybrid_columns_3()
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
            "T_s_sd", "T_s_median", "T_m_mean", "T_m_sd", "T_m_n", "ret_mean", "ret_sd", "ret_ge_M", "ms_per_frame",
            "resumes", "mw_ref", "mw_T_f", "mw_T_s", "mw_ret", "gate_min_solved", "gate_pass"]

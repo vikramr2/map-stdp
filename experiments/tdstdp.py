@@ -135,6 +135,7 @@ class Config:
     r_ck_hz: float = 0.0  # calibrate_low: k = r_ck_hz / rate_target (0 = BindsNET's rate measured on this task)
     rate_match_rec: bool = False  # probe_rate with the arm's R at init: every arm starts at the target rate
     ent_match_rec: bool = False  # calibrate_low: alpha_a per arm so its initial policy entropy is the base run's
+    norm_logits: bool = False  # policy scores normalised by the pooled actor rate against rate_target (016 §13)
 
 
 PRESETS = {  # the authors' configs, reference/td_stdp/config/config_{cp,ll}.ini (eta in mV, before trace scaling)
@@ -154,7 +155,11 @@ PRESETS = {  # the authors' configs, reference/td_stdp/config/config_{cp,ll}.ini
 # cross terms would give 3^6 features). Taxi (500 states): one-hot, in_rep 1 (the smallest in_rep; calibrate_s_in
 # reaches 40 Hz).
 _NEW = dict(ck=True, eta_c=1.25e-4, eta_a=6.25e-5, init_scale=0.1, alpha_a=50.0, adam_eps=1e-9, r_ck_hz=R_CK_CARTPOLE,
-            c_e=1e-4)  # c_e: LunarLander's entropy bonus (Eq. 26), the authors' exploration setting beyond CartPole
+            c_e=1e-4)
+# c_e: LunarLander's entropy bonus (Eq. 26), the authors' exploration setting beyond CartPole. On an E-only actor the
+# bonus's update lowers the total actor drive (sum_k g_k r_k = -alpha Var(r) <= 0), a silencing drift; the authors'
+# pairing (opponent I posts, n_ai = n_ae) was piloted and withdrawn (base at floor); the fix is --norm-logits
+# (iteration 016 §13).
 PRESETS["Acrobot"] = dict(_NEW, episodes=500, max_eps=500, in_rep=16, f_order=1, f_cross=False, f_double=True,
                           f_basis=True, r_scale=0.02, beta_c=-1.2)
 PRESETS["Taxi"] = dict(_NEW, episodes=2000, max_eps=2000, onehot=True, in_rep=1, r_scale=0.0035, beta_c=-0.82)
@@ -188,6 +193,7 @@ def tokens(cfg):
     t += [f"rt{cfg.rate_target:g}"] if cfg.rate_target else []
     t += ["rm"] if cfg.rate_match_rec else []
     t += ["em"] if cfg.ent_match_rec else []
+    t += ["nl"] if cfg.norm_logits else []
     if cfg.rec != "none":
         d = Config()
         t += [cfg.rec, f"xr{cfg.chi_rec:g}"] + (["seal"] if cfg.rec_seal else [])
@@ -423,6 +429,11 @@ class CKRunner:
         self.reward, self.is_end, self.trunc = np.zeros(H), np.zeros(H, bool), np.zeros(H, bool)
         self.code, self.warm, self.rest = np.zeros(H, int), np.zeros(H, int), np.zeros(H, int)
         self.p, self.action, self.timer = np.full((H, K), 1 / K), self.rng.choice(K, size=H), np.zeros(H)
+        assert not cfg.norm_logits or cfg.rate_target > 0, "norm_logits: the reference r0 is rate_target"
+        self.apost = np.arange(nc, nc + K * (cfg.n_ae + cfg.n_ai))  # actor posts (latents excluded)
+        self.r0 = cfg.rate_target * 1e-3  # norm_logits reference, per ms
+        self.eps_n = cfg.alpha_a * self.r0 / (cfg.tau_n * cfg.n_ae)  # norm_logits floor: one spike moves <= one nat
+        self.prk, self.prbar = np.zeros((H, K)), np.zeros(H)  # norm_logits: column rates and pooled rate of self.p
         self.z, self.q = np.zeros((H, lay.n_post, lay.n_in)), np.zeros((H, na, lay.n_in))
         self.P, self.xprev = np.zeros((H, lay.n_in)), np.zeros((H, lay.n_in))
         self.rho, self.v, self.Vprev = np.zeros((H, lay.n_post)), np.zeros((H, lay.n_post)), np.zeros(H)
@@ -438,6 +449,7 @@ class CKRunner:
                                    cfg.la_beta if n_lat else 0.0, seal=cfg.rec_seal)
             self.hs = np.zeros((H, self.hr.Kr))  # module scores of the window's credit
             self.snaps = {0: self.hr.R.copy()}
+            self.snaps_kc = {}  # per snapshot: HybridRec.class_table() of the pairs since the previous snapshot
             self.rsq = np.zeros(5)  # rec_cal sums: actor g^2, actor W^2 (per entry), task dir^2, frame task^2, dS^2
             self.rcnt = np.zeros(3)  # counts: windows, frames (task), frames (structural)
             self.ftask = 0.0  # rec_cal: task direction summed over the current frame
@@ -454,17 +466,23 @@ class CKRunner:
             if self.hr is not None:
                 self.hr.reset_heads(rs)
         act, sa = lay.act, lay.sign[lay.n_crit:]
-        c = np.eye(K)[self.action][:, act] - self.p[:, act]  # (A - p) with p fixed at the sampling probability
-        kap = cfg.c_e * sa * td.entropy_coef(self.p)[:, act]  # Eq. 26, from the window's p
+        Ap = np.eye(K)[self.action] - self.p  # (A - p) with p fixed at the sampling probability
+        ge = td.entropy_coef(self.p)  # Eq. 25, from the window's p
+        if cfg.norm_logits:  # the exact gradient through the normalisation (016 §13): fac (A - p - u), fac (g - ug)
+            fac, u, ug = self.norm_factors(ge)
+            Ap, ge = fac[:, None] * (Ap - u[:, None]), fac[:, None] * (ge - ug[:, None])
+        c = Ap[:, act]
+        kap = cfg.c_e * sa * ge[:, act]  # Eq. 26
         if self.hr is not None:  # CK's action score per module (latents 0; their W rows get no update)
-            self.hs[:, :K] = cfg.alpha_a * (np.eye(K)[self.action] - self.p) / cfg.n_ae
+            self.hs[:, :K] = cfg.alpha_a * Ap / cfg.n_ae
             if lay.n_lat:
                 c[:, lay.lat], kap[:, lay.lat] = 0.0, 0.0
         f, r_ms = self.phi(self.obs), cfg.r_scale * self.reward / MS
         end, learn = self.is_end & ~self.trunc, self.code < 2
         for b in range(MS // cfg.block):
             self.learn_block(f, r_ms, end, learn, c, kap, np.arange(b * cfg.block, (b + 1) * cfg.block))
-        self.p = td.softmax(cfg.alpha_a * self.rho @ lay.Ma.T)
+        sc, self.prk, self.prbar = self.scores(self.rho)
+        self.p = td.softmax(sc)
         self.timer += MS
         nb = self.timer >= cfg.freeze
         prev = self.action.copy()
@@ -502,7 +520,8 @@ class CKRunner:
             if self.hr is not None:
                 self.hr.flush(n)
                 if n // SNAP_EVERY[cfg.task] > (n - int(new.sum())) // SNAP_EVERY[cfg.task]:
-                    self.snaps[n // SNAP_EVERY[cfg.task] * SNAP_EVERY[cfg.task]] = self.hr.R.copy()
+                    k = n // SNAP_EVERY[cfg.task] * SNAP_EVERY[cfg.task]
+                    self.snaps[k], self.snaps_kc[k] = self.hr.R.copy(), self.hr.class_table()
             if not self.solved and n > 100:
                 self.solved = trailing_mean_time(self.returns, SOLVE[cfg.task][0]) is not None
             self.done = (self.solved and n >= cfg.episodes) or n >= cfg.max_eps
@@ -557,9 +576,30 @@ class CKRunner:
             self.rec_block(X, xs, xq, d, g)
         self.xprev, self.P, self.rho, self.Vprev = x[-1], P[-1], R[-1], V[-1]
         if learn.any():
-            s = td.softmax(cfg.alpha_a * R[:, learn] @ lay.Ma.T)
+            s = td.softmax(self.scores(R[:, learn])[0])
             self.stats += [R[..., :nc][:, learn].mean(), R[..., nc:][:, learn].mean(),
                            -(s * np.log(np.maximum(s, 1e-300))).sum(-1).mean(), V[:, learn].mean(), 1]
+
+    def scores(self, R):
+        """Policy scores of rates R (..., n_post): alpha_a x column rates (Eq. 12); with norm_logits alpha_a r_k r0 /
+        max(rbar, eps_n), rbar the pooled actor rate and r0 = rate_target, so the policy is invariant to a common change
+        of all rates (iteration 016 §13). Returns (scores, column rates, rbar); the default path is CK's expression."""
+        if not self.cfg.norm_logits:
+            return self.cfg.alpha_a * R @ self.lay.Ma.T, None, None
+        rk, rbar = R @ self.lay.Ma.T, R[..., self.apost].mean(-1)
+        return self.cfg.alpha_a * (self.r0 / np.maximum(rbar, self.eps_n))[..., None] * rk, rk, rbar
+
+    def norm_factors(self, ge):
+        """norm_logits: of the window's p (self.prk, self.prbar) and action, the eligibility factor fac = r0 / max(rbar,
+        eps_n) and the common corrections u = (r_a - sum_k p_k r_k) / (K rbar), ug = sum_k g_k r_k / (K rbar) (the
+        exact gradients of log p_a and of H through the normalisation; 0 below the floor, where the normaliser is the
+        constant eps_n). Broadcast scalars per copy."""
+        K, rk, rbar = self.K, self.prk, self.prbar
+        above = rbar >= self.eps_n
+        den = K * np.maximum(rbar, self.eps_n)
+        u = np.where(above, (rk[np.arange(self.H), self.action] - (self.p * rk).sum(1)) / den, 0.0)
+        ug = np.where(above, (ge * rk).sum(1) / den, 0.0)
+        return self.r0 / np.maximum(rbar, self.eps_n), u, ug
 
     def rec_block(self, X, xs, xq, d, g):
         """rec (iteration 015, tdstdp.HybridRec), once per 20 ms window: the window's statistics, the one-hop credit
@@ -569,7 +609,7 @@ class CKRunner:
         and the structural increment are accumulated instead."""
         hr, cfg, nc, lay = self.hr, self.cfg, self.lay.n_crit, self.lay
         ri = hr.ridx
-        G, n = hr.window(X[..., ri], xs[:, ri], xq[:, ri])
+        G, n = hr.window(X[..., ri], xs[:, ri], xq[:, ri], self.action)
         hr.credit(self.hs, G, n, np.exp(-MS / cfg.tau_q))
         u = hr.task_dir(d.sum(0))
         if self.frozen:
@@ -594,7 +634,9 @@ class CKRunner:
             nl["lowrate"] = json.dumps(self.lowrate)
         if self.hr is not None:
             nl |= self.hr.state() | dict(eta_rec=self.cfg.eta_rec, lam_rec=self.cfg.lam_rec,
-                                        snaps=json.dumps({k: v.tolist() for k, v in self.snaps.items()}))
+                                        snaps=json.dumps({k: v.tolist() for k, v in self.snaps.items()}),
+                                        snaps_kc=json.dumps({k: {"share": v["share"].tolist(), "n": v["n"].tolist()}
+                                                             for k, v in self.snaps_kc.items()}))
         np.savez(fn, W=self.W, m=o.m if o else 0, v=o.v if o else 0, t=o.t if o else 0, frames=self.frames,
                  wall=wall, resumes=resumes, returns=json.dumps([self.returns, self.returns_heads]),
                  rng=json.dumps(self.rng.bit_generator.state), **nl)
@@ -613,6 +655,9 @@ class CKRunner:
             assert (float(c["eta_rec"]), float(c["lam_rec"])) == (self.cfg.eta_rec, self.cfg.lam_rec)
             self.hr.load_state(c)
             self.snaps = {int(k): np.array(v) for k, v in json.loads(str(c["snaps"])).items()}
+            if "snaps_kc" in c:
+                self.snaps_kc = {int(k): {"share": np.array(v["share"]), "n": np.array(v["n"])}
+                                 for k, v in json.loads(str(c["snaps_kc"])).items()}
         if self.opt is not None:
             self.opt.m, self.opt.v, self.opt.t = c["m"], c["v"], int(c["t"])
         self.returns, self.returns_heads = json.loads(str(c["returns"]))
@@ -641,7 +686,8 @@ def probe_rate(cfg):
     """Mean post spike probability per ms (all posts and copies) over CAL_TICKS ticks after the first WARM_N + 1, W
     frozen at its init, on the (seed, CAL_SEED) stream; rule off (CKRunner.probe). Without recurrence (rec 'none'), so
     every rec arm gets the base run's s_in; with rate_match_rec (engine nlif) with the arm's R at init (its kicks,
-    sealed or not), so every arm starts at the same post rate (iteration 016 §10)."""
+    sealed or not), so every arm starts at the same post rate (iteration 016 §10). The BindsNET reference probes of
+    the calibrations (engine lif, rate_target 0) run without norm_logits: they measure CK's backbone."""
     rec = cfg.rec if cfg.rate_match_rec and cfg.engine == "nlif" else "none"
     r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=MS, rec=rec), rng_seed=CAL_SEED, frozen=True)
     r.probe = True
@@ -660,12 +706,13 @@ def probe_entropy(cfg):
     r.probe = True
     for _ in range(WARM_N + 1):
         r.tick()
-    h = []
-    for _ in range(CAL_TICKS):
+    h, n = 0.0, 0  # pooled over the live copies of every tick (a tick with none, e.g. CartPole's one copy in reset,
+    for _ in range(CAL_TICKS):  # contributes nothing; a per-tick mean would be NaN there and derail match_entropy)
         r.tick()
         p = r.p[r.code < 2]
-        h.append(-(p * np.log(np.maximum(p, 1e-300))).sum(1).mean())
-    return float(np.mean(h))
+        h += float(-(p * np.log(np.maximum(p, 1e-300))).sum())
+        n += len(p)
+    return h / n
 
 
 def match_entropy(cfg, rtol=2e-3):
@@ -688,7 +735,7 @@ def calibrate_s_in(cfg, rtol=2e-3):
     (BindsNET, deterministic) on the same stream and initial W, or with rate_target that rate (Hz), by bisection (the
     noise stream is common to every probe; the closed loop makes the rate only approximately monotone in s_in).
     Returns (s_in, target, rate, BindsNET's rate), rates per ms."""
-    target = r_ck = probe_rate(dataclasses.replace(cfg, engine="lif", s_in=0.0, rate_target=0.0))
+    target = r_ck = probe_rate(dataclasses.replace(cfg, engine="lif", s_in=0.0, rate_target=0.0, norm_logits=False))
     if cfg.rate_target:  # low-rate regime: the target is rate_target, not BindsNET's rate
         target = cfg.rate_target * 1e-3
     lo, hi = 0.0, 1.0
@@ -713,7 +760,7 @@ def calibrate_low(cfg):
     record)."""
     if cfg.s_in:
         s_in, target, r_ck = cfg.s_in, cfg.rate_target * 1e-3, probe_rate(dataclasses.replace(
-            cfg, engine="lif", s_in=0.0, rate_target=0.0))
+            cfg, engine="lif", s_in=0.0, rate_target=0.0, norm_logits=False))
         got = probe_rate(cfg)
     else:
         s_in, target, got, r_ck = calibrate_s_in(cfg)
@@ -728,7 +775,7 @@ def calibrate_low(cfg):
         em = dict(ent_scale=float(f), h_base=h_base, h_got=h_got)
     es = np.ones(2)
     if not (cfg.sgd or cfg.adam):
-        rms_ck = calibrate_ck(dataclasses.replace(cfg, engine="lif", rate_target=0.0, s_in=0.0))[1]
+        rms_ck = calibrate_ck(dataclasses.replace(cfg, engine="lif", rate_target=0.0, s_in=0.0, norm_logits=False))[1]
         rms_low = calibrate_ck(low)[1]
         es = rms_ck / rms_low
         low = dataclasses.replace(low, eta_c=float(cfg.eta_c * es[0]), eta_a=float(cfg.eta_a * es[1]))
@@ -814,7 +861,7 @@ def run_ck(cfg, log_every=50, out=None, save_model=None):
                                                                        rec_cal)))
             r.save(ck, time.perf_counter() - t0, resumes)
     if r.hr is not None:
-        r.snaps[len(r.returns)] = r.hr.R.copy()
+        r.snaps[len(r.returns)], r.snaps_kc[len(r.returns)] = r.hr.R.copy(), r.hr.class_table()
         if save_model:
             np.savez(save_model, m=r.hr.m, roles=r.hr.roles, mask=r.hr.mask, ridx=r.hr.ridx,
                      episodes=np.array(sorted(r.snaps)), **{f"R_ep{k}": v for k, v in r.snaps.items()})
@@ -863,6 +910,10 @@ def result_ck(cfg, r, t0, eta_sgd, resumes, s_cal=None, rec_cal=None):
                       "within_final": float((hr.R * (hr.m[:, None] == hr.m[None, :])).sum() / hr.R.sum())}
         H = np.eye(hr.m.max() + 1)[hr.m]  # module weight table [post, pre] / total R, per snapshot (SNAP_EVERY)
         out["rec"]["RK"] = {str(k): (H.T @ v @ H / v.sum()).tolist() for k, v in sorted(r.snaps.items())}
+        # the stimulus-conditioned walk (016 §15): per snapshot and executed action, the module-level pair table
+        # [post, pre] as a share of that class's pairs since the previous snapshot, and the class's pair count
+        out["rec"]["RKc"] = {str(k): {"share": v["share"].tolist(), "n": v["n"].tolist()}
+                             for k, v in sorted(r.snaps_kc.items())}
         if rec_cal is not None:
             out["rec"]["cal"] = rec_cal
     return out
@@ -1063,6 +1114,8 @@ def main():
                     help="nlif: calibrate s_in with the arm's recurrence on (every arm at the same initial rate)")
     ap.add_argument("--ent-match-rec", action="store_true",
                     help="nlif low-rate: alpha_a per arm so the initial policy entropy is the base run's")
+    ap.add_argument("--norm-logits", action="store_true",
+                    help="nlif low-rate: policy scores normalised by the pooled actor rate against --rate-target")
     ap.add_argument("--save-model", default=None, help="rec: R snapshots (.npz) for structure analysis")
     ap.add_argument("--out", default=None, help="result .json path (default experiments/results/<name>.json)")
     ap.add_argument("--summary", action="store_true")
@@ -1086,6 +1139,8 @@ def main():
         kw["rate_match_rec"] = True
     if a.ent_match_rec:
         kw["ent_match_rec"] = True
+    if a.norm_logits:
+        kw["norm_logits"] = True
     if a.episodes is not None and not a.legacy:
         kw["max_eps"] = a.episodes
     if a.sgd:

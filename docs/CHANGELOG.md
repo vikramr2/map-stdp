@@ -2,6 +2,54 @@
 
 ## 2026-10-28
 
+### Added: the stimulus-conditioned walk monitor, `rec.RKc` (iteration 016 §15; user decision)
+
+- `HybridRec.window(…, cls)` splits the window's pair counts by the copies' executed action; `class_table()` reduces them per snapshot to module-level shares per class; results carry `rec.RKc`, checkpoints `rec_kc` / `snaps_kc`. The totals are unchanged (integer counts split per head), no update or draw is affected. It measures whether the cross-column walk depends on the state, the prerequisite for a stimulus-conditioned map term. Test `test_class_pair_counts`.
+
+### Fixed: `probe_entropy` NaN on CartPole; CartPole keeps CK's preset η (iteration 016 §15)
+
+- `probe_entropy` pooled over live copies of all ticks instead of a per-tick mean, which was NaN on ticks with no live copy (CartPole's one copy in reset) and drove `match_entropy` to its floor (f = 0.125: the column arms' policy stayed uniform). Test added. Acrobot and LunarLander were unaffected.
+- `hybrid-columns-3`: CartPole without `--eta-cal` (its preset η are SGD rates; calibrating them gave η_a 8.7 mV and a silent actor), as in `hybrid-columns`.
+
+### Declared: study `hybrid-columns-3` (iteration 016 §15; user decision on the sequence)
+
+- Three tasks × the three regimes vs base, seeds 5000–5019, every arm with `--eta-cal --rate-match-rec --ent-match-rec --norm-logits`. README draft written; CartPole and LunarLander stability pilots under the normalised scores run before pre-registration. Test `test_hybrid_columns_3_declared`.
+- Sequence (user): this study, then the race readout (§14.1 Stage B), then a stimulus-conditioned map term informed by the results. The conditioned map term is feasible and cheap (S × K × K), but the softmax readout cannot see R's structure, so it waits for a readout where links act at the decision.
+
+### Pilot: `--norm-logits` removes the Acrobot column deficit (iteration 016 §13)
+
+- Acrobot, dev seeds 0–9, every arm normalised: rates hold (0.04–0.05 per ms through episode 500), no column run collapsed or slow (0/30), and the column arms are level with base (HL +13, +4, −2, p ≥ 0.39). All stability gates passed. The §12 deficit was the silencing drift acting through the loop. Base under normalisation is −186 vs −163 unnormalised (its late re-flattening was the drift).
+
+### Added: `--norm-logits`, divisive normalisation of the action scores (iteration 016 §13; user decision)
+
+- Policy scores α_a r_k r₀ / max(r̄, ε): r̄ the pooled actor rate, r₀ = `rate_target`, ε = α_a r₀ / (τ_n n_ae) (the neuroscientist's rule: one spike moves a score by at most one nat). The actor eligibility and the entropy bonus use the exact gradient through the normalisation (`CKRunner.scores`, `norm_factors`; two broadcast scalars per copy), which cancels the entropy bonus's silencing drift. Default off; the default path's expressions are unchanged; token `nl`. Test `test_norm_logits` (scale invariance, CK's scores at r̄ = r₀, the floor, finite-difference gradients).
+- Neuroscientist check: gradient and locality confirmed; pooled-over-options normalisation of action value has precedent in LIP (Louie, Grattan & Glimcher 2011). The pilot (Acrobot, 4 arms × dev seeds 0–9) is a stability pilot; this is the third gain-control choice made after seeing dev returns, recorded as such.
+
+### Pilot: the fixed Acrobot preset puts base at floor (iteration 016 §13)
+
+- **Withdrawn (user decision):** `_NEW` is back to `n_ai` 0. Gain control is instead divisive normalisation of the action scores (`--norm-logits`, Proposal in 016 §13), chosen over the authors' α_a pairing and over dropping the entropy bonus.
+
+- With opponent I posts the actor rate holds (the drift is gone) but the policy sharpens early: base collapsed in 3/10 dev runs (AUC median −264 vs −163 E-only), `cols_on` in 7/10. At init the opponent readout's entropy is 0.874 vs 0.969, and its logit learning gain is about doubled. Base at floor: reported to the user before any change.
+
+### Changed: expert review, the entropy-bonus confound and the Acrobot preset (iteration 016 §13)
+
+- Divergent-then-convergent review (neuroscientist, snn-expert) of how to use columns and the map term in the TD-STDP backbone. Shortlist: actor gain control; columns as a competitive readout (inhibition plus a race) giving the map term a function; latent state modules with latent→action exempt from the map term.
+- **Finding (snn-expert, development):** the Acrobot actor-rate decline is the entropy bonus on an E-only actor (Σ_k g_k r_k = −α Var(r) ≤ 0), a silencing drift the loop roughly doubles. The `hybrid-columns-2` contrasts are confounded by it.
+- **Preset (user decision):** `_NEW` gains `n_ai` 20 = `n_ae`, the authors' pairing of c_e with opponent I posts (`config_ll.ini`). Changed after the study for a mechanistic reason independent of return; `hybrid-columns-2` stands as run. `test_preset_closed_loop` checks the pairing.
+- **Softened:** 016 §11 (the amplified logit spread is mostly noise), §12 (the loop's cost is confounded by the drift; P-seq is not a clean sequencing test), 015 §8 (the early LunarLander speed-up was mostly a starting-gain effect; sealed R and late `cols_on` are fixed random amplifiers, not learned structure).
+- Pilot of the fixed preset: Acrobot, 4 arms × dev seeds 0–9, both matchings, stability gates only.
+
+### Results: study `hybrid-columns-2` (iteration 016 §12)
+
+- Acrobot, 20 seeds per arm, AUC vs base:
+  - `cols_lam0` −35.2 [−59.8, −12.3] and `cols_sealed` −31.0 [−56.9, −9.8]: both **worse** (Holm p 0.014);
+  - `cols_on` −16.6 [−43.1, +4.6]: inconclusive.
+- Secondary contrasts are null. P-seq is level (−3.1), so the cost comes from the within-column loop, not from cross-column links.
+
+### Started: study `hybrid-columns-2` (iteration 016 §12)
+
+- README pre-registered 2026-10-28 15:25 EDT (user approved; Δ = 25 confirmed). Launched from worktree `../map-stdp-hc2` at `8d0a9e4`: Acrobot, 4 arms × seeds 4000–4019.
+
 ### Changed: `hybrid-columns-2` uses both matchings (user decision)
 
 - Every group of `STUDIES["hybrid-columns-2"]` now carries `--rate-match-rec --ent-match-rec` (no-ops for base). The pre-registration draft `reports/hybrid-columns-2/README.md` states the matched starts, the updated pilot expectations, and a reworded P-seq reading. Δ = 25 still awaits the user's confirmation.
