@@ -305,3 +305,30 @@ All 240 runs completed (0 failed) in the worktree `../map-stdp-ev4`, branch `eme
 - **The task term alone also structures W.** With λ = 0, latent→action weight goes to 0 and A↔A stays at ≤ 0.6%. Off is implicit modularity, not none.
 
 The three regimes (implicit, learned, enforced) are compared again on LunarLander in iteration 015.
+
+## 12. Exploratory, not pre-registered: description length vs an SOP energy proxy (2026-10-27)
+
+**Question (user):** does description length track an energy proxy based on synaptic operations?
+
+**Data:** the saved `emergent-v4` models of the three spiking engines, W frozen, at 7 snapshots per run (episodes 0–1500 every 250), 50 held-out stimuli per snapshot (`m2.held_out_obs`). Scratch scripts, development only.
+
+**Measures:**
+- L_obs as `evaluate_emergent` computes it (it reproduces the logged value: 7.433 vs 7.430 bits on LIF on, seed 2000);
+- spikes per head and frame;
+- SOPs = Σ_j n_j × (synapses of j);
+- effective SOPs, counting only synapses above twice the weight floor;
+- the cross-module share of effective SOPs, routing excluded.
+
+**Spearman ρ of L_obs with each measure:**
+
+| Engine | Effective SOPs, across 60 final networks | Effective SOPs, over training (median per-run ρ; share of runs with ρ > 0) | Spikes, across final networks | Effective SOPs, map on vs off |
+| --- | --- | --- | --- | --- |
+| branching | +0.61 (p 3e-7) | +0.54; 85% | −0.48 | −19% |
+| QIF | +0.95 (p 2e-31) | +0.68; 90% | +0.96 | −64% |
+| LIF | +0.91 (p 2e-24) | +0.89; 87% | +0.10 | −53% |
+
+**Reading:**
+- **Description length tracks connectivity-weighted activity, not spike count.** Effective SOPs correlate with L_obs on every engine, both across networks and along training.
+- **Raw spikes do not, except on QIF.** On LIF, spikes rise during training while L_obs falls (median per-run ρ −0.89).
+- **SOPs over all existing synapses correlate weakly** (ρ +0.33 to +0.53), because the mask is fixed.
+- **Within an arm the correlation weakens,** except on QIF (on +0.77, sealed +0.72). Much of the cross-network correlation is the arm effect: the map term drives cross-module weights to the floor, which both lowers L and removes effective synapses.

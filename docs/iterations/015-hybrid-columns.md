@@ -165,3 +165,53 @@ No run solves.
 | latent→action synapses at w_min in < 50% by episode 200 | 0% at 200, 14–22% at 3000 | yes |
 
 The arm passes on the letter of the criteria, so it stays in the study as pre-set. **But the latents are close to disconnected:** latent→action carries 0.25 of the R weight at init, 0.02 by episode 200 and 0.004 at the end. The map term removes latent→action as cross-module flow, and the barrier (`la_beta` 0.3) does not hold it. Returns are level with cols r = 1.
+
+## 7. Reported study `hybrid-columns` (launched 2026-10-27 20:02 EDT)
+
+- **Pre-registration:** `reports/hybrid-columns/README.md`, on branch `hybrid-columns-study`.
+- **Code:** git `0d2d851` with an empty patch, run from the worktree `../map-stdp-hc`.
+- **Design:** 2 tasks × 5 arms × seeds 3000–3019 = 200 runs, 64 workers.
+- **Command:** `python -m experiments.report run hybrid-columns --workers 64` (runner PID 3216629, log `../map-stdp-hc/logs/hybrid-columns.log`).
+- **Before launch:**
+  - `cols_sealed` was added: `--rec-seal`, plus the `calibrate_rec` fix for sealed R.
+  - Smoke runs on seed 0: CartPole solved (T_s 234); LunarLander stable over 300 episodes; R unchanged in both.
+  - `pytest -q tests`: 42 passed in the worktree.
+
+## 8. Study results (completed 2026-10-28 10:00 EDT)
+
+- 200 of 200 runs, 0 failed, on branch `hybrid-columns-study` (git `0d2d851`, empty patch).
+- `summary.md` and `pairs.csv` were written by `experiments.report` in the worktree. They reach `main` only by merging that branch.
+- No LunarLander run solved (0/100; all ran to the 10000-episode cap).
+
+**Headline verdicts** (Δ = 25; Hodges–Lehmann shift vs `base` [95% CI], Holm-adjusted p):
+
+| Contrast | CartPole AUC | Verdict | LunarLander last-100 | Verdict |
+| --- | --- | --- | --- | --- |
+| `cols_lam0` vs base | −5.2 [−27.6, +10.2], p 1 | inconclusive (CI crosses −Δ) | −6.9 [−16.5, +0.8], p 0.43 | non-inferior |
+| `cols_on` vs base | −15.6 [−32.0, +10.1], p 1 | inconclusive (CI crosses −Δ) | −2.0 [−14.4, +11.2], p 1 | non-inferior |
+| `cols_sealed` vs base | +0.4 [−18.1, +18.8], p 1 | non-inferior | −0.5 [−9.6, +6.9], p 1 | non-inferior |
+
+- No regime improves the primary metric, and none is worse.
+- **Secondary contrasts:** no difference between regimes on either task (all Holm p ≥ 0.23).
+  - `lat_on` vs `cols_on` on CartPole: AUC +28 [+1.7, +45], p 0.039 unadjusted, Holm 0.23.
+
+**Secondary metrics (pre-registered, not tested for the claims):**
+- **LunarLander AUC over the first 3000 episodes:** every column arm learns faster than base.
+  - `cols_lam0` +10.1 [+6.4, +13.4] (Holm 8e-5);
+  - `cols_on` +10.7 [+6.9, +14.1] (Holm 2.4e-5);
+  - `cols_sealed` +8.8 [+4.7, +12.9] (Holm 0.0014).
+  
+  T_f: 1100–1290 with columns vs 1546 for base. The early lead seen in pilot C and at mid-run is real, but base catches up by 10000 episodes.
+- **CartPole solved:** 20/20 for every column arm (`lat_on` 19/20) vs 16/20 for base. Final last-100: 499.7–500.0 vs 491.4.
+- **Module structure of R** (`rec.RK`, share of R's weight within columns, from first to last snapshot, mean over 20 seeds):
+
+  | Arm | CartPole | LunarLander |
+  | --- | --- | --- |
+  | `cols_lam0` | 0.909 → 0.999 | 0.769 → **0.399** |
+  | `cols_on` | 0.909 → 0.999 | 0.769 → 0.996 |
+  | `cols_sealed` | 1 → 1 | 1 → 1 |
+
+  - **CartPole:** the task term seals the columns on its own, as the map term does.
+  - **LunarLander:** the task term builds a hub. 60% of R's weight crosses columns, and 97% of that goes into the main-engine column, about equally from the no-op, left and right columns (sd of the within share 0.02 over seeds). The map term prunes this hub (within share 0.996).
+  - **Performance converges although the structure diverges:** a hub (`cols_lam0`), modular (`cols_on`) and sealed (`cols_sealed`) reach the same final return and the same early speed-up (secondary contrasts all null).
+  - **`lat_on`:** the within share over the whole table, latents included, rises from 0.44 to 0.64 (LunarLander) and from 0.38 to 0.52 (CartPole).

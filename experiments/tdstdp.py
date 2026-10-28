@@ -53,7 +53,7 @@ import time
 import gymnasium as gym
 import numpy as np
 
-from experiments.tasks import TASKS, critic_layer, random_states
+from experiments.tasks import FOURIER_BOUNDS, TASKS, Task, critic_layer, random_states
 from mapstdp import lif
 from mapstdp import tdstdp as td
 
@@ -62,9 +62,12 @@ TDSTDP_SEED, CAL_SEED, CAL_TICKS, FBAR_STATES, MV_LEGACY, MS, WARM_TICKS = 1302,
 MV, WARM_N = td.THETA_L, 5  # authors' code: mV per unit of branching weight; batch_envs warm_n (windows)
 PAPER = {"CartPole": dict(T_f=(57.0, 23.97), T_s=(169.5, 23.47)),
          "LunarLander": dict(T_f=(383.8, 71.49), T_s=(2575.2, 666.51))}  # CK Table 2 (10 runs)
-SOLVE = {"CartPole": (500.0, "all"), "LunarLander": (200.0, "mean")}  # perfect score; solved = last 100 all / mean
-M_THR = {"CartPole": 475.0, "LunarLander": 200.0}  # secondary: trailing-100 mean threshold (summary only)
-SNAP_EVERY = {"CartPole": 100, "LunarLander": 500}  # rec: R snapshots every this many pooled episodes
+SOLVE = {"CartPole": (500.0, "all"), "LunarLander": (200.0, "mean"),  # perfect score; solved = last 100 all / mean
+         "Acrobot": (-100.0, "mean"), "Taxi": (8.0, "mean")}  # iteration 016: Gymnasium's reward_threshold
+M_THR = {"CartPole": 475.0, "LunarLander": 200.0, "Acrobot": -100.0, "Taxi": 8.0}  # secondary: trailing-100 mean
+SNAP_EVERY = {"CartPole": 100, "LunarLander": 500, "Acrobot": 100, "Taxi": 200}  # rec: R snapshots (pooled episodes)
+TD_TASKS = TASKS | {"Taxi": Task("Taxi-v4", 6, 0, 2000, None, "onehot")}  # CKRunner's tasks (Taxi: tdstdp only)
+R_CK_CARTPOLE = 140.0  # Hz: BindsNET's initial post rate on CartPole (hybrid-columns, 20 seeds: 138-142)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -127,6 +130,11 @@ class Config:
     n_lat_mod: int = 2  # rec 'lat': latent modules of n_ae posts each (input->latent W frozen at init)
     la_beta: float = 0.3  # rec 'lat': latent-output barrier (core.latent_output_barrier)
     rec_seal: bool = False  # enforced modularity: R without cross-module synapses (same draws; iteration 015)
+    # iteration 016: tasks without the authors' configs
+    onehot: bool = False  # ck_encoder: one-hot of a Discrete observation (n states), repeated in_rep times
+    r_ck_hz: float = 0.0  # calibrate_low: k = r_ck_hz / rate_target (0 = BindsNET's rate measured on this task)
+    rate_match_rec: bool = False  # probe_rate with the arm's R at init: every arm starts at the target rate
+    ent_match_rec: bool = False  # calibrate_low: alpha_a per arm so its initial policy entropy is the base run's
 
 
 PRESETS = {  # the authors' configs, reference/td_stdp/config/config_{cp,ll}.ini (eta in mV, before trace scaling)
@@ -137,8 +145,22 @@ PRESETS = {  # the authors' configs, reference/td_stdp/config/config_{cp,ll}.ini
                         eta_c=1.25e-4, eta_a=6.25e-5, init_scale=0.125, alpha_c=4.0, beta_c=-2.0, alpha_a=15.0,
                         tau_q=20.0, c_e=1e-4, tau_d=2000.0, r_scale=0.012, freeze=40, adam_eps=1e-9),
 }  # LunarLander: weight_reg = 1e-8 is never passed to the rule (main.py), so c_w = 0; block 20 is ours (B = 1 theirs)
+# Iteration 016, pre-set rules (no authors' config; never tuned on return): CartPole's populations, alpha_a, tau_d,
+# freeze and init; LunarLander's Adam steps as the --eta-cal step (the authors' only Adam steps); k from CartPole's
+# BindsNET rate (R_CK_CARTPOLE), so the policy logits keep CartPole's range; r_scale = 0.02 / per-step reward RMS of a
+# random policy (CartPole's RMS is 1); beta_c = min(-0.2, 1.2 V_rand), V_rand = r_scale E_rand[r] tau_d / MS the value
+# of a random policy, so V = alpha_c rate + beta_c >= beta_c can represent it (LunarLander's -2.0 vs V_rand -2.31;
+# CartPole's floor -0.2; test_tasks016). Acrobot (6-dim): LunarLander's encoder (CartPole's order-2
+# cross terms would give 3^6 features). Taxi (500 states): one-hot, in_rep 1 (the smallest in_rep; calibrate_s_in
+# reaches 40 Hz).
+_NEW = dict(ck=True, eta_c=1.25e-4, eta_a=6.25e-5, init_scale=0.1, alpha_a=50.0, adam_eps=1e-9, r_ck_hz=R_CK_CARTPOLE,
+            c_e=1e-4)  # c_e: LunarLander's entropy bonus (Eq. 26), the authors' exploration setting beyond CartPole
+PRESETS["Acrobot"] = dict(_NEW, episodes=500, max_eps=500, in_rep=16, f_order=1, f_cross=False, f_double=True,
+                          f_basis=True, r_scale=0.02, beta_c=-1.2)
+PRESETS["Taxi"] = dict(_NEW, episodes=2000, max_eps=2000, onehot=True, in_rep=1, r_scale=0.0035, beta_c=-0.82)
 CK_BOUNDS = {"CartPole": ([-2.4, -3.2, -np.pi / 12, -3.2], [2.4, 3.2, np.pi / 12, 3.2]),  # main.py state_lim
-             "LunarLander": ([-1, -0.2, -1, -1, -1, -1, 0, 0], [1, 2, 1, 1, 1, 1, 1, 1])}
+             "LunarLander": ([-1, -0.2, -1, -1, -1, -1, 0, 0], [1, 2, 1, 1, 1, 1, 1, 1]),
+             "Acrobot": FOURIER_BOUNDS["Acrobot-v1"]}  # iteration 016: the M3 bounds
 LEGACY = {  # pre-audit (E1, E2, first E3/E4): CK Table 1 and §4 in CK units, divided by MV_LEGACY
     "CartPole": {},
     "LunarLander": dict(episodes=3000, adam=True, heads=16, block=20, spec="f1c1b", in_rep=16, n_ce=128, n_ci=128,
@@ -164,6 +186,8 @@ def tokens(cfg):
     t += [f"si{cfg.s_in:g}"] if cfg.s_in else []
     t += [cfg.engine.replace("-", "")] if cfg.engine != "numpy" else []
     t += [f"rt{cfg.rate_target:g}"] if cfg.rate_target else []
+    t += ["rm"] if cfg.rate_match_rec else []
+    t += ["em"] if cfg.ent_match_rec else []
     if cfg.rec != "none":
         d = Config()
         t += [cfg.rec, f"xr{cfg.chi_rec:g}"] + (["seal"] if cfg.rec_seal else [])
@@ -329,7 +353,11 @@ def ck_encoder(cfg):
     """util.State_to_spike_Fourier: the observation scaled to [0, 1] by CK_BOUNDS (clipped), coefficient vectors
     {0..order}^d (cross terms, the constant included) or order 1..f_order per dimension; (1 + cos) / 2 or the ON/OFF
     split ([cos]+, [-cos]+); a constant unit if f_basis; the whole vector repeated in_rep times. Returns
-    (phi: H x d observations -> H x n_in input rates, n_in)."""
+    (phi: H x d observations -> H x n_in input rates, n_in). onehot: a Discrete observation's one-hot (iteration
+    016)."""
+    if cfg.onehot:
+        n = gym.make(TD_TASKS[cfg.task].env_id).observation_space.n
+        return lambda o: np.tile(np.eye(n)[np.asarray(o).astype(int)], cfg.in_rep), int(n) * cfg.in_rep
     lo, hi = (np.array(v, float) for v in CK_BOUNDS[cfg.task])
     n, k = len(lo), cfg.f_order
     if cfg.f_cross:
@@ -370,7 +398,7 @@ class CKRunner:
         assert cfg.rec == "none" or (cfg.engine == "nlif" and cfg.block == MS and not cfg.adam), \
             "rec: engine nlif, block 20, no Adam"
         self.cfg, self.frozen = cfg, frozen
-        task = TASKS[cfg.task]
+        task = TD_TASKS[cfg.task]
         self.K, self.H = K, H = task.n_actions, cfg.heads
         self.phi, n_in = ck_encoder(cfg)
         n_lat = cfg.n_lat_mod * cfg.n_ae if cfg.rec == "lat" else 0
@@ -612,8 +640,10 @@ def calibrate_ck(cfg):
 def probe_rate(cfg):
     """Mean post spike probability per ms (all posts and copies) over CAL_TICKS ticks after the first WARM_N + 1, W
     frozen at its init, on the (seed, CAL_SEED) stream; rule off (CKRunner.probe). Without recurrence (rec 'none'), so
-    every rec arm gets the base run's s_in."""
-    r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=MS, rec="none"), rng_seed=CAL_SEED, frozen=True)
+    every rec arm gets the base run's s_in; with rate_match_rec (engine nlif) with the arm's R at init (its kicks,
+    sealed or not), so every arm starts at the same post rate (iteration 016 §10)."""
+    rec = cfg.rec if cfg.rate_match_rec and cfg.engine == "nlif" else "none"
+    r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=MS, rec=rec), rng_seed=CAL_SEED, frozen=True)
     r.probe = True
     for _ in range(WARM_N + 1):
         r.tick()
@@ -621,6 +651,36 @@ def probe_rate(cfg):
     for _ in range(CAL_TICKS):
         r.tick()
     return r.spk[0] / r.spk[1]
+
+
+def probe_entropy(cfg):
+    """Mean policy entropy H(p) (nats, over live copies) over CAL_TICKS ticks after the first WARM_N + 1, W and the
+    arm's R frozen at init, on the (seed, CAL_SEED) stream; rule off (CKRunner.probe)."""
+    r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=MS), rng_seed=CAL_SEED, frozen=True)
+    r.probe = True
+    for _ in range(WARM_N + 1):
+        r.tick()
+    h = []
+    for _ in range(CAL_TICKS):
+        r.tick()
+        p = r.p[r.code < 2]
+        h.append(-(p * np.log(np.maximum(p, 1e-300))).sum(1).mean())
+    return float(np.mean(h))
+
+
+def match_entropy(cfg, rtol=2e-3):
+    """Pre-set actor gain of a rec arm (iteration 016 §11; not tuned on return): the factor f on alpha_a such that
+    probe_entropy with the arm's R equals the base run's (rec 'none', same s_in and alpha_a), by bisection on log f in
+    [1/8, 8]. The within-column loop amplifies rate differences between columns, so at a matched mean rate the arm's
+    policy is sharper; f < 1 undoes that gain. Returns (f, target entropy, entropy at f)."""
+    target = probe_entropy(dataclasses.replace(cfg, rec="none"))
+    at = lambda f: probe_entropy(dataclasses.replace(cfg, alpha_a=f * cfg.alpha_a))  # noqa: E731
+    lo, hi = -3.0, 3.0  # log2 f; H falls with f
+    while hi - lo > rtol:
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if at(2 ** mid) > target else (lo, mid)
+    f = 2 ** ((lo + hi) / 2)
+    return f, target, at(f)
 
 
 def calibrate_s_in(cfg, rtol=2e-3):
@@ -645,7 +705,8 @@ def calibrate_low(cfg):
     """Low-rate nlif regime (--rate-target R Hz; iteration 015 step 3), pre-set, not tuned on return, all without
     recurrence (so every rec arm of a seed shares it): tau_ref 2 ms (lif.DT1R); s_in by calibrate_s_in so that the mean
     initial post rate is R (unless --s-in is given); k = r_CK / R with r_CK BindsNET's initial rate on the same probe;
-    alpha_a and alpha_c times k (policy logits and V keep CK's range; beta_c kept); without --eta-cal or Adam, eta_c
+    alpha_a and alpha_c times k (policy logits and V keep CK's range; beta_c kept), and with ent_match_rec alpha_a
+    times match_entropy's f (the arm's initial policy entropy is the base run's); without --eta-cal or Adam, eta_c
     and eta_a times RMS(g_CK) / RMS(g_low), the per-ms update RMS at init with W frozen on the CAL stream
     (calibrate_ck's measurement) of BindsNET's engine at CK's alphas and of the low-rate engine at the scaled ones
     (with --eta-cal, calibrate_ck normalises eta by RMS(g) itself). Returns (cfg with s_in, alphas and etas replaced,
@@ -656,8 +717,15 @@ def calibrate_low(cfg):
         got = probe_rate(cfg)
     else:
         s_in, target, got, r_ck = calibrate_s_in(cfg)
+    if cfg.r_ck_hz:  # iteration 016: CartPole's BindsNET rate, not this task's
+        r_ck = cfg.r_ck_hz * 1e-3
     k = r_ck / target
     low = dataclasses.replace(cfg, s_in=s_in, alpha_a=k * cfg.alpha_a, alpha_c=k * cfg.alpha_c)
+    em = dict(ent_scale=1.0)
+    if cfg.ent_match_rec and cfg.rec != "none":
+        f, h_base, h_got = match_entropy(low)
+        low = dataclasses.replace(low, alpha_a=f * low.alpha_a)
+        em = dict(ent_scale=float(f), h_base=h_base, h_got=h_got)
     es = np.ones(2)
     if not (cfg.sgd or cfg.adam):
         rms_ck = calibrate_ck(dataclasses.replace(cfg, engine="lif", rate_target=0.0, s_in=0.0))[1]
@@ -666,7 +734,7 @@ def calibrate_low(cfg):
         low = dataclasses.replace(low, eta_c=float(cfg.eta_c * es[0]), eta_a=float(cfg.eta_a * es[1]))
     rep = {f: getattr(low, f) for f in ("s_in", "alpha_a", "alpha_c", "eta_c", "eta_a")}
     return low, dict(k=float(k), r_ck_hz=1e3 * float(r_ck), r_target_hz=cfg.rate_target, r_got_hz=1e3 * float(got),
-                     s_in=float(s_in), alpha_scale=float(k), eta_scale=[float(x) for x in es], cfg=rep)
+                     s_in=float(s_in), alpha_scale=float(k), eta_scale=[float(x) for x in es], cfg=rep, **em)
 
 
 def calibrate_rec(cfg):
@@ -931,12 +999,12 @@ def summary():
     for f in sorted(glob.glob(str(OUT / "tdstdp_*.json"))):
         groups.setdefault(pathlib.Path(f).stem.rsplit("_s", 1)[0], []).append(json.loads(pathlib.Path(f).read_text()))
     ms = lambda m, s: f"{m:6.1f} +- {s:5.1f}" if m == m else "   nan          "  # noqa: E731
-    for task in PAPER:
+    for task in PRESETS:
         if not any(g.split("_")[1] == task for g in groups):
             continue
-        p = PAPER[task]
-        print(f"\n{task}: CK 2020 T_f {p['T_f'][0]:.1f} +- {p['T_f'][1]:.1f}  "
-              f"T_s {p['T_s'][0]:.1f} +- {p['T_s'][1]:.1f}")
+        p = PAPER.get(task)
+        print(f"\n{task}: " + (f"CK 2020 T_f {p['T_f'][0]:.1f} +- {p['T_f'][1]:.1f}  "
+                                f"T_s {p['T_s'][0]:.1f} +- {p['T_s'][1]:.1f}" if p else "(no CK 2020 result)"))
         for k, R in v4_returns(task).items():
             print(f"  {k:28} n={len(R):2d} ret {np.mean(R):7.1f} +- {np.std(R):5.1f}")
         for ck, base in ((False, f"tdstdp_{task}"), (True, f"tdstdp_{task}_ck")):
@@ -991,6 +1059,10 @@ def main():
                     ("la-beta", float, "rec lat: latent-output barrier")):
         ap.add_argument(f"--{f}", type=t, default=None, help=h)
     ap.add_argument("--rec-seal", action="store_true", help="rec: no cross-module synapses in R (enforced modularity)")
+    ap.add_argument("--rate-match-rec", action="store_true",
+                    help="nlif: calibrate s_in with the arm's recurrence on (every arm at the same initial rate)")
+    ap.add_argument("--ent-match-rec", action="store_true",
+                    help="nlif low-rate: alpha_a per arm so the initial policy entropy is the base run's")
     ap.add_argument("--save-model", default=None, help="rec: R snapshots (.npz) for structure analysis")
     ap.add_argument("--out", default=None, help="result .json path (default experiments/results/<name>.json)")
     ap.add_argument("--summary", action="store_true")
@@ -1010,6 +1082,10 @@ def main():
         kw["rec"] = a.rec
     if a.rec_seal:
         kw["rec_seal"] = True
+    if a.rate_match_rec:
+        kw["rate_match_rec"] = True
+    if a.ent_match_rec:
+        kw["ent_match_rec"] = True
     if a.episodes is not None and not a.legacy:
         kw["max_eps"] = a.episodes
     if a.sgd:

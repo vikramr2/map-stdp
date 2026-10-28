@@ -139,6 +139,31 @@ def _hybrid_columns():
 
 
 STUDIES["hybrid-columns"] = _hybrid_columns()
+
+
+def _hybrid_columns_2():
+    """hybrid-columns-2 (iteration 016): the regimes of hybrid-columns on Acrobot (exclusive torques that must be
+    sequenced), preset by the pre-set rules of tdstdp.PRESETS (--eta-cal). Taxi failed the pilot's floor gate (no
+    deliveries; iteration 016 §9) and is not in the study. Every arm is rate- and entropy-matched at init
+    (--rate-match-rec --ent-match-rec; no-ops for base; iteration 016 §10-11). Primary: AUC. Pairs as hybrid-columns
+    without lat_on."""
+    rec = ["--chi-rec", "0.3", "--rec"]
+    arms = {"base": [], "cols_lam0": [*rec, "cols", "--lam", "0"], "cols_on": [*rec, "cols", "--lam", "1"],
+            "cols_sealed": [*rec, "cols", "--rec-seal", "--lam", "0"]}
+    tasks = ("Acrobot",)
+    groups = {f"{t}_{a}": dict(task=t, engine="nlif", seeds=range(4000, 4020),
+                               flags=["--rate-target", "40", "--block", "20", "--fast", "--eta-cal",
+                                      "--rate-match-rec", "--ent-match-rec", *af])
+              for t in tasks for a, af in arms.items()}
+    pairs = [(f"{t}_{a}", f"{t}_{b}") for t in tasks for a, b in
+             (("cols_lam0", "base"), ("cols_on", "base"), ("cols_sealed", "base"))]
+    pairs += [(f"{t}_{a}", f"{t}_{b}", "secondary") for t in tasks for a, b in
+              (("cols_on", "cols_lam0"), ("cols_on", "cols_sealed"), ("cols_lam0", "cols_sealed"))]
+    return dict(title="Map-STDP columns in the TD-STDP backbone on Acrobot, no Adam, noisy LIF at 40 Hz",
+                groups=groups, pairs=pairs, reference={t: f"{t}_base" for t in tasks}, gates={})
+
+
+STUDIES["hybrid-columns-2"] = _hybrid_columns_2()
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
            "T_s_sd", "T_s_median", "T_m_mean", "T_m_sd", "T_m_n", "ret_mean", "ret_sd", "ret_ge_M", "ms_per_frame",
            "resumes", "mw_ref", "mw_T_f", "mw_T_s", "mw_ret", "gate_min_solved", "gate_pass"]
@@ -258,8 +283,8 @@ def load_runs(d, k):
 
 
 _auc_min = lambda r: float(np.mean(r["returns"][:r["config"]["episodes"]]))  # noqa: E731
-TD_PAIR_METRICS = {  # tdstdp-runner pairs (iteration 015); primary: CartPole AUC, LunarLander last-100 return
-    "primary": lambda r: _auc_min(r) if r["config"]["task"] == "CartPole" else float(np.mean(r["returns"][-100:])),
+TD_PAIR_METRICS = {  # tdstdp-runner pairs (iteration 015); primary: LunarLander last-100 return, other tasks AUC
+    "primary": lambda r: float(np.mean(r["returns"][-100:])) if r["config"]["task"] == "LunarLander" else _auc_min(r),
     "auc": _auc_min, "ret": lambda r: float(np.mean(r["returns"][-100:]))}
 
 
@@ -304,9 +329,9 @@ def summarize(study, root=REPORTS, studies=None):
           "MW = two-sided Mann–Whitney p against the task's reference group on $T_f$ / $T_s$ (never reached = episode "
           "cap + 1) / return.", ""]
     for task in dict.fromkeys(g["task"] for g in s["groups"].values()):
-        p = tdstdp.PAPER[task]
-        md += [f"## {task}", "", f"CK 2020 (10 runs, all solved): $T_f$ {p['T_f'][0]:.1f} ± {p['T_f'][1]:.1f}, "
-               f"$T_s$ {p['T_s'][0]:.1f} ± {p['T_s'][1]:.1f}. "
+        p = tdstdp.PAPER.get(task)
+        md += [f"## {task}", "", (f"CK 2020 (10 runs, all solved): $T_f$ {p['T_f'][0]:.1f} ± {p['T_f'][1]:.1f}, "
+               f"$T_s$ {p['T_s'][0]:.1f} ± {p['T_s'][1]:.1f}. " if p else "No CK 2020 result. ") +
                f"Reference group: `{label(s['reference'].get(task, '-'))}`. "
                f"$T_m$ threshold: {tdstdp.M_THR[task]:g}.", "",
                "| Group | n | Solved | $T_f$ | $T_s$ (median) | $T_m$ | Return | ms/frame "
@@ -331,7 +356,10 @@ def summarize(study, root=REPORTS, studies=None):
             w = csv.DictWriter(f, list(pairs[0]))
             w.writeheader()
             w.writerows([{c: (repr(v) if isinstance(v, float) else v) for c, v in r.items()} for r in pairs])
-        md += ["## Pairs", "", "Primary = CartPole AUC, LunarLander last-100 return. AUC = mean return over the first "
+        tasks = {g["task"] for g in s["groups"].values()}
+        prim = ("CartPole AUC, LunarLander last-100 return" if tasks <= {"CartPole", "LunarLander"} else
+                "LunarLander last-100 return, AUC on the other tasks")
+        md += ["## Pairs", "", f"Primary = {prim}. AUC = mean return over the first "
                "`episodes` (minimum) episodes. Shift = Hodges–Lehmann first − second [95% CI]; p = two-sided "
                "Mann–Whitney, Holm-adjusted per metric over the pairs of one family.", "",
                "| Group | Against | Family | n | Primary shift [CI] (p, Holm) | AUC shift [CI] (p, Holm) "

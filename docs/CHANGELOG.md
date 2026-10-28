@@ -1,6 +1,110 @@
 # Changelog
 
+## 2026-10-28
+
+### Changed: `hybrid-columns-2` uses both matchings (user decision)
+
+- Every group of `STUDIES["hybrid-columns-2"]` now carries `--rate-match-rec --ent-match-rec` (no-ops for base). The pre-registration draft `reports/hybrid-columns-2/README.md` states the matched starts, the updated pilot expectations, and a reworded P-seq reading. Δ = 25 still awaits the user's confirmation.
+
+### Results: entropy-matched pilots (iteration 016 §11)
+
+- **Acrobot:** entropy matching removed the collapses (0/30 vs 3/30 column runs), but the column arms stay below base (HL −32, −47, −51). It is not perseveration; the cause is open.
+- **LunarLander:** with rate and entropy matched, the early AUC gain falls to +3 to +6 (n = 6, not significant). Most of 015's early speed-up was a gain effect.
+
+### Added: per-arm entropy matching, `--ent-match-rec` (iteration 016 §11)
+
+- At a matched mean rate the column arms' initial policy is sharper: the within-column loop amplifies rate differences between columns (Acrobot H₀ 0.92 vs 0.98, logit spread +25 to +37%).
+- `--ent-match-rec` scales α_a per arm (`probe_entropy`, `match_entropy` in `experiments/tdstdp.py`) so the arm's initial policy entropy equals the base run's. Default off; token `em`; golden path unchanged. Test `test_ent_match_rec`.
+- Pilot: Acrobot column arms, seeds 0–9; LunarLander `cols_lam0`, `cols_sealed`, seeds 10–15, 3000 episodes.
+
+### Results: rate-matched pilots (iteration 016 §10)
+
+- **Acrobot** (seeds 0–9): rate matching equalised the actor rate, but each column arm still had 1/10 collapsed runs (base 0/10), lower entropy at episode 50 and AUC below base (HL −73, −61, −22 for `cols_lam0`, `cols_on`, `cols_sealed`). The starting rate is not the cause of the collapse.
+- **LunarLander** (seeds 10–15, 3000 episodes): rate matching roughly halves the early AUC gain of the column arms (+11 → +6, +13 → +5); with n = 6 the remainder is not significant. Part of 015's early speed-up is a starting-rate effect.
+
+### Added: per-arm rate matching, `--rate-match-rec` (iteration 016 §10)
+
+- **Diagnosis:** column arms start at a higher post rate (46 vs 41 Hz on Acrobot), because s_in is calibrated without recurrence. That gives a sharper initial policy and occasional collapse to a deterministic corner, where (A − p) and the entropy gradient vanish.
+- **The flag:** `Config.rate_match_rec` makes `probe_rate` run with the arm's R at init. Default off; existing runs and the golden test are unchanged.
+- **Test:** `test_tasks016::test_rate_match_rec`.
+- **Pilots running:**
+  - Acrobot, rate-matched, dev seeds 0–9;
+  - LunarLander, matched vs unmatched, dev seeds 10–15, 3000 episodes. This tests whether 015's early speed-up is a gain effect.
+
+### Decided: iteration 016 pilot v3, Acrobot only (§9 of the record)
+
+- **Acrobot passes the gates.** Base learns in 3 of 3 seeds; column arms learn in 7 of 9.
+- **Taxi fails the floor gate:** no deliveries in base. Decision (user): run the study on Acrobot alone; a hierarchical task is rethought separately.
+- `STUDIES["hybrid-columns-2"]` is now Acrobot × 4 arms, seeds 4000–4019.
+- Draft pre-registration: `reports/hybrid-columns-2/README.md`, not launched.
+
+### Decided: iteration 016 pilot v2, entropy bonus for the new presets (§8 of the record)
+
+- **Finding:** after the β_c fix, Acrobot and Taxi policies collapse before exploring.
+  - Acrobot: 3 of 12 runs learn.
+  - Taxi: no run delivers a passenger.
+- **Decision (user):** the new presets take LunarLander's entropy bonus, c_e = 1e-4. This is the authors' exploration setting.
+- **Next:** pilot v3 on the same dev seeds. If base still collapses, report to the user rather than trying further fixes.
+
+### Fixed and decided: iteration 016 pilot v1 (`docs/iterations/016-columns-more-tasks.md` §7)
+
+- **Taxi:** `ck_encoder` returned a numpy int for `n_in`, so writing the result failed. Fixed.
+- **Acrobot:** at floor in every arm, because CartPole's critic floor β_c = −0.2 cannot represent Acrobot's negative values.
+- **Decision (user):** new presets use β_c = min(−0.2, 1.2·V_rand), where V_rand is the random-policy value r_scale·E[r]·τ_d/20 ms.
+  - Acrobot −1.2, Taxi −0.82.
+  - Consistent with the authors' LunarLander −2.0 (V_rand −2.31).
+  - Tested in `test_tasks016`.
+- **Full suite:** 50 passed before the β_c change; `test_tasks016` 8 passed after it.
+
+### Results (reported study `hybrid-columns`, iteration 015 §8)
+
+- All 200 runs completed (0 failed) on branch `hybrid-columns-study` (git `0d2d851`).
+- **Headline** (Δ = 25):
+  - **LunarLander:** all three regimes are non-inferior to base (last-100 shifts −6.9, −2.0, −0.5). No LunarLander run solved.
+  - **CartPole:** sealed is non-inferior (AUC +0.4 [−18.1, +18.8]). `cols_lam0` and `cols_on` are inconclusive: their CIs reach −27.6 and −32.0, and neither is significantly worse.
+  - No regime improves the primary metric.
+- **Secondary:**
+  - every column arm learns LunarLander faster over the first 3000 episodes (AUC +8.8 to +10.7, Holm ≤ 0.0014);
+  - CartPole solved 20/20 with columns vs 16/20 for base.
+
 ## 2026-10-27
+
+### Added: iteration 016, Acrobot and Taxi in the TD-STDP backbone (code only; nothing run)
+
+- **Decision (user):** the tasks are Acrobot-v1 and Taxi-v4. Taxi replaces the discretised Pendulum: CartPole, Acrobot and Pendulum are all pendulums.
+  - Acrobot's actions are exclusive but must be sequenced.
+  - Taxi is hierarchical, with two groups of actions.
+- **Purpose:** test when each regime of modularity (implicit, learned, enforced) helps. Record: `docs/iterations/016-columns-more-tasks.md`.
+- **`experiments/tdstdp.py`:**
+  - `PRESETS["Acrobot"]` and `PRESETS["Taxi"]` by pre-set rules, never tuned on return. The rules (§4 of the record):
+    - CartPole's populations and α_a;
+    - LunarLander's Adam steps for `--eta-cal`;
+    - `r_scale` = 0.02 / RMS of the random-policy reward: Acrobot 0.02, Taxi 0.0035;
+    - Acrobot uses LunarLander's encoder;
+    - Taxi uses a one-hot input with `in_rep` 1.
+  - Config fields:
+    - `onehot` (one-hot input for a discrete observation in `ck_encoder`);
+    - `r_ck_hz`: `calibrate_low`'s k from CartPole's BindsNET rate, `R_CK_CARTPOLE` = 140 Hz.
+  - `TD_TASKS` adds Taxi for `CKRunner` only. `tasks.TASKS` is unchanged, so M3 is unaffected.
+  - `SOLVE`, `M_THR` and `SNAP_EVERY` entries for the new tasks; `--summary` handles tasks without CK numbers.
+- **`experiments/report.py`:**
+  - study `hybrid-columns-2` (Acrobot and Taxi × base / `cols_lam0` / `cols_on` / `cols_sealed`, seeds 4000–4019). Declared, not pre-registered.
+  - The primary pair metric is AUC on every task except LunarLander. Captions of existing studies are unchanged.
+- **Tests:** `tests/test_tasks016.py`.
+
+### Results (exploratory, iteration 014 §12): description length vs SOP energy proxy
+
+- Post hoc, on the saved `emergent-v4` models with W frozen; not pre-registered.
+- L_obs correlates with effective SOPs (spikes × synapses above the weight floor) on all three spiking engines:
+  - across the final networks, Spearman ρ +0.61 (branching), +0.95 (QIF), +0.91 (LIF);
+  - over training, the median per-run ρ is +0.54 to +0.89.
+- L_obs does not correlate with raw spike counts, except on QIF.
+
+### Launched: reported study `hybrid-columns` (iteration 015 §7)
+
+- **Pre-registered:** 2026-10-27 20:02 EDT.
+- **Code:** git `0d2d851` with an empty patch, worktree `../map-stdp-hc` on branch `hybrid-columns-study`.
+- **Runs:** 200, on 64 workers.
 
 ### Results (reported study `emergent-v4`, iteration 014 §11)
 
