@@ -266,3 +266,42 @@ The user's reasoning: this iteration asks whether, in a minimal v4 backbone, the
 **Next:**
 - The reported study `emergent-v4` becomes CartPole only: four engines × on, off and sealed, 8 heads, 20 fresh seeds, 1500 episodes.
 - It runs from a frozen worktree, so the code can keep changing for iteration 015.
+
+## 11. Reported study `emergent-v4`: results (2026-10-27)
+
+All 240 runs completed (0 failed) in the worktree `../map-stdp-ev4`, branch `emergent-v4-study`, git `086996f` with an empty patch. Final numbers are in `reports/emergent-v4/summary.md`, `pairs.csv` and `structure.md` on that branch; this section only reads them.
+
+**P1, performance (AUC, on vs off, Holm over 4 engines):** supported on 3 of 4 engines.
+
+| Engine | AUC on vs off | Holm p | Verdict |
+| --- | --- | --- | --- |
+| flow | 357 vs 336 (+21) | 0.17 | not supported |
+| branching | 204 vs 117 (+87) | 2.7e-7 | supported |
+| QIF | 168 vs 103 (+65) | 2.7e-7 | supported |
+| LIF | 276 vs 194 (+82) | 2.7e-7 | supported |
+
+**P2, description length (L_obs at episode 1500, on vs off):** supported on all 4 engines (Holm p 2.7e-7 each). The drops are −1.47 bits (flow), −0.37 (branching), −0.63 (QIF) and −0.30 (LIF).
+
+**S, learned vs prescribed structure (on vs sealed):**
+
+| Engine | AUC on vs sealed (Holm p) | Reading | L_obs on − sealed |
+| --- | --- | --- | --- |
+| flow | 357 vs 388 (1.0) | on ≈ sealed | +0.20 bits (sealed lower) |
+| branching | 204 vs 201 (1.0) | on ≈ sealed | −0.06 |
+| QIF | 168 vs 196 (0.0023) | **sealed > on** | −0.32 |
+| LIF | 276 vs 271 (0.6) | on ≈ sealed | −0.22 |
+
+- On three engines, the task benefit is the structure, and the map term is a local rule that finds it.
+- On QIF, having the structure from the first episode does better than learning it.
+- On the spiking engines the map term reaches a lower L_obs than sealing (Holm p ≤ 6e-5). It shapes the walk beyond cutting links.
+
+**Secondary:**
+- **Solving:** only flow reaches a trailing-100 mean of 475 (on 15/20, off 20/20, sealed 20/20), plus branching sealed 3/20.
+- **Frozen-W return, on vs off:** higher on branching (+72, Holm 0.02) and LIF (+111, Holm 0.0018); not significant on flow (+51, Holm 0.063) and QIF (Holm 0.19).
+- **Structure, final W:**
+  - The map term brings the within-module share to 0.63–0.64 on every engine (sealed 0.64; off 0.40–0.48).
+  - It removes A↔L, L↔L and →C weight (off: 6–14% into the controller).
+  - The engine-free L_W of W's own walk with the map term on is 3.57 (QIF) and 3.80 (LIF), below sealed (4.18–4.20). On these engines the map term also reshapes weights *within* modules.
+- **The task term alone also structures W.** With λ = 0, latent→action weight goes to 0 and A↔A stays at ≤ 0.6%. Off is implicit modularity, not none.
+
+The three regimes (implicit, learned, enforced) are compared again on LunarLander in iteration 015.

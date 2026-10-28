@@ -23,10 +23,20 @@ follows the code's per-ms order and trace scale, which the paper's equations omi
 q <- e^(-1/tau_q) q + (A - p) z(t-1) / tau_q, the update at ms t is delta_t z(t-1) (critic) and delta_t q(t) +
 kap_t z(t-1) (actor), and p is the probability the action was sampled with (fixed over the 20 ms window).
 simulate_bindsnet is BindsNET's LIFNodes (a spike through w adds w mV, threshold 13 mV above rest, no refractory
-period); in branching units w_branching = w_mV / 13.
+period); in branching units w_branching = w_mV / 13. simulate_nlif is the noisy LIF of mapstdp.lif on CK's 1 ms grid
+(engine nlif): W in mV as BindsNET, current s_in x(t-1) W^T / 13 in threshold units, tau_m 20 ms, OU background
+(lif.DT1), no refractory period (as BindsNET); self-check (h1): its kernel without noise and background, with CK's tau
+and threshold, is simulate_bindsnet bit for bit.
+HybridRec (iteration 015 step 2; derivation §8.1, Proposal): recurrent E->E modules among the actor posts (engine nlif),
+learned by the one-hop task credit and the map term (class doc); self-check (h3): its counter against replay truth.
 Not crossbar-native as a whole (iteration 013 reproduces CK first): softmax readout, signed weights, the per-synapse
 trace pair (z, q) and Adam (per-synapse m, v) are off-hardware; the plan removes them in later steps."""
+import dataclasses
+import json
+
 import numpy as np
+
+from mapstdp import core, lif
 
 THETA = 0.5
 TAU_M, THETA_L = 100.0, 13.0  # CK §2.2: tau = 100 ms, theta - E_res = -52 - (-65) mV (true-LIF control)
@@ -34,17 +44,19 @@ TAU_M, THETA_L = 100.0, 13.0  # CK §2.2: tau = 100 ms, theta - E_res = -52 - (-
 
 class Layout:
     """Post populations, in order: critic E (n_ce), critic I (n_ci), then for each action k: actor E (n_ae), actor I
-    (n_ai). sign: +1 excitatory, -1 inhibitory. Mv: V = alpha_c rho @ Mv + beta (Eq. 4). Ma (K x n_post): action
-    logits / alpha_a = rho @ Ma.T (Eqs. 10-12). act: action of each actor post. ae: mask of excitatory actor posts."""
+    (n_ai), then n_lat latent posts (iteration 015, HybridRec; none by default). sign: +1 excitatory, -1 inhibitory
+    (latents +1). Mv: V = alpha_c rho @ Mv + beta (Eq. 4). Ma (K x n_post): action logits / alpha_a = rho @ Ma.T
+    (Eqs. 10-12); latents have zero Mv and Ma. act: action of each actor post (0 on latents). ae: mask of excitatory
+    actor posts. lat: mask of the latent posts among the posts after the critic."""
 
-    def __init__(self, n_in, n_ce, n_ci, n_ae, n_ai, K):
-        self.n_in, self.K, self.n_crit = n_in, K, n_ce + n_ci
-        self.n_post = self.n_crit + K * (n_ae + n_ai)
+    def __init__(self, n_in, n_ce, n_ci, n_ae, n_ai, K, n_lat=0):
+        self.n_in, self.K, self.n_crit, self.n_lat = n_in, K, n_ce + n_ci, n_lat
+        self.n_post = self.n_crit + K * (n_ae + n_ai) + n_lat
         blk = np.r_[np.ones(n_ae), -np.ones(n_ai)]
-        self.sign = np.r_[np.ones(n_ce), -np.ones(n_ci), np.tile(blk, K)]
+        self.sign = np.r_[np.ones(n_ce), -np.ones(n_ci), np.tile(blk, K), np.ones(n_lat)]
         self.Mv = np.r_[np.ones(n_ce) / max(n_ce, 1), -np.ones(n_ci) / max(n_ci, 1),
                         np.zeros(self.n_post - self.n_crit)]
-        self.act = np.repeat(np.arange(K), n_ae + n_ai)
+        self.act = np.r_[np.repeat(np.arange(K), n_ae + n_ai), np.zeros(n_lat, int)]
         self.Ma = np.zeros((K, self.n_post))
         for k in range(K):
             o = self.n_crit + k * (n_ae + n_ai)
@@ -52,6 +64,7 @@ class Layout:
             self.Ma[k, o + n_ae:o + n_ae + n_ai] = -1 / max(n_ai, 1)
         self.ae = np.zeros(self.n_post - self.n_crit, bool)
         self.ae[np.flatnonzero(blk > 0)[None] + (n_ae + n_ai) * np.arange(K)[:, None]] = True
+        self.lat = np.r_[np.zeros(K * (n_ae + n_ai), bool), np.ones(n_lat, bool)]
 
 
 def init_weights(lay, fbar, rate, rng, unit=1.0):
@@ -128,6 +141,289 @@ def simulate_bindsnet(W, x_prev, x, v):
         v[X[t]] = 0
         xp = x[t]
     return X, v
+
+
+def simulate_nlif(W, x_prev, x, st, rng, p, s_in, Bt=None, ridx=()):
+    """Noisy-LIF engine (experiments.tdstdp --engine nlif): lif.simulate_ext with p.dt = 1 ms = one CK step. W in mV
+    (as simulate_bindsnet); feed-forward current Iext(t) = s_in x(t-1) W^T / THETA_L in threshold units (s_in = 1: a
+    BindsNET spike's mV over its 13 mV gap), x(-1) = x_prev (H x n_in); leak, background noise and refractory period
+    of p on every post; recurrent kicks Bt on the posts ridx (none by default). st: lif state (V, ref, z), mutated and
+    carried across blocks. One rng draw. Returns (X, xsum, xsq): X is L x H x n_post bool."""
+    Iext = (s_in / THETA_L) * (np.concatenate([x_prev[None], x[:-1]]) @ W.T)
+    return lif.simulate_ext(Iext, np.zeros((0, 0)) if Bt is None else Bt, ridx, st, rng, p)
+
+
+def check_bindsnet_limit(seed=5, L=400, B=20):
+    """Self-check (h1): lif.simulate_ext with sigma_V = 0, mu_bg = 0, no refractory period, tau_m = TAU_M and threshold
+    THETA_L (time in ms, current x(t-1) W^T in mV) against simulate_bindsnet on the same input spikes, in blocks of B
+    steps with the membranes carried. The kernel's step a V + 0 + Iext + 0 * g is BindsNET's a v + Iext, so raster and
+    membranes agree bit for bit. In threshold units (nlif's convention: Iext / THETA_L, threshold 1) the rounding
+    differs, so a spike could flip only at a tie within ~1e-15 of threshold. Returns (mismatched spikes and membranes
+    in mV units, mismatched spikes in threshold units, spike rate)."""
+    rng = np.random.default_rng(seed)
+    lay, H = Layout(30, 6, 4, 5, 3, 2), 3
+    n = lay.n_post
+    W = rng.uniform(-0.1, 0.3, (n, lay.n_in))
+    x = (rng.random((L, H, lay.n_in)) < rng.uniform(0, 1, (H, lay.n_in))).astype(float)
+    p = lif.LIFParams(tau_m=TAU_M, dt=1.0, th=THETA_L, vr=0.0, tau_ref=0.0, mu_bg=0.0, sigma_V=0.0)
+    pn = dataclasses.replace(p, th=1.0)
+    st, stn, v = lif.init_state(n, H, p), lif.init_state(n, H, pn), np.zeros((H, n))
+    st["V"], stn["V"] = np.zeros((H, n)), np.zeros((H, n))
+    X0, X1, X2, xp = [], [], [], np.zeros((H, lay.n_in))
+    for b in range(0, L, B):
+        xb = x[b:b + B]
+        Xb, v = simulate_bindsnet(W, xp, xb, v)
+        Iext = np.empty((len(xb), H, n))
+        for t in range(len(xb)):  # per step, as simulate_bindsnet forms x(t-1) W^T
+            Iext[t] = (xp if t == 0 else xb[t - 1]) @ W.T
+        X0.append(Xb)
+        X1.append(lif.simulate_ext(Iext, np.zeros((0, 0)), [], st, rng, p)[0])
+        X2.append(lif.simulate_ext(Iext / THETA_L, np.zeros((0, 0)), [], stn, rng, pn)[0])
+        xp = xb[-1]
+    X0, X1, X2 = (np.concatenate(a) for a in (X0, X1, X2))
+    return int((X0 != X1).sum() + (st["V"] != v).sum()), int((X0 != X2).sum()), float(X0.mean())
+
+
+class HybridRec:
+    """Recurrent modules inside the TD-STDP actor (iteration 015; derivation §8.1, Proposal), on engine nlif.
+
+    Population: the excitatory actor posts, one module per action (roles 'A'), plus n_lat_mod latent modules of n_ae
+    posts each (roles 'L'; Layout(n_lat=...)). ridx: their post indices; m: module labels. R (nR x nR, [post, pre]) is
+    the E->E matrix among them, an SBM at init (p_same 0.5, p_cross 0.05, U(0.5, 1.5), columns normalised to d_j = 1,
+    clipped to [wmin, 1]) from its own stream. Kicks b = chi_rec R / d_j (output-normalised as lif.kicks; threshold
+    units): one spike of j adds chi_rec theta in total to its targets (pass bt() and ridx to simulate_nlif).
+    Per 20 ms window (window), per copy h: the gain G_hi = lif.gain_markov at the window's free-membrane mean and
+    per-step input s.d. (from the kernel's input sums), spikes n_hj, the pair counts kappa (lif.pair_counts, window
+    pair_ms, the tail carried across windows, Eq. 8) and the signed counter c^h_ij = tau_eff b_ij G_hi n_hj (Eq. 11b,
+    summed over copies for the walk). Credit (credit, once per window): e_h <- e^(-MS / tau_q) e_h + c^h psi^h with the
+    one-hop psi^h_ij = s_hm(i) - sbar_hj, sbar_hj = sum_b T_bj s_hb (Eq. 4b; s: K' module scores, CK's action score
+    alpha_a (A_b - p_b) / n_ae on action modules, 0 on latents), paired with the counter of the window whose rates gave
+    p; the task step is eta_R mean_h (sum_t delta_ht) e_h (task_dir). Statistics frame = stat_windows windows (frame):
+    the observed walk (core.observed_walk_modules, EMA over obs_tau frames as experiments.m2), the map modulator
+    (core.modulator; minus core.latent_output_barrier with la_beta), the structural increment -(g - gbar^obs) c / n
+    (Eq. 4, c and kappa divided by the frame's spikes) applied with lam, then the d_j homeostasis (Eq. 4d) with the
+    frame's spike shares. Monitors per frame, averaged into log at flush(). No rng after init."""
+
+    LOG = ("maxre", "maxre_max", "chiG", "causal", "within", "L_obs", "silent", "rate", "rate_lat0", "rate_lat1",
+           "lat_out", "lat_floor", "repeat", "repeat_chance")
+
+    def __init__(self, lay, K, n_ae, n_lat_mod, chi_rec, p, H, seed, stat_windows=5, pair_ms=20, lam=0.0, la_beta=0.0,
+                 obs_tau=20.0, eps_h=5.0, wmin=1e-3, p_same=0.5, p_cross=0.05, seal=False):
+        nc = lay.n_crit
+        ae = nc + np.flatnonzero(lay.ae)
+        self.ridx = np.r_[ae, nc + np.flatnonzero(lay.lat)]
+        self.m = np.r_[lay.act[lay.ae], K + np.arange(lay.n_lat) // n_ae]
+        self.Kr, self.K, self.n_ae = K + n_lat_mod, K, n_ae
+        assert lay.n_lat == n_lat_mod * n_ae and len(set(self.m)) == self.Kr
+        self.roles = np.array(list("A" * K + "L" * n_lat_mod))
+        rng = np.random.default_rng(seed)
+        P = np.where(self.m[:, None] == self.m[None, :], p_same, p_cross)
+        self.mask = rng.random(P.shape) < P
+        np.fill_diagonal(self.mask, False)
+        if seal:  # enforced modularity: the same draws without the cross-module synapses
+            self.mask &= self.m[:, None] == self.m[None, :]
+        assert self.mask.any(0).all(), "neuron without outgoing synapse"
+        R = self.mask * rng.uniform(0.5, 1.5, P.shape)
+        self.R = core.clip_weights(R / R.sum(0), self.mask, wmin)
+        self.chi, self.p, self.H, self.nR = chi_rec, dataclasses.replace(p, window=pair_ms * p.dt), H, len(self.m)
+        self.sw, self.lam, self.la_beta, self.obs_tau, self.eps_h, self.wmin = (stat_windows, lam, la_beta, obs_tau,
+                                                                                eps_h, wmin)
+        self.Ws = self.p.W_steps
+        self.e = np.zeros((H, self.nR, self.nR))
+        self.tail = np.zeros((self.Ws, H, self.nR), bool)
+        self.Gprev, self.nprev = np.zeros((H, self.nR)), np.zeros((H, self.nR))
+        self.run_obs = None
+        self.acc = self._fresh()
+        self.sums = dict.fromkeys(self.LOG, 0.0) | {"n": 0, "n_act": 0}
+        self.log = {k: [] for k in ("episode", "tau_loop_ms") + self.LOG}
+
+    def _fresh(self):
+        return dict(kappa=np.zeros((self.nR, self.nR)), c=np.zeros((self.nR, self.nR)), n=np.zeros(self.nR), G=0.0,
+                    w=0, steps=0)
+
+    def b(self):
+        """Kicks b_ij = chi_rec R_ij / d_j (nR x nR, [post, pre])."""
+        return self.chi * self.R / np.maximum(self.R.sum(0), 1e-12)
+
+    def bt(self):
+        """The kicks as simulate_nlif / lif.simulate_ext take them ([pre, post] within ridx)."""
+        return self.b().T.copy()
+
+    def reset_heads(self, rs):
+        """Episode reset of copies rs (code 2): eligibility, carried tail and the pending window statistics."""
+        self.e[rs], self.tail[:, rs], self.Gprev[rs], self.nprev[rs] = 0, False, 0, 0
+
+    def window(self, XR, xsum, xsq):
+        """One window of the R population: XR (L x H x nR raster), xsum, xsq (H x nR input sums over its L steps).
+        Accumulates the frame's kappa, counter and spikes; returns (G, n) per copy (H x nR)."""
+        p, L = self.p, len(XR)
+        m1 = xsum / L
+        G = lif.gain_markov(p.mu_bg + m1 / (1 - p.a), np.sqrt(np.maximum(xsq / L - m1 * m1, 0.0)), p)
+        n = XR.sum(0).astype(float)
+        full = np.concatenate([self.tail, XR])
+        self.tail = full[-self.Ws:].copy()
+        a = self.acc
+        a["kappa"] += lif.pair_counts(full, self.Ws, self.Ws)
+        a["c"] += p.tau_eff * self.b() * (G.T @ n)
+        a["n"] += n.sum(0)
+        a["G"] += float(G.mean())
+        a["w"] += 1
+        a["steps"] += L
+        return G, n
+
+    def credit(self, s, G, n, decay):
+        """e_h <- decay e_h + c^h psi^h for the previous window's counter (self.Gprev, self.nprev) and the module scores
+        s (H x Kr) of the action sampled from its rates; then (G, n) of the current window become the pending ones."""
+        b = self.p.tau_eff * self.b()
+        sbar = s @ core.module_rows(self.R / np.maximum(self.R.sum(0), 1e-12), self.m, self.Kr)  # H x nR
+        Gp, n_ = self.Gprev, self.nprev
+        self.e *= decay
+        self.e += b * (np.einsum("hi,hj->hij", Gp * s[:, self.m], n_) - np.einsum("hi,hj->hij", Gp, n_ * sbar))
+        self.Gprev, self.nprev = G, n
+
+    def task_dir(self, dsum):
+        """mean_h dsum_h e_h: the task direction of one window (dsum: H TD errors summed over its steps)."""
+        return np.einsum("h,hij->ij", dsum, self.e) / self.H
+
+    def frame(self):
+        """End of a statistics frame if stat_windows windows have accumulated: the walk, structural update (with
+        self.lam), homeostasis and monitors. Returns the structural increment (lam = 1) or None."""
+        a = self.acc
+        if a["w"] < self.sw:
+            return None
+        self.acc = self._fresh()
+        m, Kr, R = self.m, self.Kr, self.R
+        ntot = max(a["n"].sum(), 1.0)
+        pi, kr, c = a["n"] / ntot, a["kappa"] / ntot, a["c"] / ntot
+        fb = core.module_rows(R / np.maximum(R.sum(0), 1e-12), m, Kr)
+        Rm = core.module_rows(kr, m, Kr)
+        fr = core.observed_walk_modules(Rm, pi, m, Kr, fb)
+        if self.run_obs is None:
+            self.run_obs = [Rm.copy(), pi.copy()]
+        else:
+            for x, y in zip(self.run_obs, (Rm, pi)):
+                x += (y - x) / self.obs_tau
+        ps, qs, JKs, tKs = core.observed_walk_modules(*self.run_obs, m, Kr, fb)[:4]
+        g = core.modulator(ps, qs, self.roles)
+        if self.la_beta > 0:
+            g = g - core.latent_output_barrier(ps, JKs, self.roles, self.la_beta)
+        dS = core.structural_increment_emergent(g, tKs, c, m)
+        self._monitor(a, fr, pi)
+        if self.lam > 0:
+            self.R = core.clip_weights(self.R + self.lam * dS, self.mask, self.wmin)
+        self.R = core.homeostasis_update_emergent(self.R, self.mask, pi, self.eps_h, self.wmin)
+        return dS
+
+    def apply_task(self, dR):
+        self.R = core.clip_weights(self.R + dR, self.mask, self.wmin)
+
+    def _monitor(self, a, fr, pi):
+        """Per-frame monitors (summed; flush() averages): max Re eig of the module offspring Lambda^K from the counter
+        (lif.stability; maxre_max: the largest in the bin), chi_rec tau_eff G (first-order offspring bound), median
+        causal share sum_i c_ij / sum_i kappa_ij, within-module weight share, L_obs (map equation of the frame's
+        observed walk, bits), silent-module frames, the population rate and latent module rates (Hz), latent output
+        share into the action modules and latent->action synapses at wmin."""
+        p, m, R, s = self.p, self.m, self.R, self.sums
+        mre = lif.stability(a["c"], a["n"], m, self.Kr)[1]
+        live = a["kappa"].sum(0) > 0
+        steps = a["steps"] * self.H  # head-steps of the frame
+        rate = np.bincount(m, a["n"], self.Kr) / np.bincount(m, minlength=self.Kr) / (steps * p.dt)
+        A, L = self.roles[m] == "A", self.roles[m] == "L"
+        s["n"] += 1
+        s["maxre"] += mre
+        s["maxre_max"] = max(s["maxre_max"], mre)
+        s["chiG"] += self.chi * p.tau_eff * a["G"] / a["w"]
+        s["causal"] += float(np.median(np.abs(a["c"][:, live]).sum(0) / a["kappa"][:, live].sum(0))) if live.any() \
+            else 0.0
+        s["within"] += float((R * (m[:, None] == m[None, :])).sum() / R.sum())
+        s["L_obs"] += core.map_equation(fr[0], fr[1], pi)
+        s["silent"] += float((fr[0] <= 0).any())
+        s["rate"] += float(a["n"].sum() / (self.nR * steps * p.dt))
+        if L.any():
+            s["rate_lat0"] += rate[self.K]
+            s["rate_lat1"] += rate[self.K + 1] if self.Kr > self.K + 1 else 0.0
+            s["lat_out"] += float(R[np.ix_(A, L)].sum() / R[:, L].sum())
+            ml = self.mask[np.ix_(A, L)]
+            s["lat_floor"] += float((R[np.ix_(A, L)][ml] <= self.wmin + 1e-12).mean())
+
+    def log_actions(self, repeat, chance):
+        """Action autocorrelation (perseveration): per resampled copy, whether the action repeats, and sum_k p_k^2."""
+        self.sums["repeat"] += repeat
+        self.sums["repeat_chance"] += chance
+        self.sums["n_act"] += 1
+
+    def flush(self, episode):
+        """Append the means since the last flush to self.log (silent: frame count; maxre_max: max) at `episode`; no row
+        (the sums carry on) if no statistics frame has ended since."""
+        if not self.sums["n"]:
+            return
+        s, n, na = self.sums, self.sums["n"], max(self.sums["n_act"], 1)
+        self.log["episode"].append(int(episode))
+        for k in self.LOG:
+            v = s[k] if k in ("silent", "maxre_max") else s[k] / (na if k.startswith("repeat") else n)
+            self.log[k].append(float(v))
+        mx = s["maxre_max"]  # loop time constant of the slowest mode, tau_m / (1 - max Re eig); -1 if unstable
+        self.log["tau_loop_ms"].append(float(1e3 * self.p.tau_m / (1 - mx)) if mx < 1 else -1.0)
+        self.sums = dict.fromkeys(self.LOG, 0.0) | {"n": 0, "n_act": 0}
+
+    def state(self):
+        """Arrays for a checkpoint (load_state restores them)."""
+        ro = self.run_obs or [np.zeros(0), np.zeros(0)]
+        return dict(rec_R=self.R, rec_e=self.e, rec_tail=self.tail, rec_Gprev=self.Gprev, rec_nprev=self.nprev,
+                    rec_ro0=ro[0], rec_ro1=ro[1], rec_kappa=self.acc["kappa"], rec_c=self.acc["c"],
+                    rec_n=self.acc["n"], rec_G=self.acc["G"], rec_w=self.acc["w"], rec_steps=self.acc["steps"],
+                    rec_log=json.dumps(self.log))
+
+    def load_state(self, c):
+        self.R, self.e, self.tail = c["rec_R"].copy(), c["rec_e"].copy(), c["rec_tail"].copy()
+        self.Gprev, self.nprev = c["rec_Gprev"].copy(), c["rec_nprev"].copy()
+        self.run_obs = [c["rec_ro0"].copy(), c["rec_ro1"].copy()] if c["rec_ro0"].size else None
+        self.acc = dict(kappa=c["rec_kappa"].copy(), c=c["rec_c"].copy(), n=c["rec_n"].copy(), G=float(c["rec_G"]),
+                        w=int(c["rec_w"]), steps=int(c["rec_steps"]))
+        self.log = json.loads(str(c["rec_log"]))
+
+
+def check_counter(seed=2, H=8, k=3020, chi_rec=0.3, s_ff=0.06):
+    """Self-check (h3): HybridRec's per-window counter c_ij = tau_eff b_ij sum_(w,h) G_whi n_whj (G = lif.gain_markov)
+    against the replay truths of lif._replay_truth (marginal b dn/db and removal, open loop with common random numbers)
+    on a frozen 2 x 10 column network at engine nlif's operating point (dt 1 ms, DT1, 20 ms window; Bernoulli
+    feed-forward input at ~150-250 Hz, mean-driven), recorded with the interpreted step (Gaussian noise). Returns
+    dict(corr, ratio (c / marginal), corr_rem, ratio_rem, rate Hz, mismatch of the replay)."""
+    p = dataclasses.replace(lif.LIFParams(), **lif.DT1, kernel="nb")
+    rng = np.random.default_rng(seed)
+    lay, n_in, L = Layout(30, 0, 0, 10, 0, 2), 30, 20
+    hr = HybridRec(lay, 2, 10, 0, chi_rec, p, H, (seed, 1), p_cross=0.2)
+    N, Ws, ri = lay.n_post, hr.Ws, hr.ridx
+    W = rng.uniform(0, 1, (N, n_in))
+    f = rng.uniform(0.1, 0.9, (H, n_in))
+    W *= 3.0 / (f.mean(0) @ W.T).mean()
+    b = np.zeros((N, N))
+    b[np.ix_(ri, ri)] = hr.b()
+    V, ref, z = np.full((H, N), p.mu_bg), np.zeros((H, N), np.int64), np.zeros((H, N), bool)
+    S, inp = np.zeros((k, H, N), bool), np.zeros((k, H, N))
+    rec = dict(drive=np.zeros((k, H, N)), V=np.zeros((k, H, N)), ref=np.zeros((k, H, N), np.int64), U=None)
+    xp = np.zeros((H, n_in))
+    for t in range(-200, k):  # 200 steps of burn-in
+        x = (rng.random((H, n_in)) < f).astype(float)
+        inp_t = s_ff * xp @ W.T + z @ b.T
+        drive = inp_t + p.sigma_V * np.sqrt(1 - p.a ** 2) * rng.standard_normal((H, N))
+        xp = x
+        z, _ = lif._step(V, ref, drive, None, p)
+        if t >= 0:
+            S[t], inp[t], rec["drive"][t], rec["V"][t], rec["ref"][t] = z, inp_t, drive, V, ref
+    rem, mar, _, mism = lif._replay_truth(rec, S, b, hr.p)  # the recorded drive carries the noise
+    nw = (k - Ws) // L
+    c = np.zeros((hr.nR, hr.nR))
+    for w in range(nw):
+        sl = slice(w * L, (w + 1) * L)
+        hr.acc = hr._fresh()
+        hr.window(S[sl][..., ri], inp[sl][..., ri].sum(0), (inp[sl][..., ri] ** 2).sum(0))
+        c += hr.acc["c"]
+    sel = hr.b() > 0
+    mar, rem = mar[np.ix_(ri, ri)][sel], rem[np.ix_(ri, ri)][sel]
+    return dict(corr=float(np.corrcoef(c[sel], mar)[0, 1]), ratio=float(c[sel].sum() / mar.sum()),
+                corr_rem=float(np.corrcoef(c[sel], rem)[0, 1]), ratio_rem=float(c[sel].sum() / rem.sum()),
+                rate=float(S[..., ri].mean() / p.dt), mismatch=mism)
 
 
 def pre_trace(P0, x, tau_p):
@@ -534,4 +830,16 @@ if __name__ == "__main__":
     print(f"(e) flow limit: cos(Monte Carlo mean of the sampled update, flow update) {cf:.5f}, "
           f"norm ratio {np.linalg.norm(Gs) / np.linalg.norm(Gf):.4f}")
     assert cf > 0.99
+    # (h1) the nlif kernel's noise-free limit is BindsNET's LIF (own stream: earlier draws unchanged)
+    m_mv, m_th, r_h1 = check_bindsnet_limit()
+    print(f"(h1) lif.simulate_ext (sigma 0, no background, tau 100 ms, threshold 13 mV, no refractory) == "
+          f"simulate_bindsnet: {m_mv} mismatches (raster and membranes, mV units), {m_th} in threshold units; "
+          f"rate {r_h1:.3f}")
+    assert m_mv == 0 and m_th == 0
+    # (h3) the hybrid's counter (HybridRec, gain from the kernel's Markov transfer) against the replay truths
+    r3 = check_counter()
+    print(f"(h3) HybridRec counter vs replay truth (2 x 10 columns, nlif, {r3['rate']:.0f} Hz, mean-driven): corr "
+          f"{r3['corr']:.3f} ratio c / marginal {r3['ratio']:.3f} | corr {r3['corr_rem']:.3f} ratio c / removal "
+          f"{r3['ratio_rem']:.3f}; replay mismatch {r3['mismatch']}")
+    assert r3["mismatch"] == 0 and r3["corr"] >= 0.9 and 0.85 < r3["ratio"] < 1.2, r3
     print("tdstdp self-check ok")

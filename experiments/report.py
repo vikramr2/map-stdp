@@ -34,7 +34,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 REPORTS = ROOT / "reports"
 LOGS = ROOT / "logs" / "report"
 ENGINE_FLAG = {"lif": ["--engine", "lif"], "branching": [],  # branching = the numpy engine (tdstdp default)
-               "flow": ["--engine", "flow"]}
+               "flow": ["--engine", "flow"], "nlif": ["--engine", "nlif"]}  # nlif: noisy LIF (iteration 015)
 M3_ENGINE_FLAG = {"flow": ["--backend", "flow"],  # runner 'm3': engine -> experiments.m3 flags (heads per study)
                   "branching": ["--backend", "spiking", "--engine", "numpy"],
                   "qif": ["--backend", "spiking", "--engine", "qif"],
@@ -114,6 +114,31 @@ def _emergent_v4():
 
 
 STUDIES["emergent-v4"] = _emergent_v4()
+
+
+def _hybrid_columns():
+    """hybrid-columns (iteration 015): Map-STDP action columns in the TD-STDP backbone, no Adam, low-rate noisy LIF
+    (--rate-target 40). base = no recurrence; three regimes of modularity on recurrent columns: cols_lam0 (implicit:
+    task term only), cols_on (learned: plus the map term, r = 1), cols_sealed (enforced: no cross-column synapses,
+    task term only); lat_on = cols_on plus 2 latent modules. chi_rec 0.3 and r 1 frozen in pilots B and C (§5, §6).
+    Step rule as the baseline: preset eta on CartPole, --eta-cal on LunarLander. Headline: each regime vs base
+    (improvement, and non-inferiority at margin 25 in the README); secondary: between regimes and lat_on."""
+    rec = ["--chi-rec", "0.3", "--rec"]
+    arms = {"base": [], "cols_lam0": [*rec, "cols", "--lam", "0"], "cols_on": [*rec, "cols", "--lam", "1"],
+            "cols_sealed": [*rec, "cols", "--rec-seal", "--lam", "0"], "lat_on": [*rec, "lat", "--lam", "1"]}
+    task = {"CartPole": [], "LunarLander": ["--eta-cal"]}
+    groups = {f"{t}_{a}": dict(task=t, engine="nlif", seeds=range(3000, 3020),
+                               flags=["--rate-target", "40", "--block", "20", "--fast", *tf, *af])
+              for t, tf in task.items() for a, af in arms.items()}
+    pairs = [(f"{t}_{a}", f"{t}_{b}") for t in task for a, b in
+             (("cols_lam0", "base"), ("cols_on", "base"), ("cols_sealed", "base"))]
+    pairs += [(f"{t}_{a}", f"{t}_{b}", "secondary") for t in task for a, b in
+              (("cols_on", "cols_lam0"), ("cols_on", "cols_sealed"), ("lat_on", "cols_on"))]
+    return dict(title="Map-STDP columns in the TD-STDP backbone, no Adam, noisy LIF at 40 Hz",
+                groups=groups, pairs=pairs, reference={t: f"{t}_base" for t in task}, gates={})
+
+
+STUDIES["hybrid-columns"] = _hybrid_columns()
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
            "T_s_sd", "T_s_median", "T_m_mean", "T_m_sd", "T_m_n", "ret_mean", "ret_sd", "ret_ge_M", "ms_per_frame",
            "resumes", "mw_ref", "mw_T_f", "mw_T_s", "mw_ret", "gate_min_solved", "gate_pass"]
@@ -232,6 +257,12 @@ def load_runs(d, k):
     return [json.loads(p.read_text()) for p in sorted((d / "runs" / k).glob("s*.json"))]
 
 
+_auc_min = lambda r: float(np.mean(r["returns"][:r["config"]["episodes"]]))  # noqa: E731
+TD_PAIR_METRICS = {  # tdstdp-runner pairs (iteration 015); primary: CartPole AUC, LunarLander last-100 return
+    "primary": lambda r: _auc_min(r) if r["config"]["task"] == "CartPole" else float(np.mean(r["returns"][-100:])),
+    "auc": _auc_min, "ret": lambda r: float(np.mean(r["returns"][-100:]))}
+
+
 def summarize(study, root=REPORTS, studies=None):
     """summary.csv and summary.md of reports/<study>/ from runs/ only (finished runs, s<seed>.json)."""
     s, d = (studies or STUDIES)[study], root / study
@@ -294,6 +325,24 @@ def summarize(study, root=REPORTS, studies=None):
                       f"{ts} | {pm(r, 'T_m')} | {fmt(r['ret_mean'])} ± {fmt(r['ret_sd'])} | {r['ms_per_frame']:.2f} | "
                       f"{mw} | {gate} |")
         md.append("")
+    pairs = m3_pairs(s, runs, TD_PAIR_METRICS, hl=True) if s.get("pairs") else []
+    if pairs:
+        with open(d / "pairs.csv", "w", newline="") as f:
+            w = csv.DictWriter(f, list(pairs[0]))
+            w.writeheader()
+            w.writerows([{c: (repr(v) if isinstance(v, float) else v) for c, v in r.items()} for r in pairs])
+        md += ["## Pairs", "", "Primary = CartPole AUC, LunarLander last-100 return. AUC = mean return over the first "
+               "`episodes` (minimum) episodes. Shift = Hodges–Lehmann first − second [95% CI]; p = two-sided "
+               "Mann–Whitney, Holm-adjusted per metric over the pairs of one family.", "",
+               "| Group | Against | Family | n | Primary shift [CI] (p, Holm) | AUC shift [CI] (p, Holm) "
+               "| Return shift [CI] (p, Holm) |", "| --- | --- | --- | --- | --- | --- | --- |"]
+        cell = lambda r, k: "–" if r[f"{k}_p"] is None else (  # noqa: E731
+            f"{r[f'{k}_hl']:+.1f} [{r[f'{k}_hl_lo']:+.1f}, {r[f'{k}_hl_hi']:+.1f}] "
+            f"({r[f'{k}_p']:.2g}, {r[f'{k}_p_holm']:.2g})")
+        for r in pairs:
+            md.append(f"| `{label(r['on'])}` | `{label(r['off'])}` | {r['family']} | {r['n_on']}/{r['n_off']} | "
+                      + " | ".join(cell(r, k) for k in TD_PAIR_METRICS) + " |")
+        md.append("")
     if s.get("labels"):
         md += ["## Display names", "", "Groups shown under a later name; `runs/<key>/` and the manifest keep the key.",
                ""] + [f"- `{v}` = `{k}`" for k, v in s["labels"].items() if k in s["groups"]] + [""]
@@ -345,22 +394,37 @@ def holm(ps):
     return out
 
 
-def m3_pairs(s, runs):
+def hodges_lehmann(a, b, conf=0.95):
+    """Hodges-Lehmann shift a - b (median of all pairwise differences) and its distribution-free CI (Moses; normal
+    approximation of the Mann-Whitney quantile)."""
+    from scipy.stats import norm
+    d = np.sort(np.subtract.outer(a, b).ravel())
+    n, m = len(a), len(b)
+    k = int(np.floor(n * m / 2 - norm.ppf(0.5 + conf / 2) * np.sqrt(n * m * (n + m + 1) / 12)))
+    k = min(max(k, 1), len(d))
+    return float(np.median(d)), float(d[k - 1]), float(d[len(d) - k])
+
+
+def m3_pairs(s, runs, metrics=M3_PAIR_METRICS, hl=False):
     """Per declared pair (on, off[, family]) and metric: means, difference on - off, two-sided Mann-Whitney p, and the
-    Holm adjustment of p over the pairs of the same family (per metric; family 'primary' if not given)."""
+    Holm adjustment of p over the pairs of the same family (per metric; family 'primary' if not given). hl: also the
+    Hodges-Lehmann shift on - off with its 95% CI."""
     from scipy.stats import mannwhitneyu
     rows = []
     for on, off, *fam in s.get("pairs", []):
         row = {"on": on, "off": off, "family": fam[0] if fam else "primary", "n_on": len(runs.get(on, [])),
                "n_off": len(runs.get(off, []))}
-        for k, f in M3_PAIR_METRICS.items():
+        for k, f in metrics.items():
             a = [x for x in map(f, runs.get(on, [])) if x is not None]
             b = [x for x in map(f, runs.get(off, [])) if x is not None]
             row |= {f"{k}_on": float(np.mean(a)) if a else None, f"{k}_off": float(np.mean(b)) if b else None,
                     f"{k}_p": float(mannwhitneyu(a, b).pvalue) if a and b else None}
             row[f"{k}_diff"] = row[f"{k}_on"] - row[f"{k}_off"] if a and b else None
+            if hl:
+                row |= dict(zip((f"{k}_hl", f"{k}_hl_lo", f"{k}_hl_hi"),
+                                hodges_lehmann(a, b) if a and b else (None,) * 3))
         rows.append(row)
-    for k in M3_PAIR_METRICS:
+    for k in metrics:
         for fam in dict.fromkeys(r["family"] for r in rows):
             fr = [r for r in rows if r["family"] == fam]
             for row, p in zip(fr, holm([r[f"{k}_p"] for r in fr])):

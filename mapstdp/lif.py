@@ -84,19 +84,28 @@ What the counter estimates (self-check (c))
 Self-check: python -m mapstdp.lif (~20 s): (a, b) single-neuron Siegert rate and gain against simulation; (c) the
 counters against the replay truths on a frozen 30-neuron network; (d) pair counts against the definition, across frame
 boundaries and over warm engine frames; (e) operating point, stability monitor and ms/frame on the v4 CartPole and
-LunarLander networks at H = 16.
+LunarLander networks at H = 16; (f) at dt = 1 ms: the DT1 calibration, Siegert against simulation, simulate_ext.
 
 Kernel: with numba (and delta_V = 0, the default), _simulate runs the compiled loop _kernel_nb, which draws the
 background noise and the external pulses inside the loop from numba's generator, seeded once per call from the frame's
 rng (one rng.integers draw). It has the same model and distributions as the numpy loop, but not the same random
 stream: the external pulses are drawn as one Poisson count per head and step, spread over the support by v (Poisson
-splitting). The numpy loop (escape noise, record=True, or kernel='np') is the reference."""
+splitting). The numpy loop (escape noise, record=True, or kernel='np') is the reference.
+
+External current (simulate_ext; the noisy-LIF engine of experiments.tdstdp, --engine nlif): _kernel_ext_{py,nb} take a
+given per-step current I[t, h, i] (signed; the caller's feed-forward input) in place of the teleport pulses, plus
+recurrent kicks on an index set (none = an empty set); same noise, leak, threshold and reset as _kernel_nb. At dt = 1 ms
+(CK's grid) the background point is DT1. With sigma_V = 0, mu_bg = 0, no refractory period and CK's tau and threshold
+it is BindsNET's LIF (tdstdp self-check (h1)). Its gain at that grid is gain_markov (the kernel's own transfer from the
+Markov chain of V, markov_rate), not Siegert: the posts there run mean-driven at 100-500 Hz, where the diffusion limit
+misses the drift regime and the mode locking of the 1 ms grid (rates locked at 500 Hz; iteration 015)."""
 import dataclasses
 import sys
 import time
+from math import comb
 
 import numpy as np
-from scipy.special import erfcx, erfi
+from scipy.special import erfcx, erfi, ndtr
 
 try:
     import numba
@@ -200,6 +209,17 @@ class LIFParams:
     @property
     def nref(self):
         return int(round(self.tau_ref / self.dt))
+
+
+# dt = 1 ms (CK's grid; experiments.tdstdp --engine nlif): calibrate(LIFParams(dt=1e-3, tau_ref=0)), the defaults'
+# operating point (5 Hz, chi G = 0.5 in the homogeneous recurrent network); without recurrent input a neuron fires at
+# 2.5 Hz there. No refractory period, as CK's BindsNET posts: a 2 ms clamp caps the rate at 1/3 per ms, below their
+# initial LunarLander rate (0.36 per ms) and the critic's value range on CartPole (V = 2 rho - 0.2 needs rho ~ 0.6)
+DT1 = dict(dt=1e-3, tau_ref=0.0, mu_bg=0.5778, chi=0.01551)
+# the low-rate nlif regime (experiments.tdstdp --rate-target, iteration 015 step 3): the default 2 ms refractory period
+# at dt = 1 ms, calibrate(LIFParams(dt=1e-3)); rate ceiling 333 Hz; at 40 Hz the kernel's gain is 41 Hz / theta
+# (mu ~ 1.48), near its peak of ~46 at 15-20 Hz
+DT1R = dict(dt=1e-3, tau_ref=0.002, mu_bg=0.5778, chi=0.01575)
 
 
 def kicks(W, p):
@@ -353,6 +373,82 @@ def _simulate_nb(Bt, v, st, k, rng, p):
     return S, xsum, xsq, None, None
 
 
+def _kernel_ext_py(Iext, Bt, ridx, V, ref, z, k, seed, a, drift, sig_n, th, vr, nref, S, xsum, xsq, fast):
+    """_kernel_py with a given external current instead of the teleport pulses: neuron i of head h gets Iext[t, h, i]
+    (signed, any units of th) at step t, plus the recurrent kicks Bt[q, r] from spikes of ridx[q] at step t - 1 onto
+    ridx[r] (an index set; empty = none). Same noise (Gaussian, or fast=True Irwin-Hall(4) from xorshift64*), leak,
+    threshold, reset and refractory clamp. Mutates V, ref, z, S, xsum, xsq."""
+    np.random.seed(seed)
+    xs = np.uint64(seed) * np.uint64(0x9E3779B97F4A7C15) | np.uint64(1)
+    H, N = V.shape
+    nr = len(ridx)
+    x = np.empty(N)
+    spk = np.empty(max(nr, 1), np.int64)
+    for t in range(k):
+        for h in range(H):
+            for i in range(N):
+                x[i] = Iext[t, h, i]
+            ns = 0
+            for q in range(nr):
+                if z[h, ridx[q]]:
+                    spk[ns] = q
+                    ns += 1
+            for s in range(ns):
+                q = spk[s]
+                for r in range(nr):
+                    x[ridx[r]] += Bt[q, r]
+            for i in range(N):
+                xi = x[i]
+                xsum[h, i] += xi
+                xsq[h, i] += xi * xi
+                if fast:
+                    xs ^= xs >> np.uint64(12)
+                    xs ^= xs << np.uint64(25)
+                    xs ^= xs >> np.uint64(27)
+                    y = xs * np.uint64(2685821657736338717)
+                    m16 = np.uint64(0xFFFF)
+                    u4 = (y & m16) + ((y >> np.uint64(16)) & m16) + ((y >> np.uint64(32)) & m16) + (y >> np.uint64(48))
+                    g = ((float(u4) + 2.0) / 65536.0 - 2.0) * 1.7320508075688772  # Irwin-Hall(4), mean 0, var 1
+                else:
+                    g = np.random.standard_normal()
+                Vi = V[h, i] * a + drift + xi + g * sig_n
+                act = ref[h, i] == 0
+                if ref[h, i] > 0:
+                    ref[h, i] -= 1
+                if not act:
+                    Vi = vr
+                fire = act and Vi >= th
+                if fire:
+                    Vi = vr
+                    ref[h, i] = nref
+                V[h, i] = Vi
+                z[h, i] = fire
+                S[t, h, i] = fire
+
+
+_kernel_ext_nb = numba.njit(cache=True)(_kernel_ext_py) if numba is not None else None
+
+
+def simulate_ext(Iext, Bt, ridx, st, rng, p):
+    """k = len(Iext) steps of H heads from state st (mutated: V, ref, z) driven by the external current Iext (k x H x N,
+    signed, units of th; the caller's feed-forward input) plus recurrent kicks Bt (len(ridx) x len(ridx), [pre, post]
+    within the index set ridx; pass np.zeros((0, 0)) and an empty ridx for none). Hard threshold only (delta_V = 0).
+    Kernel by p.kernel: 'nbf' (numba, fast noise), 'nb' (numba, Gaussian), 'np' (the same loop interpreted, Gaussian;
+    the reference). One rng draw (the seed). Returns (S (k, H, N) bool, xsum, xsq (H, N) sums of the per-step input
+    and its square, as _simulate)."""
+    assert p.delta_V == 0
+    k, H, N = Iext.shape
+    S = np.zeros((k, H, N), bool)
+    xsum, xsq = np.zeros((H, N)), np.zeros((H, N))
+    seed = int(rng.integers(1 << 31))
+    kern = _kernel_ext_nb if _kernel_ext_nb is not None and p.kernel in ("nb", "nbf") else _kernel_ext_py
+    with np.errstate(over="ignore"):  # the interpreted xorshift wraps uint64 by design
+        kern(np.ascontiguousarray(Iext, float), np.ascontiguousarray(Bt, float), np.asarray(ridx, np.int64), st["V"],
+             st["ref"], st["z"], k, seed, p.a, (1 - p.a) * p.mu_bg, p.sigma_V * np.sqrt(1 - p.a ** 2), p.th, p.vr,
+             p.nref, S, xsum, xsq, p.kernel == "nbf")
+    return S, xsum, xsq
+
+
 def _warmup(Bt, v, st, rng, p):
     """Fresh V ~ N(mu_bg, sigma_V) clipped below threshold, then p.warmup discarded steps; the tail is the warm-up's
     last W steps (zero-padded if warmup < W)."""
@@ -439,6 +535,76 @@ def input_stats(xsum, xsq, steps, p):
 def gain(mu, sig, p):
     """Siegert gain (Hz per theta) at the operating point (mu, sig), discrete-time corrected."""
     return siegert_gain(mu, np.sqrt(2) * sig, p.tau_m, p.th, p.vr, p.tau_ref, p.dt)
+
+
+def _ih4_cdf(x):
+    """CDF of the 'nbf' kernel noise, (U_1 + ... + U_4 - 2) sqrt(3) (Irwin-Hall(4), mean 0, variance 1)."""
+    y = np.clip(np.asarray(x, float) / np.sqrt(3) + 2, 0, 4)
+    return sum((-1) ** k * comb(4, k) * np.where(y > k, y - k, 0.0) ** 4 for k in range(5)) / 24
+
+
+def markov_rate(mu, sig_x, p, nbins=400, lo=-1.5):
+    """Stationary spike probability per step of the discrete-time kernel (_step, delta_V = 0) at free-membrane mean mu
+    with per-step input noise of s.d. sig_x on top of the background (V' = a V + (1 - a) mu + background noise +
+    N(0, sig_x^2); spike if V' >= th, then vr and p.nref clamped steps), from the transition matrix of V on nbins bins
+    over [lo, th] (below lo lumped into the lowest bin) plus p.nref refractory states. Exact for the kernel up to the
+    binning; the background noise is Irwin-Hall(4) for p.kernel 'nbf', else Gaussian. Siegert's diffusion limit misses
+    the drift-dominated regime of the 1 ms grid: at mu = 5 and 8 the kernel's gain is 41 and 31 Hz / theta (no
+    refractory period), Siegert (dt-corrected) gives 48 at both."""
+    assert p.delta_V == 0
+    sb, nr = p.sigma_V * np.sqrt(1 - p.a ** 2), p.nref
+    edges = np.linspace(lo, p.th, nbins + 1)
+    dz = (p.th - lo) / nbins / 4
+    zmax = 6 * np.hypot(sb, sig_x)
+    zc = np.arange(-zmax - dz / 2, zmax + dz, dz)  # knots of the increment pmf
+    cdf = _ih4_cdf if p.kernel == "nbf" else ndtr
+    pz = np.diff(cdf(zc / sb))
+    if sig_x > 1e-9:
+        pz = np.convolve(pz, np.diff(ndtr(zc / sig_x)), "same")
+    Fz = np.r_[0.0, np.cumsum(pz / pz.sum())]
+    m = p.a * (edges[:-1] + edges[1:]) / 2 + (1 - p.a) * mu
+    C = np.interp(edges[None, :] - m[:, None], zc, Fz, left=0.0, right=1.0)
+    n = nbins + nr
+    P = np.zeros((n, n))
+    P[:nbins, :nbins] = np.diff(C, axis=1)
+    P[:nbins, 0] += C[:, 0]
+    spk = 1 - C[:, -1]
+    r0 = np.searchsorted(edges, p.vr) - 1  # the reset bin: V = vr at the start of the next active step
+    P[:nbins, nbins if nr else r0] += spk  # a spike enters the refractory chain (clamped at vr), or resets
+    for k in range(nr):
+        P[nbins + k, nbins + k + 1 if k + 1 < nr else r0] = 1.0
+    A = P.T - np.eye(n)
+    A[-1] = 1
+    return float(np.linalg.solve(A, np.r_[np.zeros(n - 1), 1.0])[:nbins] @ spk)
+
+
+_MU_GRID = np.round(np.r_[np.arange(-0.5, 4, 0.05), np.arange(4, 25.01, 0.2)], 10)  # free-membrane mean (theta)
+_SX_GRID = np.array([0.0, 0.01, 0.02, 0.04, 0.06, 0.09, 0.13])  # per-step input s.d. (theta)
+_TABLES = {}
+
+
+def gain_table(p):
+    """(rate Hz, gain Hz / theta) of markov_rate on the grid _MU_GRID x _SX_GRID (sig_x per step), the gain by central
+    differences of the rate along mu; computed once per parameter set (~15 s)."""
+    key = (p.tau_m, p.dt, p.th, p.vr, p.mu_bg, p.sigma_V, p.nref, p.kernel == "nbf")
+    if key not in _TABLES:
+        r = np.array([[markov_rate(mu, sx, p) for sx in _SX_GRID] for mu in _MU_GRID]) / p.dt
+        _TABLES[key] = (r, np.gradient(r, _MU_GRID, axis=0))
+    return _TABLES[key]
+
+
+def gain_markov(mu, sig_x, p):
+    """Gain dr / dmu (Hz per theta) of the discrete-time kernel at (mu, sig_x) (markov_rate; bilinear in gain_table,
+    clipped to the grid): what the nlif counter uses (iteration 015). An abstraction of what a neuron knows about its
+    own operating point, as the Siegert gain."""
+    G = gain_table(p)[1]
+    mu = np.clip(np.asarray(mu, float), _MU_GRID[0], _MU_GRID[-1])
+    i = np.clip(np.searchsorted(_MU_GRID, mu) - 1, 0, len(_MU_GRID) - 2)
+    fx = (mu - _MU_GRID[i]) / (_MU_GRID[i + 1] - _MU_GRID[i])
+    s = np.clip(np.asarray(sig_x, float), 0, _SX_GRID[-1])
+    j = np.clip(np.searchsorted(_SX_GRID, s) - 1, 0, len(_SX_GRID) - 2)
+    fs = (s - _SX_GRID[j]) / (_SX_GRID[j + 1] - _SX_GRID[j])
+    return ((1 - fx) * ((1 - fs) * G[i, j] + fs * G[i, j + 1]) + fx * ((1 - fs) * G[i + 1, j] + fs * G[i + 1, j + 1]))
 
 
 def _regression_gain(st, mu, r, Gs, p):
@@ -777,6 +943,53 @@ def _main():
               f"{ms:.0f} ms/frame (siegert), {1e3 * np.median(tps[1:]):.0f} ms/frame (psi)")
         assert (R > 2).all() and (R < 50).all() and max(mres) < 1 and mf["eig"] < 1, (R, mres, mf["eig"])
         out[task] = ms
+    # (f) dt = 1 ms (DT1): calibration, Siegert against simulation, the external-current kernel at zero input
+    p1 = dataclasses.replace(p, **DT1)
+    mu1, chi1 = calibrate(p1)
+    assert abs(mu1 - DT1["mu_bg"]) < 1e-3 and abs(chi1 - DT1["chi"]) < 1e-4, (mu1, chi1)
+    print(f"(f) dt = 1 ms: calibrate -> mu_bg {mu1:.4f}, chi {chi1:.5f} (DT1 {DT1['mu_bg']}, {DT1['chi']})")
+    mu1r, chi1r = calibrate(dataclasses.replace(p, **DT1R))
+    assert abs(mu1r - DT1R["mu_bg"]) < 1e-3 and abs(chi1r - DT1R["chi"]) < 1e-4, (mu1r, chi1r)
+    print(f"  with tau_ref 2 ms: mu_bg {mu1r:.4f}, chi {chi1r:.5f} (DT1R {DT1R['mu_bg']}, {DT1R['chi']})")
+    for mu in (0.5, 0.7, 0.9, 1.2):
+        r_sim = _single_neuron(mu, 0.2, p1, seed=1)
+        r_th = float(siegert_rate(mu, np.sqrt(2) * 0.2, p1.tau_m, p1.th, p1.vr, p1.tau_ref, p1.dt))
+        dm = 0.04
+        g_sim = (_single_neuron(mu, 0.2, p1, seed=2, dmu=dm) - _single_neuron(mu, 0.2, p1, seed=2, dmu=-dm)) / (2 * dm)
+        g_th = float(gain(mu, 0.2, p1))
+        print(f"  mu={mu:.1f}: rate sim {r_sim:6.2f} Hz, Siegert {r_th:6.2f} (ratio {r_th / r_sim:.3f}); gain sim "
+              f"{g_sim:6.1f}, Siegert {g_th:6.1f} (ratio {g_th / g_sim:.3f})")
+        out[f"f_mu{mu}"] = (r_th / r_sim, g_th / g_sim)
+        if r_sim > 2:
+            assert abs(r_th / r_sim - 1) < 0.05, (mu, r_sim, r_th)
+            assert abs(g_th / g_sim - 1) < 0.10, (mu, g_sim, g_th)
+    H1, rng1 = 2000, np.random.default_rng(4)
+    st1 = init_state(1, H1, p1)
+    st1["V"] = np.full((H1, 1), p1.mu_bg)
+    simulate_ext(np.zeros((200, H1, 1)), np.zeros((0, 0)), [], st1, rng1, p1)  # burn-in
+    r_ext = simulate_ext(np.zeros((2000, H1, 1)), np.zeros((0, 0)), [], st1, rng1, p1)[0].mean() / p1.dt
+    r_bg = float(siegert_rate(p1.mu_bg, np.sqrt(2) * 0.2, p1.tau_m, p1.th, p1.vr, p1.tau_ref, p1.dt))
+    print(f"  simulate_ext, zero input: {r_ext:.2f} Hz, Siegert at mu_bg {r_bg:.2f} Hz (background without "
+          f"recurrence; the recurrent operating point adds chi r0 = {DT1['chi'] * 5:.3f} theta for 5 Hz)")
+    assert abs(r_ext / r_bg - 1) < 0.05, (r_ext, r_bg)
+    # (g) dt = 1 ms, mean-driven (the nlif posts of experiments.tdstdp): the kernel's Markov-chain gain (gain_markov)
+    # against simulate_ext with common random numbers, both noise modes; Siegert for contrast
+    for kern, pg, mus in (("nbf", p1, (0.7, 3.0, 8.0)), ("nb", p1, (0.7, 3.0, 8.0)),
+                          ("nbf", dataclasses.replace(p, **DT1R), (1.0, 1.5, 3.0))):
+        pk = dataclasses.replace(pg, kernel=kern)
+        line = []
+        for mu in mus:
+            rs = []
+            for dm in (0.05, -0.05):
+                stg = init_state(1, 2000, pk)
+                stg["V"] = np.full((2000, 1), 0.5)
+                Ig = np.full((2500, 2000, 1), (1 - pk.a) * (mu + dm - pk.mu_bg))
+                rs.append(simulate_ext(Ig, np.zeros((0, 0)), [], stg, np.random.default_rng(5), pk)[0][500:].mean())
+            g_sim, g_mk = (rs[0] - rs[1]) / 0.1 / pk.dt, float(gain_markov(mu, 0.0, pk))
+            g_sg = float(gain(mu, pk.sigma_V, pk))
+            line.append(f"mu={mu:.1f}: sim {g_sim:5.1f}, Markov {g_mk:5.1f}, Siegert {g_sg:5.1f}")
+            assert abs(g_mk / g_sim - 1) < 0.06, (kern, mu, g_sim, g_mk)
+        print(f"(g) gain at dt = 1 ms, tau_ref {pk.tau_ref * 1e3:.0f} ms, kernel {kern}: " + "; ".join(line))
     print(f"lif self-check ok ({time.time() - t0:.0f} s)")
     return out
 

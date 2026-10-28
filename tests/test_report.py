@@ -48,3 +48,30 @@ def test_summarize_cross_study_reference(tmp_path):
     row = next(csv.DictReader(open(tmp_path / "comp" / "summary.csv")))
     assert row["group"] == "new" and row["mw_ref"] == "fake/ref"
     assert float(row["mw_ret"]) == mannwhitneyu([10.0], [500.0]).pvalue
+
+
+def test_summarize_tdstdp_pairs(tmp_path):
+    """Declared pairs of a tdstdp-runner study: pairs.csv with the Hodges-Lehmann shift, Mann-Whitney p and Holm over
+    the family; the primary metric is AUC over the first `episodes` episodes on CartPole, last-100 on LunarLander."""
+    g = lambda t: dict(task=t, engine="nlif", flags=[], seeds=[0, 1, 2])  # noqa: E731
+    studies = {"pr": dict(title="pr", reference={}, gates={}, pairs=[("CP_on", "CP_off"), ("LL_on", "LL_off")],
+                          groups={k: g("CartPole" if k[0] == "C" else "LunarLander")
+                                  for k in ("CP_on", "CP_off", "LL_on", "LL_off")})}
+    run = lambda t, ret: {"config": {"task": t, "episodes": 2, "max_eps": 3}, "returns": ret, "T_f": None,  # noqa: E731
+                          "T_s": None, "ms_per_frame": 1.0}
+    data = {"CP_on": [run("CartPole", [x, x, 0.0]) for x in (10.0, 20.0, 30.0)],
+            "CP_off": [run("CartPole", [x, x, 99.0]) for x in (1.0, 2.0, 3.0)],
+            "LL_on": [run("LunarLander", [0.0, x]) for x in (5.0, 6.0, 7.0)],
+            "LL_off": [run("LunarLander", [0.0, x]) for x in (5.0, 6.0, 7.0)]}
+    for k, rs in data.items():
+        (tmp_path / "pr" / "runs" / k).mkdir(parents=True)
+        for i, r in enumerate(rs):
+            (tmp_path / "pr" / "runs" / k / f"s{i}.json").write_text(json.dumps(r))
+    report.summarize("pr", root=tmp_path, studies=studies)
+    rows = {r["on"]: r for r in csv.DictReader(open(tmp_path / "pr" / "pairs.csv"))}
+    cp, ll = rows["CP_on"], rows["LL_on"]
+    assert float(cp["primary_on"]) == 20.0 and float(cp["primary_hl"]) == 18.0  # AUC over 2 episodes, not the 3rd
+    assert float(cp["primary_hl_lo"]) <= 18.0 <= float(cp["primary_hl_hi"]) and float(ll["primary_hl"]) == 0.0
+    p = mannwhitneyu([10.0, 20.0, 30.0], [1.0, 2.0, 3.0]).pvalue
+    assert float(cp["primary_p"]) == p and float(cp["primary_p_holm"]) == min(1.0, 2 * p)
+    assert "## Pairs" in (tmp_path / "pr" / "summary.md").read_text()

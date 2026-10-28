@@ -2,6 +2,201 @@
 
 ## 2026-10-27
 
+### Results (reported study `emergent-v4`, iteration 014 §11)
+
+- All 240 runs completed (0 failed) on branch `emergent-v4-study` (git `086996f`, empty patch). Summary, pairs and structure were written by `experiments.report` and `experiments.structure` in the worktree. They reach `main` only by merging that branch.
+- **P1** (AUC, on vs off): supported on branching, QIF and LIF (Holm p 2.7e-7); not supported on flow (+21, p 0.17).
+- **P2** (L_obs, on vs off): supported on all 4 engines.
+- **S** (on vs sealed): AUC equal on flow, branching and LIF. Sealed beats on for QIF (196 vs 168, Holm 0.0023). The map term reaches a lower L_obs than sealing on all three spiking engines.
+
+### Results (iteration 015, pilot C: LunarLander columns and latents)
+
+- 12 runs, `pilot015/C/`: χ_rec 0.3, seeds 0–2, 3000 episodes, `--eta-cal --rate-target 40`. Recorded in `docs/iterations/015-hybrid-columns.md` §6. Development results.
+- **Last-100 return** (mean of 3 seeds):
+  - cols λ = 0: 52 (48, 55, 54);
+  - base: 26 (pilot B);
+  - cols r = 1: 24; cols r = 3: 26; lat r = 1: 31.
+  - No run solves.
+- **Structure.** With λ = 0, the task term spreads the columns apart (within share 0.77 → 0.46) and builds a hub: the main-engine column receives 73% of the R weight. The map term seals the columns by about episode 200 and removes this pathway. On CartPole, by contrast, the task term seals the columns itself (§5).
+- **Gates.** Every run passes the stability gates (max Re λ ≤ 0.25, τ_loop ≤ 27 ms). The latent arm passes its pre-set go criteria, so it stays in the study. However, its latent→action share falls from 0.25 to 0.004: the map term nearly disconnects the latents and the barrier does not hold them.
+- **L_obs is uninformative on LunarLander.** The causal share is 0.1–0.2%, and L_obs changes by less than 0.04 bits in every arm.
+
+### Decided (iteration 015: `hybrid-columns` design, user 2026-10-27)
+
+- **Non-inferiority margin Δ = 25:** 25 points of last-100 return on LunarLander, 25 points of AUC on CartPole.
+- **Headline:** each regime of modularity against `base`, with both tests ("improves" and "keeps performance"):
+  - implicit `cols_lam0`;
+  - learned `cols_on`;
+  - enforced `cols_sealed`.
+  
+  Holm applies over these 6 contrasts. The secondary family (`cols_on` vs `cols_lam0`, `cols_on` vs `cols_sealed`, `lat_on` vs `cols_on`) has its own Holm correction.
+- **New arm `cols_sealed`.** It adds `--rec-seal` (`Config.rec_seal`, token `seal`, `HybridRec(seal=True)`): the same random draws for R, with the cross-module synapses removed. Default paths are unchanged. New test `test_rec_seal_drops_cross_module_synapses`. The study now has 10 groups and 200 runs.
+- **Fixed: `calibrate_rec` with sealed R.**
+  - In a sealed network every target of j lies in m(j), so the one-hop credit h_m(i) − h̄_j is exactly 0.
+  - The smoke run's calibration therefore divided by rounding noise (RMS(u) 6e-19) and set η_rec ≈ 4e14.
+  - `calibrate_rec` now measures on the unsealed draws, so every arm of a seed shares η_rec and λ_rec, as it already shares s_in and the low-rate scaling. The test checks the shared rates.
+  - In `cols_sealed`, R therefore has no task learning, by construction: only homeostasis acts on it.
+
+### Added (iteration 015: the `hybrid-columns` study, draft)
+
+- `STUDIES["hybrid-columns"]` (`experiments/report.py`): 2 tasks × {base, cols_lam0, cols_on, lat_on}, nlif at 40 Hz, χ_rec 0.3, r = 1, seeds 3000–3019, with 8 pairs.
+- `reports/hybrid-columns/README.md`: the draft pre-registration. The non-inferiority margin is left for the user to fix. Not launched.
+- **Pairs for tdstdp-runner studies.** `summarize` writes `pairs.csv` and a "Pairs" section only when the study declares pairs, so existing tdstdp summaries stay byte-identical.
+  - Metrics (`TD_PAIR_METRICS`):
+    - primary = CartPole AUC / LunarLander last-100 return;
+    - AUC over the first `episodes` episodes;
+    - last-100 return.
+  - `m3_pairs` takes the metrics and adds an optional Hodges–Lehmann shift with its 95% CI (`hodges_lehmann`, Moses interval).
+  - New test `test_summarize_tdstdp_pairs`.
+- **`experiments/tdstdp.py`:** the result's `rec.RK` holds R's module weight table (shares of total R) at every snapshot, so structure is reported without saving R. The latent checkpoint test checks it.
+
+### Decided (iteration 015)
+
+- New record `docs/iterations/015-hybrid-columns.md`, covering steps 1–3 and the pilots.
+- **User decision:** the low-rate nlif regime (`--rate-target 40`) is used for both tasks and every arm.
+  - It replaces the CK-matched regime, where LunarLander's recurrent posts lock at 500 Hz with gain ≈ 0.
+  - The CartPole baseline is slower in this regime (4 of 5 solved by 400 episodes, T_s 252–370, AUC 322–399, against 154–191 and 393–453 CK-matched). That floor is reported, not tuned away.
+- Pilot B launched: CartPole columns grid and the LunarLander low-rate baseline.
+
+### Added (iteration 015, step 3: the low-rate nlif regime, `--rate-target R`; the default stays CK-matched)
+
+- **`mapstdp/lif.py`:**
+  - `DT1R` is the dt = 1 ms operating point with the default 2 ms refractory period: μ_bg 0.5778, χ 0.01575 (`calibrate`), rate ceiling 333 Hz.
+  - `markov_rate` gains the refractory chain, so `gain_table` and `gain_markov` hold for τ_ref > 0. Its table key includes nref, and the nref = 0 values are unchanged.
+  - Self-checks (f) and (g) add DT1R. Markov against simulation: 45.8 vs 45.9 at μ = 1.0, 41.0 vs 41.2 at μ = 1.5, 29.6 vs 29.7 at μ = 3.
+- **R = 40 Hz** is the default proposal, set from the gain curve with τ_ref 2 ms:
+  - G ≈ 41 Hz/θ at 40 Hz (μ ≈ 1.48), near the curve's peak of about 46 at 15–20 Hz;
+  - 12% of the ceiling;
+  - 0.8 spikes per neuron per 20 ms window.
+- **`experiments/tdstdp.py`:**
+  - `Config.rate_target` (Hz, 0 = CK-matched), `--rate-target` and the token `rt<R>`.
+  - `calibrate_low` is a pre-set rule, run without recurrence:
+    - τ_ref 2 ms;
+    - s_in bisected to R by `calibrate_s_in`, which now also returns BindsNET's rate r_CK;
+    - k = r_CK / R, with α_a and α_c multiplied by k and β_c kept;
+    - without `--eta-cal` or Adam, η_c and η_a are multiplied by RMS(g_CK) / RMS(g_low). Both are the per-ms update RMS at init with W frozen on the CAL stream, g_CK from BindsNET at CK's α and g_low from low-rate nlif at the scaled α.
+  - It runs before `--eta-cal` and `calibrate_rec`, so every arm of a seed shares it. The result's `low_rate` and the checkpoint carry the record, and a resume reuses it. τ_n stays at 20 ms.
+- **Default path unchanged:**
+  - `calibrate_s_in` still gives pilot A's s_in for CartPole seed 0 (0.94140625).
+  - `pytest -q tests`: 40 passed (2 new tests), golden bit-identical.
+  - `ruff` and both self-checks pass.
+- **Smoke** (development, seed 0, plus seeds 1 and 2 for the CartPole base; scratchpad):
+  - **CartPole base, 400 episodes:**
+    - k 3.50, s_in 0.283, η scale 2.15 / 2.55.
+    - Seeds 0 and 2: T_s 252 and 260.
+    - Seed 1 does not solve: its last 100 episodes average 499.5, with the last imperfect episode at 303.
+    - That is **2 of 3, which misses the step's 3-of-3 criterion**. The CK-matched nlif had T_s 154–179.
+  - **Column-rate noise** at init (one observation, 400 copies): the CV of ρ̄_k is 0.093 at 41 Hz vs 0.029 at 143 Hz. The logit noise s.d. is 0.93 vs 0.28, because α_a grows by k while the CV grows by about 3×.
+  - **LunarLander `--eta-cal`, 51 episodes:** k 9.12, s_in 0.100, −191 (3.2 ms/frame).
+  - **CartPole cols χ 0.3, 100 episodes:**
+    - max Re λ 0.23, τ_loop 26 ms, χG 0.23;
+    - causal share 0.55%, up from 0.17% at the CK-matched rates;
+    - R rate 53 Hz;
+    - within-module share 0.92 → 1.00 with λ on (0.92 → 0.93 with λ 0);
+    - last-20 return 43 / 38;
+    - 2.3 / 2.0 ms/frame vs 0.9–1.1 for the base.
+  - **LunarLander lat, 20 episodes:**
+    - max Re λ 0.23, causal share 0.11% (from 0.01%);
+    - R posts and latents at 51–55 Hz, none near the ceiling;
+    - within-module share 0.68 → 0.75, latent output share 0.25 → 0.20;
+    - 4.7 ms/frame.
+  - **Counter validation, LunarLander at init (54 Hz, μ 1.3–2.6):**
+    - Markov: synapse corr 0.887, ratio 0.99. Siegert gives 0.888 and 1.03.
+    - The truth's split-half reliability caps the correlation at about 0.88, so the counter reaches the noise ceiling.
+    - The gain is about 37 Hz/θ on every post.
+
+### Added (iteration 015, step 2: recurrent columns in the TD-STDP actor, `--rec {cols,lat}`; engine nlif only)
+
+- **Gain estimator: the kernel's own transfer, not Siegert.** The nlif posts run mean-driven (CartPole 140–190 Hz, LunarLander 365–470 Hz). In that regime the Siegert gain is wrong on the 1 ms grid.
+  - It stays flat at about 48 Hz/θ. The kernel's gain is 45 at μ = 3 and 31 at μ = 8.
+  - Rates mode-lock at 500 Hz (period 2 steps), where the gain is 0.
+  - `mapstdp/lif.py` gains `markov_rate`, the stationary rate of the discrete kernel from the transition matrix of V, with the background noise of `p.kernel`. `gain_table` caches it (about 15 s per parameter set), and `gain_markov` interpolates it bilinearly in (μ, per-step input s.d.). Like Siegert, it is an abstraction of what a neuron knows about its own operating point.
+  - Self-check (g): it agrees with simulation within 2% at μ = 0.7, 3 and 8 in both noise modes. Siegert gives 48.6 and 48.3 where the kernel has 44.7 and 30.9.
+- **Counter validation** (replay truth, open loop with common random numbers, 20 ms window, χ_rec 0.3; scratchpad, development). Synapse correlation and ratio c / marginal:
+  - CartPole init: Markov 0.974 / 1.04, Siegert 0.969 / 1.22.
+  - CartPole, input rows scaled over U(0.02, 1.3): Markov 0.981 / 1.02, Siegert 0.970 / 1.14.
+  - LunarLander init: Markov 0.935 / 1.06, Siegert 0.776 / 2.0.
+    - Gain per (copy, post): Markov corr 0.89; the split-half reliability of the truth is 0.66–0.72.
+    - Binned by μ, the correlation is 0.996 for Markov and 0.70 for Siegert.
+  - Removal is 1.00–1.03 × marginal here, so the response is linear on the scale of one kick.
+- **Credit check** (Monte Carlo, scratchpad): E[r(A) Σ_h c^h ψ^h] vs R ⊙ ∂J/∂R by finite differences with common random numbers, on a frozen 2 × 5 column nlif actor at 222 Hz. Here J = E[Σ_a p_a r_a], with CK's softmax readout per 20 ms window.
+  - Cosine 0.976: 0.950 within modules, 0.993 across.
+  - The finite-difference truth is reproducible to 0.970 across two noise streams.
+- **`mapstdp/tdstdp.py`:**
+  - `Layout(..., n_lat=0)` adds latent posts at the end: sign +1, zero Mv and Ma, mask `lat`. It is bit-identical at 0.
+  - `HybridRec`:
+    - R is an E→E matrix among the actor E posts, one module per action, plus `n_lat_mod` latent modules of n_ae posts. Its SBM init (p_same 0.5, p_cross 0.05, U(0.5, 1.5), d_j = 1) comes from its own stream.
+    - Kicks are χ_rec R/d_j.
+    - Per 20 ms window and copy: G from `gain_markov`, the pair counts (`lif.pair_counts`, tail carried) and the counter c^h = τ_eff b G_h n_hᵀ (Eq. 11b).
+    - One-hop credit (Eq. 4b): e_h ← e^{−20/τ_q} e_h + c^h ψ^h. The module score is CK's α_a (A − p)/n_ae, 0 on latents. Credit pairs with the counter of the window whose rates gave p.
+    - Task step: η_rec mean_h(Σ_t δ) e_h.
+    - Per statistics frame (5 windows), in order:
+      - observed walk with an EMA over 20 frames;
+      - map modulator, minus the latent-output barrier in the lat arm;
+      - structural increment with λ;
+      - homeostasis (Eq. 4d).
+    - Monitors: max Re λ(Λ̂^K), χ_rec τ_eff G, τ_m/(1 − max Re λ), causal share, within-module weight share, L_obs, silent-module frames, rates, latent rates and output share, latent→action synapses at w_min, and action perseveration against Σp².
+  - `check_counter`, self-check (h3): corr 0.933, ratio 1.03, replay mismatch 0.
+- **`experiments/tdstdp.py`:**
+  - `Config` fields `rec`, `chi_rec`, `lam`, `lam_ratio`, `lam_rec`, `eta_rec`, `stat_windows`, `pair_ms`, `n_lat_mod` and `la_beta`, with flags and tokens after the engine token.
+  - `rec` requires nlif, `--block 20` and no Adam.
+  - Input→latent W rows are frozen at init: c, κ and the update are zeroed there.
+  - `calibrate_rec` is a pre-set, frozen run:
+    - η_rec gives R the actor W's relative step per window;
+    - λ = lam_ratio · RMS(task step over a frame) / RMS(structural step).
+  - `calibrate_s_in` and `calibrate_ck` now run without recurrence, so every arm of a seed shares s_in and η.
+  - Checkpoints carry R, e, the tail, the EMA tables, the logs and the snapshots.
+  - `--save-model` writes R snapshots (episode 0, every 100 CartPole / 500 LunarLander episodes, end) with m, roles and mask.
+  - The result's `rec` holds the calibration and the monitor time series.
+  - Default paths are unchanged.
+- **`tests/test_hybrid.py`** (+4 tests):
+  - h2: rec cols with χ_rec = 0 equals the nlif baseline bit for bit (W, returns, membranes, both streams), for H = 1 and 3;
+  - the credit against a per-synapse loop;
+  - lat: frozen latent W rows and a checkpoint round trip.
+- **Checks:**
+  - `pytest -q tests`: all pass, golden bit-identical.
+  - `reports/tdstdp-baseline*` summaries are byte-identical.
+  - `ruff check .` passes.
+- **Smoke** (development, seed 0, scratchpad):
+  - **CartPole**, 20 episodes, cols:
+    - χ 0.3, λ on: η_rec 0.124, λ 0.80. max Re λ 0.25, so τ_loop is 27 ms. Causal share 0.17%. Within share 0.92 → 0.98 (λ 0: 0.92 → 0.92). L_obs 6.20 → 6.20 bits, chance-dominated. 190 Hz.
+    - χ 0.15: max Re λ 0.13, 163 Hz.
+    - Cost: 2.4 vs 1.5 ms/frame for nlif on the same loaded node.
+  - **LunarLander** `--eta-cal`, lat, 10 episodes:
+    - η_rec 0.52, λ 4.4;
+    - max Re λ 0.09–0.26, R rates 440–470 Hz with the latents alike, so most posts sit on the 500 Hz lock with gain near 0;
+    - within share 0.69 → 0.71, latent output share 0.24 → 0.23;
+    - 6.7 vs 4.1 ms/frame.
+
+### Added (iteration 015, step 1: noisy-LIF engine for the TD-STDP backbone, `--engine nlif`; no recurrence yet)
+
+- `mapstdp/lif.py`:
+  - `_kernel_ext_py` / `_kernel_ext_nb` and `simulate_ext(Iext, Bt, ridx, st, rng, p)`. The kernel takes a given per-step external current (signed, threshold units) instead of the teleport pulses, plus recurrent kicks on an index set (empty for now). Noise, leak, threshold and reset are the same as `_kernel_nb`. The compiled and interpreted kernels are bit-identical in both noise modes. Existing kernels are unchanged.
+  - `DT1`, the dt = 1 ms operating point from `calibrate`: μ_bg 0.5778, χ 0.01551, σ_V 0.2, **no refractory period**.
+    - A 2 ms clamp caps the rate at 1/3 per ms. That is below BindsNET's initial LunarLander rate (0.365 per ms), so the rate match was infeasible.
+    - On CartPole the clamp also saturated the critic at about 0.34 per ms (V ≤ 0.48, while the preset needs V ≈ 1). In a 2-seed smoke at 2 ms, neither seed solved.
+  - Self-check (f): the calibration, Siegert against simulation at dt = 1 ms (rate within 0.7%, gain within 2%), and `simulate_ext` at zero input against Siegert (2.59 vs 2.55 Hz). Earlier self-check output is unchanged.
+- `mapstdp/tdstdp.py`:
+  - `simulate_nlif`: W in mV as in BindsNET, with current s_in x(t−1)Wᵀ/13 in threshold units, τ_m 20 ms and background noise on every post, the critic included.
+  - `check_bindsnet_limit`, self-check (h1): the ext kernel with σ_V = 0, μ_bg = 0, no refractory period, τ = 100 ms and threshold 13 mV reproduces `simulate_bindsnet` bit for bit over 20 ms blocks, raster and membranes, in both mV and threshold units.
+- `experiments/tdstdp.py`, engine `nlif` (authors' code path only):
+  - W, init and η are in mV as for engine `lif`, and the decision readout, rates and rule are unchanged.
+  - Membranes are carried across blocks and set to μ_bg on an episode reset (code 2), with no draw. The neuron noise has its own stream, so the main stream (inputs, actions, env seeds) is consumed as in engine `lif`.
+  - `Config.s_in`, `--s-in` and token `si<S>`. If s_in is not given, `calibrate_s_in` sets it before the run by bisection: the mean initial post rate (`probe_rate`, W frozen, CAL_SEED stream, CAL_TICKS ticks) equals engine `lif`'s. It is not tuned on return. The result stores `s_in` and `s_in_cal` (the lif and nlif rates).
+  - Checkpoints carry the membranes, the noise stream and s_in, and a resume reuses the stored s_in.
+- `experiments/report.py`: `ENGINE_FLAG["nlif"]`. Existing studies are unchanged.
+- `tests/test_hybrid.py` (4 tests): compiled vs interpreted ext kernel, h1, and an nlif checkpoint round trip with the episode reset.
+- Smoke (development, scratchpad, not committed):
+  - **CartPole**, 400 episodes:
+    - nlif: s_in 0.94, T_s 154 / 179 / 172 on seeds 0–2;
+    - lif: T_s 202 / 150 / 228;
+    - 0.67–0.88 vs 0.64–0.68 ms/frame.
+  - **LunarLander** `--eta-cal`, 20 episodes:
+    - s_in 0.975;
+    - mean return −223 (nlif) vs −198 (lif);
+    - 1.99 vs 2.02 ms/frame;
+    - s_in calibration takes about 20 s.
+
 ### Changed (study `emergent-v4`, CartPole only; not launched)
 
 - `experiments/report.py`, `STUDIES["emergent-v4"]`:

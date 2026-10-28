@@ -1,9 +1,11 @@
 """Iteration 013 step 1: the feed-forward TD-STDP actor-critic of Chung & Kozma 2020 [CK] (arXiv:2008.13044,
 mapstdp/tdstdp.py) in closed loop on CartPole and LunarLander. Run from the repo root:
   python -m experiments.tdstdp --task {CartPole,LunarLander} --seed 0 [--adam | --no-adam | --eta-cal] [--heads H]
-    [--block B] [--episodes E] [--engine {numpy,snm,lif}] [--legacy [--rate0 p] [--engine lif-snm]]
+    [--block B] [--episodes E] [--engine {numpy,snm,lif,flow,nlif}] [--s-in S] [--legacy [--rate0 p]
+    [--engine lif-snm]] [--rec {cols,lat} [--chi-rec X] [--lam L] [--lam-ratio r] [--save-model PATH] ...]
     -> experiments/results/tdstdp_<task>[_ck][_<tokens>]_s<seed>.json   (tokens: options off the preset, in order
-       adam | noadam | sgd (= --eta-cal), B<B>, h<H>, ep<E>, r<rate0> (legacy), engine snm | lif | lifsnm)
+       adam | noadam | sgd (= --eta-cal), B<B>, h<H>, ep<E>, r<rate0> (legacy), fast, si<S>, engine snm | lif |
+       lifsnm | flow | nlif)
     [--out PATH]   (result path; the default above; experiments.report uses it to write reports/<study>/runs/)
   python -m experiments.tdstdp --summary   -> per group: T_f, T_s, solved fraction, last-100 return, ms per frame,
        next to CK's Table 2 and the model v4 (flow, spiking) returns
@@ -17,7 +19,28 @@ over copies (min_eps = episodes, max_eps). Block B: W frozen for B ms (tdstdp.bl
 per block with per-ms-matched moments (tdstdp.Adam); the authors step per ms (B = 1).
 --fast (iteration 013 §10, S2): the update summed over copies in one matrix product (tdstdp.block_learn_ck_fast);
 same rng order, equal up to floating-point summation order (not bit-identical). --engine flow (S3): the branching
-step's noise-free limit (tdstdp.flow_step): rates instead of spikes, plus the input autocorrelation term of z."""
+step's noise-free limit (tdstdp.flow_step): rates instead of spikes, plus the input autocorrelation term of z.
+--engine nlif (iteration 015): the noisy LIF of mapstdp.lif on the 1 ms grid (tdstdp.simulate_nlif) on every post, the
+critic included; W, init and eta in mV as engine lif. The input scale s_in is set before the run, not tuned on return
+(calibrate_s_in: the mean initial post rate equals engine lif's on the same stream); --s-in fixes it instead. Rates rho,
+value, softmax and the rule are unchanged; the membranes are carried across blocks and set to mu_bg (no draw) on an
+episode reset. The neuron noise has its own stream, so the main rng (inputs, actions, env seeds) is consumed as
+engine lif's.
+--rate-target R (iteration 015 step 3, engine nlif; token rt<R>): the low-rate regime, tau_ref 2 ms (lif.DT1R), s_in
+set so the mean initial post rate is R Hz, the softmax and critic gains alpha_a, alpha_c times k = r_CK / R (r_CK:
+BindsNET's initial rate on the same probe) and, without --eta-cal or Adam, eta_c, eta_a matched to the RMS of
+BindsNET's initial per-ms update (calibrate_low; the result's 'low_rate' records it). tau_n stays CK's 20 ms.
+--rec {cols,lat} (iteration 015 step 2, engine nlif, --block 20, no Adam; derivation §8.1, Proposal): recurrent E->E
+modules in the actor (tdstdp.HybridRec): R among the actor E posts, one module per action ('cols'), plus --n-lat-mod
+latent modules of n_ae posts ('lat'; input->latent W frozen at init, latent->action R learned, latent-output barrier
+--la-beta). Kicks chi_rec R / d_j (--chi-rec). R learns by the one-hop task credit (eta_rec) and the map term (lam_rec,
+off with --lam 0) with d_j homeostasis; the counter's gain is the kernel's own transfer (lif.gain_markov). eta_rec and
+lam_rec are pre-set by calibrate_rec unless given (--eta-rec, --lam-rec); s_in and --eta-cal are calibrated without
+recurrence, so every arm of a seed shares them. --rec-seal drops R's cross-module synapses from the same draws
+(enforced modularity). Tokens after the engine: cols | lat, xr<chi_rec>, seal, lam0 | lam<l>,
+lr<lam_ratio>, lx<lam_rec>, er<eta_rec>, sw<stat_windows>, pw<pair_ms>, nl<n_lat_mod>, lb<la_beta> (off-default
+only, except the first two). The result's 'rec' holds the calibration and the monitors (HybridRec.log, one row per
+pooled-episode event); --save-model PATH writes R snapshots (episode 0, every SNAP_EVERY, end) with m, roles, mask."""
 import argparse
 import dataclasses
 import glob
@@ -31,6 +54,7 @@ import gymnasium as gym
 import numpy as np
 
 from experiments.tasks import TASKS, critic_layer, random_states
+from mapstdp import lif
 from mapstdp import tdstdp as td
 
 OUT = pathlib.Path(__file__).parent / "results"
@@ -40,6 +64,7 @@ PAPER = {"CartPole": dict(T_f=(57.0, 23.97), T_s=(169.5, 23.47)),
          "LunarLander": dict(T_f=(383.8, 71.49), T_s=(2575.2, 666.51))}  # CK Table 2 (10 runs)
 SOLVE = {"CartPole": (500.0, "all"), "LunarLander": (200.0, "mean")}  # perfect score; solved = last 100 all / mean
 M_THR = {"CartPole": 475.0, "LunarLander": 200.0}  # secondary: trailing-100 mean threshold (summary only)
+SNAP_EVERY = {"CartPole": 100, "LunarLander": 500}  # rec: R snapshots every this many pooled episodes
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,6 +113,20 @@ class Config:
     f_basis: bool = False
     adam_eps: float = 1e-8
     fast: bool = False  # authors' code: update summed over copies in one product (block_learn_ck_fast; §10 S2)
+    s_in: float = 0.0  # engine nlif: feed-forward input scale (0 = calibrate_s_in before the run)
+    rate_target: float = 0.0  # engine nlif, low-rate regime (Hz; 0 = CK-matched): calibrate_low before the run
+    # iteration 015 (engine nlif only; tdstdp.HybridRec): recurrent modules in the actor
+    rec: str = "none"  # 'none' | 'cols' (E->E matrix R on the actor E posts, a module per action) | 'lat' (+ latents)
+    chi_rec: float = 0.3  # total kick of one spike over its targets (threshold units)
+    lam: float = 1.0  # map term: lambda = lam lam_rec (0 = off)
+    lam_ratio: float = 1.0  # rec_cal: lam_rec = lam_ratio RMS(task step on R) / RMS(structural step), per frame
+    lam_rec: float = 0.0  # structural rate (0 = calibrate_rec before the run)
+    eta_rec: float = 0.0  # task rate on R (0 = calibrate_rec: the actor W's relative step at init)
+    stat_windows: int = 5  # windows (20 ms) per statistics frame
+    pair_ms: int = 20  # pair-count window (ms)
+    n_lat_mod: int = 2  # rec 'lat': latent modules of n_ae posts each (input->latent W frozen at init)
+    la_beta: float = 0.3  # rec 'lat': latent-output barrier (core.latent_output_barrier)
+    rec_seal: bool = False  # enforced modularity: R without cross-module synapses (same draws; iteration 015)
 
 
 PRESETS = {  # the authors' configs, reference/td_stdp/config/config_{cp,ll}.ini (eta in mV, before trace scaling)
@@ -122,7 +161,22 @@ def tokens(cfg):
     t += [f"mx{cfg.max_eps}"] if cfg.max_eps != p.max_eps else []
     t += [f"r{cfg.rate0:g}"] if cfg.rate0 != p.rate0 else []
     t += ["fast"] if cfg.fast else []
-    return t + ([cfg.engine.replace("-", "")] if cfg.engine != "numpy" else [])
+    t += [f"si{cfg.s_in:g}"] if cfg.s_in else []
+    t += [cfg.engine.replace("-", "")] if cfg.engine != "numpy" else []
+    t += [f"rt{cfg.rate_target:g}"] if cfg.rate_target else []
+    if cfg.rec != "none":
+        d = Config()
+        t += [cfg.rec, f"xr{cfg.chi_rec:g}"] + (["seal"] if cfg.rec_seal else [])
+        t += ["lam0"] if cfg.lam == 0 else [f"lam{cfg.lam:g}"] if cfg.lam != 1 else []
+        t += [f"lr{cfg.lam_ratio:g}"] if cfg.lam_ratio != d.lam_ratio else []
+        t += [f"lx{cfg.lam_rec:g}"] if cfg.lam_rec else []
+        t += [f"er{cfg.eta_rec:g}"] if cfg.eta_rec else []
+        t += [f"sw{cfg.stat_windows}"] if cfg.stat_windows != d.stat_windows else []
+        t += [f"pw{cfg.pair_ms}"] if cfg.pair_ms != d.pair_ms else []
+        if cfg.rec == "lat":
+            t += [f"nl{cfg.n_lat_mod}"] if cfg.n_lat_mod != d.n_lat_mod else []
+            t += [f"lb{cfg.la_beta:g}"] if cfg.la_beta != d.la_beta else []
+    return t
 
 
 def name(cfg):
@@ -154,6 +208,7 @@ class Runner:
         self.phi, fbar = features(cfg)
         self.lay = lay = td.Layout(len(fbar), cfg.n_ce, cfg.n_ci, cfg.n_ae, cfg.n_ai, self.K)
         self.rng = np.random.default_rng((cfg.seed, rng_seed))
+        assert cfg.engine != "nlif", "engine nlif: authors' code only"
         self.lif = cfg.engine.startswith("lif")  # true-LIF control: W in CK units, Table 1 values verbatim
         self.mv = 1.0 if self.lif else MV_LEGACY
         self.W = td.init_weights(lay, fbar, cfg.rate0, self.rng, td.THETA_L * td.TAU_M if self.lif else 1.0)
@@ -303,18 +358,33 @@ class CKRunner:
     reduction). Then p = softmax at the window's end, the action is resampled when the copy's timer reaches `freeze`
     ms, and the env copies step: an ended copy resets, then WARM_N warm-up windows, so s_0 is presented 6 times
     (5 + 1 on the first episode, whose first window is live as in main.py). Episodes are pooled over copies in the
-    order they end; the run stops when solved with >= `episodes` pooled episodes, or at `max_eps`."""
+    order they end; the run stops when solved with >= `episodes` pooled episodes, or at `max_eps`.
+    Engine nlif: the membranes (lif state lst: V, ref, z) are reset to mu_bg on code 2 like BindsNET's to rest; the
+    neuron noise draws from nrng. probe = True (calibrate_s_in) skips the rule and counts spikes in spk."""
 
     def __init__(self, cfg, rng_seed=TDSTDP_SEED, frozen=False):
-        assert cfg.ck and cfg.engine in ("numpy", "snm", "lif", "flow") and cfg.c_t == 0 and MS % cfg.block == 0
+        assert cfg.ck and cfg.engine in ("numpy", "snm", "lif", "flow", "nlif") and cfg.c_t == 0 and MS % cfg.block == 0
+        assert cfg.engine != "nlif" or cfg.s_in > 0, "engine nlif needs s_in (run_ck calibrates it)"
+        assert not cfg.rate_target or cfg.engine == "nlif", "rate_target: engine nlif"
+        assert cfg.rec in ("none", "cols", "lat")
+        assert cfg.rec == "none" or (cfg.engine == "nlif" and cfg.block == MS and not cfg.adam), \
+            "rec: engine nlif, block 20, no Adam"
         self.cfg, self.frozen = cfg, frozen
         task = TASKS[cfg.task]
         self.K, self.H = K, H = task.n_actions, cfg.heads
         self.phi, n_in = ck_encoder(cfg)
-        self.lay = lay = td.Layout(n_in, cfg.n_ce, cfg.n_ci, cfg.n_ae, cfg.n_ai, K)
+        n_lat = cfg.n_lat_mod * cfg.n_ae if cfg.rec == "lat" else 0
+        self.lay = lay = td.Layout(n_in, cfg.n_ce, cfg.n_ci, cfg.n_ae, cfg.n_ai, K, n_lat)
         self.rng = np.random.default_rng((cfg.seed, rng_seed))
         self.lif = cfg.engine == "lif"  # BindsNET LIF, W in mV
-        self.mv = 1.0 if self.lif else MV
+        self.nlif = cfg.engine == "nlif"  # noisy LIF (mapstdp.lif, dt 1 ms), W in mV
+        self.mv = 1.0 if self.lif or self.nlif else MV
+        self.probe, self.spk = False, np.zeros(2)  # s_in calibration: summed post spikes, spike slots
+        if self.nlif:
+            self.lp = dataclasses.replace(lif.LIFParams(), **(lif.DT1R if cfg.rate_target else lif.DT1))
+            self.lst = lif.init_state(lay.n_post, H, self.lp)
+            self.lst["V"] = np.full((H, lay.n_post), self.lp.mu_bg)
+            self.nrng = np.random.default_rng((cfg.seed, rng_seed, 1))
         self.W = self.rng.uniform(0, cfg.init_scale / self.mv, (lay.n_post, lay.n_in))
         nc, na = lay.n_crit, lay.n_post - lay.n_crit
         self.nu = np.r_[np.full(nc, cfg.eta_c), np.full(na, cfg.eta_a)][:, None]  # mV
@@ -332,6 +402,17 @@ class CKRunner:
         self.done, self.solved, self.frames, self.snn = False, False, 0, [None] * H
         self.gsq, self.nupd = np.zeros(2), 0  # calibration: summed squared per-ms update per population
         self.stats = np.zeros(5)  # sums of: critic rate, actor rate, policy entropy, V, ticks
+        self.lowrate = None  # rate_target: calibrate_low's record (run_ck sets it; saved in checkpoints)
+        self.hr = None  # rec: tdstdp.HybridRec (own stream (seed, rng_seed, 2)); W rows of latent posts frozen
+        if cfg.rec != "none":
+            self.hr = td.HybridRec(lay, K, cfg.n_ae, cfg.n_lat_mod if n_lat else 0, cfg.chi_rec, self.lp, H,
+                                   (cfg.seed, rng_seed, 2), cfg.stat_windows, cfg.pair_ms, cfg.lam * cfg.lam_rec,
+                                   cfg.la_beta if n_lat else 0.0, seal=cfg.rec_seal)
+            self.hs = np.zeros((H, self.hr.Kr))  # module scores of the window's credit
+            self.snaps = {0: self.hr.R.copy()}
+            self.rsq = np.zeros(5)  # rec_cal sums: actor g^2, actor W^2 (per entry), task dir^2, frame task^2, dS^2
+            self.rcnt = np.zeros(3)  # counts: windows, frames (task), frames (structural)
+            self.ftask = 0.0  # rec_cal: task direction summed over the current frame
 
     def tick(self):
         cfg, lay, K = self.cfg, self.lay, self.K
@@ -340,9 +421,17 @@ class CKRunner:
             for a in (self.z, self.q, self.P, self.rho, self.v):
                 a[rs] = 0
             self.xprev[:] = 0
+            if self.nlif:
+                self.lst["V"][rs], self.lst["ref"][rs], self.lst["z"][rs] = self.lp.mu_bg, 0, False
+            if self.hr is not None:
+                self.hr.reset_heads(rs)
         act, sa = lay.act, lay.sign[lay.n_crit:]
         c = np.eye(K)[self.action][:, act] - self.p[:, act]  # (A - p) with p fixed at the sampling probability
         kap = cfg.c_e * sa * td.entropy_coef(self.p)[:, act]  # Eq. 26, from the window's p
+        if self.hr is not None:  # CK's action score per module (latents 0; their W rows get no update)
+            self.hs[:, :K] = cfg.alpha_a * (np.eye(K)[self.action] - self.p) / cfg.n_ae
+            if lay.n_lat:
+                c[:, lay.lat], kap[:, lay.lat] = 0.0, 0.0
         f, r_ms = self.phi(self.obs), cfg.r_scale * self.reward / MS
         end, learn = self.is_end & ~self.trunc, self.code < 2
         for b in range(MS // cfg.block):
@@ -350,9 +439,14 @@ class CKRunner:
         self.p = td.softmax(cfg.alpha_a * self.rho @ lay.Ma.T)
         self.timer += MS
         nb = self.timer >= cfg.freeze
+        prev = self.action.copy()
         for h in np.flatnonzero(nb):
             self.action[h] = self.rng.choice(K, p=self.p[h])
         self.timer[nb] = 0
+        if self.hr is not None and nb.any():  # perseveration monitor (copies in an episode)
+            ok = nb & (self.code < 2)
+            if ok.any():
+                self.hr.log_actions(float((self.action[ok] == prev[ok]).mean()), float((self.p[ok] ** 2).sum(1).mean()))
         was_end = self.is_end.copy()  # batch_envs.step (rest_n = 0)
         self.rest[self.is_end] += 1
         self.warm += 1
@@ -377,6 +471,10 @@ class CKRunner:
         self.c_ret[new] = 0
         if new.any():
             n = len(self.returns)
+            if self.hr is not None:
+                self.hr.flush(n)
+                if n // SNAP_EVERY[cfg.task] > (n - int(new.sum())) // SNAP_EVERY[cfg.task]:
+                    self.snaps[n // SNAP_EVERY[cfg.task] * SNAP_EVERY[cfg.task]] = self.hr.R.copy()
             if not self.solved and n > 100:
                 self.solved = trailing_mean_time(self.returns, SOLVE[cfg.task][0]) is not None
             self.done = (self.solved and n >= cfg.episodes) or n >= cfg.max_eps
@@ -391,6 +489,11 @@ class CKRunner:
             x, noise = td.draw(f, L, lay.n_post, self.rng)
             if self.lif:
                 X, self.v = td.simulate_bindsnet(self.W, self.xprev, x, self.v)
+            elif self.nlif and self.hr is not None:
+                X, xs, xq = td.simulate_nlif(self.W, self.xprev, x, self.lst, self.nrng, self.lp, cfg.s_in,
+                                             self.hr.bt(), self.hr.ridx)
+            elif self.nlif:
+                X = td.simulate_nlif(self.W, self.xprev, x, self.lst, self.nrng, self.lp, cfg.s_in)[0]
             elif cfg.engine == "snm":
                 X = np.concatenate([Runner._snm(self, h, x[:, h:h + 1], noise[:, h:h + 1]) for h in range(H)], 1)
             else:
@@ -398,6 +501,10 @@ class CKRunner:
         P = td.pre_trace(self.P, x, cfg.tau_p)
         R = td.rates(self.rho, X, cfg.tau_n)
         V = cfg.alpha_c * R @ lay.Mv + cfg.beta_c  # Eq. 4
+        if self.probe:  # calibrate_s_in: rates only, W frozen
+            self.spk += [X.sum(), X.size]
+            self.xprev, self.P, self.rho, self.Vprev = x[-1], P[-1], R[-1], V[-1]
+            return
         live = (ms < MS - 2)[:, None] | ~end  # Reward_fn.isLive
         Vp = np.concatenate([self.Vprev[None], V[:-1]])
         d = learn * (np.exp(-1 / (2 * cfg.tau_d)) * r_ms + np.exp(-1 / cfg.tau_d) * V * live - Vp)  # Eq. 69
@@ -409,6 +516,8 @@ class CKRunner:
         else:
             G, self.z, self.q = td.block_learn_ck(self.z, self.q, P, X, d, bc(c), bc(kap), lay, cfg.tau_z, cfg.tau_q)
             g = G.mean(0)
+        if lay.n_lat:
+            g[nc:][lay.lat] = 0.0  # input -> latent W frozen at init
         if self.frozen:
             self.gsq += [(g[:nc] ** 2).mean(), (g[nc:] ** 2).mean()]
             self.nupd += 1
@@ -416,23 +525,66 @@ class CKRunner:
             self.W += self.opt.step(g, self.nu / self.mv, L)
         else:
             self.W += self.nu / self.mv * g
+        if self.hr is not None:
+            self.rec_block(X, xs, xq, d, g)
         self.xprev, self.P, self.rho, self.Vprev = x[-1], P[-1], R[-1], V[-1]
         if learn.any():
             s = td.softmax(cfg.alpha_a * R[:, learn] @ lay.Ma.T)
             self.stats += [R[..., :nc][:, learn].mean(), R[..., nc:][:, learn].mean(),
                            -(s * np.log(np.maximum(s, 1e-300))).sum(-1).mean(), V[:, learn].mean(), 1]
 
+    def rec_block(self, X, xs, xq, d, g):
+        """rec (iteration 015, tdstdp.HybridRec), once per 20 ms window: the window's statistics, the one-hop credit
+        of the previous window's counter with this window's (A - p) (the action sampled from that window's rates), the
+        task step eta_rec mean_h (sum_t delta_ht) e_h on R, and at the end of a statistics frame the structural update
+        and homeostasis. Frozen (calibrate_rec): R is not changed; the RMS sums of the actor's step, the task direction
+        and the structural increment are accumulated instead."""
+        hr, cfg, nc, lay = self.hr, self.cfg, self.lay.n_crit, self.lay
+        ri = hr.ridx
+        G, n = hr.window(X[..., ri], xs[:, ri], xq[:, ri])
+        hr.credit(self.hs, G, n, np.exp(-MS / cfg.tau_q))
+        u = hr.task_dir(d.sum(0))
+        if self.frozen:
+            act = nc + np.flatnonzero(~lay.lat)
+            self.rsq[:3] += [(g[act] ** 2).mean(), (self.W[act] ** 2).mean(), (u[hr.mask] ** 2).mean()]
+            self.rcnt[0] += 1
+            self.ftask = self.ftask + u
+        else:
+            hr.apply_task(cfg.eta_rec * u)
+        dS = hr.frame()
+        if dS is not None and self.frozen:
+            self.rsq[3:] += [(self.ftask[hr.mask] ** 2).mean() if np.ndim(self.ftask) else 0.0,
+                             (dS[hr.mask] ** 2).mean()]
+            self.rcnt[1:] += 1
+            self.ftask = 0.0
+
     def save(self, fn, wall, resumes):
         o = self.opt
+        nl = dict(V_lif=self.lst["V"], ref_lif=self.lst["ref"], z_lif=self.lst["z"], s_in=self.cfg.s_in,
+                  nrng=json.dumps(self.nrng.bit_generator.state)) if self.nlif else {}
+        if self.lowrate is not None:
+            nl["lowrate"] = json.dumps(self.lowrate)
+        if self.hr is not None:
+            nl |= self.hr.state() | dict(eta_rec=self.cfg.eta_rec, lam_rec=self.cfg.lam_rec,
+                                        snaps=json.dumps({k: v.tolist() for k, v in self.snaps.items()}))
         np.savez(fn, W=self.W, m=o.m if o else 0, v=o.v if o else 0, t=o.t if o else 0, frames=self.frames,
                  wall=wall, resumes=resumes, returns=json.dumps([self.returns, self.returns_heads]),
-                 rng=json.dumps(self.rng.bit_generator.state))
+                 rng=json.dumps(self.rng.bit_generator.state), **nl)
 
     def load(self, fn):
         """Resume from a checkpoint: W, Adam moments, pooled returns, rng; every copy starts a fresh episode with
-        cleared traces (not bit-identical to an uninterrupted run). Returns (wall, resumes)."""
+        cleared traces (not bit-identical to an uninterrupted run); engine nlif also restores the membranes and the
+        neuron-noise stream. Returns (wall, resumes)."""
         c = np.load(fn)
         self.W = c["W"]
+        if self.nlif:
+            assert float(c["s_in"]) == self.cfg.s_in, (float(c["s_in"]), self.cfg.s_in)
+            self.lst["V"], self.lst["ref"], self.lst["z"] = c["V_lif"].copy(), c["ref_lif"].copy(), c["z_lif"].copy()
+            self.nrng.bit_generator.state = json.loads(str(c["nrng"]))
+        if self.hr is not None:
+            assert (float(c["eta_rec"]), float(c["lam_rec"])) == (self.cfg.eta_rec, self.cfg.lam_rec)
+            self.hr.load_state(c)
+            self.snaps = {int(k): np.array(v) for k, v in json.loads(str(c["snaps"])).items()}
         if self.opt is not None:
             self.opt.m, self.opt.v, self.opt.t = c["m"], c["v"], int(c["t"])
         self.returns, self.returns_heads = json.loads(str(c["returns"]))
@@ -445,8 +597,9 @@ def calibrate_ck(cfg):
     """E4' rule (the E4 rule on the authors' loop): eta per population (critic, actor) = Adam step per ms / RMS of the
     per-ms update g (mean over all copies, the authors' units), measured per ms (block 1) with the initial W frozen
     over CAL_TICKS ticks after the first WARM_N + 1 (no env step yet) of a run on the (seed, CAL_SEED) stream: an
-    RMS-sized per-ms update moves W by the step per-ms Adam takes at init. Returns (eta, rms), eta in mV."""
-    r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=1), rng_seed=CAL_SEED, frozen=True)
+    RMS-sized per-ms update moves W by the step per-ms Adam takes at init. Without recurrence (rec 'none'), so every rec
+    arm gets the base run's eta. Returns (eta, rms), eta in mV."""
+    r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=1, rec="none"), rng_seed=CAL_SEED, frozen=True)
     for _ in range(WARM_N + 1):
         r.tick()
     r.gsq[:], r.nupd = 0, 0
@@ -456,16 +609,125 @@ def calibrate_ck(cfg):
     return np.array([cfg.eta_c, cfg.eta_a]) / rms, rms
 
 
-def run_ck(cfg, log_every=50, out=None):
-    eta_sgd = None
+def probe_rate(cfg):
+    """Mean post spike probability per ms (all posts and copies) over CAL_TICKS ticks after the first WARM_N + 1, W
+    frozen at its init, on the (seed, CAL_SEED) stream; rule off (CKRunner.probe). Without recurrence (rec 'none'), so
+    every rec arm gets the base run's s_in."""
+    r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=MS, rec="none"), rng_seed=CAL_SEED, frozen=True)
+    r.probe = True
+    for _ in range(WARM_N + 1):
+        r.tick()
+    r.spk[:] = 0
+    for _ in range(CAL_TICKS):
+        r.tick()
+    return r.spk[0] / r.spk[1]
+
+
+def calibrate_s_in(cfg, rtol=2e-3):
+    """Pre-set input scale of engine nlif (not tuned on return): s_in such that probe_rate equals engine lif's
+    (BindsNET, deterministic) on the same stream and initial W, or with rate_target that rate (Hz), by bisection (the
+    noise stream is common to every probe; the closed loop makes the rate only approximately monotone in s_in).
+    Returns (s_in, target, rate, BindsNET's rate), rates per ms."""
+    target = r_ck = probe_rate(dataclasses.replace(cfg, engine="lif", s_in=0.0, rate_target=0.0))
+    if cfg.rate_target:  # low-rate regime: the target is rate_target, not BindsNET's rate
+        target = cfg.rate_target * 1e-3
+    lo, hi = 0.0, 1.0
+    while probe_rate(dataclasses.replace(cfg, s_in=hi)) < target:
+        lo, hi = hi, 2 * hi
+        assert hi < 1e3, "nlif cannot reach the target rate"
+    while hi - lo > rtol * hi:
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if probe_rate(dataclasses.replace(cfg, s_in=mid)) < target else (lo, mid)
+    return hi, float(target), float(probe_rate(dataclasses.replace(cfg, s_in=hi))), float(r_ck)
+
+
+def calibrate_low(cfg):
+    """Low-rate nlif regime (--rate-target R Hz; iteration 015 step 3), pre-set, not tuned on return, all without
+    recurrence (so every rec arm of a seed shares it): tau_ref 2 ms (lif.DT1R); s_in by calibrate_s_in so that the mean
+    initial post rate is R (unless --s-in is given); k = r_CK / R with r_CK BindsNET's initial rate on the same probe;
+    alpha_a and alpha_c times k (policy logits and V keep CK's range; beta_c kept); without --eta-cal or Adam, eta_c
+    and eta_a times RMS(g_CK) / RMS(g_low), the per-ms update RMS at init with W frozen on the CAL stream
+    (calibrate_ck's measurement) of BindsNET's engine at CK's alphas and of the low-rate engine at the scaled ones
+    (with --eta-cal, calibrate_ck normalises eta by RMS(g) itself). Returns (cfg with s_in, alphas and etas replaced,
+    record)."""
+    if cfg.s_in:
+        s_in, target, r_ck = cfg.s_in, cfg.rate_target * 1e-3, probe_rate(dataclasses.replace(
+            cfg, engine="lif", s_in=0.0, rate_target=0.0))
+        got = probe_rate(cfg)
+    else:
+        s_in, target, got, r_ck = calibrate_s_in(cfg)
+    k = r_ck / target
+    low = dataclasses.replace(cfg, s_in=s_in, alpha_a=k * cfg.alpha_a, alpha_c=k * cfg.alpha_c)
+    es = np.ones(2)
+    if not (cfg.sgd or cfg.adam):
+        rms_ck = calibrate_ck(dataclasses.replace(cfg, engine="lif", rate_target=0.0, s_in=0.0))[1]
+        rms_low = calibrate_ck(low)[1]
+        es = rms_ck / rms_low
+        low = dataclasses.replace(low, eta_c=float(cfg.eta_c * es[0]), eta_a=float(cfg.eta_a * es[1]))
+    rep = {f: getattr(low, f) for f in ("s_in", "alpha_a", "alpha_c", "eta_c", "eta_a")}
+    return low, dict(k=float(k), r_ck_hz=1e3 * float(r_ck), r_target_hz=cfg.rate_target, r_got_hz=1e3 * float(got),
+                     s_in=float(s_in), alpha_scale=float(k), eta_scale=[float(x) for x in es], cfg=rep)
+
+
+def calibrate_rec(cfg):
+    """Pre-set rates of rec (iteration 015; not tuned on return), on a run with W and R frozen at init on the
+    (seed, CAL_SEED) stream, over CAL_TICKS windows after the first WARM_N + 1: eta_rec gives R the actor W's relative
+    step per window, eta_a RMS(g_actor) / RMS(W_actor) = eta_rec RMS(u) / RMS(R) (u = mean_h (sum_t delta) e_h, the
+    task direction of a window; RMS over existing synapses); lam_rec = lam_ratio RMS(eta_rec x u summed over a frame) /
+    RMS(structural increment of a frame) (lam = 1). Measured on the unsealed draws (rec_seal off), so every arm of a
+    seed shares the rates: with sealed R every target of j is in m(j), the one-hop credit h_m(i) - hbar_j is exactly 0,
+    and RMS(u) is rounding noise. Returns (eta_rec, lam_rec, dict of the RMS values)."""
+    r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, eta_rec=1.0, lam_rec=0.0, rec_seal=False),
+                 rng_seed=CAL_SEED, frozen=True)
+    for _ in range(WARM_N + 1):
+        r.tick()
+    r.rsq[:], r.rcnt[:], r.ftask, r.hr.acc = 0, 0, 0.0, r.hr._fresh()
+    for _ in range(CAL_TICKS):
+        r.tick()
+    hr, q = r.hr, np.sqrt(r.rsq / r.rcnt[[0, 0, 0, 1, 2]])
+    rel_w = cfg.eta_a / r.mv * q[0] / q[1]
+    eta = cfg.eta_rec or rel_w * float(np.sqrt((hr.R[hr.mask] ** 2).mean())) / q[2]
+    lam = cfg.lam_rec or cfg.lam_ratio * eta * q[3] / q[4]
+    return float(eta), float(lam), dict(rel_step_W=float(rel_w), rms_g_actor=q[0], rms_W_actor=q[1], rms_u=q[2],
+                                        rms_u_frame=q[3], rms_dS=q[4])
+
+
+def run_ck(cfg, log_every=50, out=None, save_model=None):
+    eta_sgd, s_cal, rec_cal = None, None, None
+    fn = pathlib.Path(out) if out else OUT / f"{name(cfg)}.json"
+    fn.parent.mkdir(parents=True, exist_ok=True)
+    ck = fn.with_suffix(".ckpt.npz")
+    low = None
+    if cfg.engine == "nlif" and cfg.rate_target:
+        if ck.exists():
+            low = json.loads(str(np.load(ck)["lowrate"]))
+            cfg = dataclasses.replace(cfg, **low["cfg"])
+        else:
+            cfg, low = calibrate_low(cfg)
+            print("low-rate calibration: " + ", ".join(f"{k} {v}" for k, v in low.items()), flush=True)
+    elif cfg.engine == "nlif" and not cfg.s_in:
+        if ck.exists():
+            cfg = dataclasses.replace(cfg, s_in=float(np.load(ck)["s_in"]))
+        else:
+            s_in, target, got, _ = calibrate_s_in(cfg)
+            cfg, s_cal = dataclasses.replace(cfg, s_in=s_in), [target, got]
+            print(f"s_in calibration: initial post rate (spikes / ms) lif {target:.4f}, nlif {got:.4f} at s_in "
+                  f"{s_in:.4f}", flush=True)
     if cfg.sgd:
         eta_sgd, rms = calibrate_ck(cfg)
         cfg = dataclasses.replace(cfg, eta_c=float(eta_sgd[0]), eta_a=float(eta_sgd[1]))
         print(f"eta calibration: per-ms update RMS {rms}, eta (mV) {eta_sgd}", flush=True)
+    if cfg.rec != "none" and not (cfg.eta_rec and cfg.lam_rec):
+        if ck.exists():
+            c = np.load(ck)
+            cfg = dataclasses.replace(cfg, eta_rec=float(c["eta_rec"]), lam_rec=float(c["lam_rec"]))
+        else:
+            eta_rec, lam_rec, rec_cal = calibrate_rec(cfg)
+            cfg = dataclasses.replace(cfg, eta_rec=eta_rec, lam_rec=lam_rec)
+            print(f"rec calibration: eta_rec {eta_rec:.4g}, lam_rec {lam_rec:.4g} (lam {cfg.lam:g}); "
+                  + ", ".join(f"{k} {v:.3g}" for k, v in rec_cal.items()), flush=True)
     r, wall0, resumes = CKRunner(cfg), 0.0, 0
-    fn = pathlib.Path(out) if out else OUT / f"{name(cfg)}.json"
-    fn.parent.mkdir(parents=True, exist_ok=True)
-    ck = fn.with_suffix(".ckpt.npz")
+    r.lowrate = low
     if ck.exists():
         wall0, resumes = r.load(ck)
         print(f"resumed from {ck.name} at {len(r.returns)} episodes", flush=True)
@@ -479,10 +741,16 @@ def run_ck(cfg, log_every=50, out=None):
             r.stats[:] = 0
             print(f"ep {e} last{log_every} {np.mean(r.returns[-log_every:]):.1f} rate_c {st[0]:.3f} rate_a "
                   f"{st[1]:.3f} H(s) {st[2]:.3f} V {st[3]:.3f} |W| {np.abs(r.W).mean():.4f} "
-                  f"{(time.perf_counter() - t0) / 60:.1f} min", flush=True)
-            fn.with_suffix(".partial").write_text(json.dumps(result_ck(cfg, r, t0, eta_sgd, resumes)))
+                  f"{(time.perf_counter() - t0) / 60:.1f} min" + (rec_line(r.hr) if r.hr else ""), flush=True)
+            fn.with_suffix(".partial").write_text(json.dumps(result_ck(cfg, r, t0, eta_sgd, resumes, s_cal,
+                                                                       rec_cal)))
             r.save(ck, time.perf_counter() - t0, resumes)
-    res = result_ck(cfg, r, t0, eta_sgd, resumes)
+    if r.hr is not None:
+        r.snaps[len(r.returns)] = r.hr.R.copy()
+        if save_model:
+            np.savez(save_model, m=r.hr.m, roles=r.hr.roles, mask=r.hr.mask, ridx=r.hr.ridx,
+                     episodes=np.array(sorted(r.snaps)), **{f"R_ep{k}": v for k, v in r.snaps.items()})
+    res = result_ck(cfg, r, t0, eta_sgd, resumes, s_cal, rec_cal)
     fn.write_text(json.dumps(res))
     fn.with_suffix(".partial").unlink(missing_ok=True)
     ck.unlink(missing_ok=True)
@@ -491,7 +759,20 @@ def run_ck(cfg, log_every=50, out=None):
     return res
 
 
-def result_ck(cfg, r, t0, eta_sgd, resumes):
+def rec_line(hr):
+    """Log-line monitors of rec over the last logged bins (HybridRec.log)."""
+    lg = hr.log
+    if not lg["episode"]:
+        return ""
+    k = slice(-10, None)
+    mx = lambda key: float(np.mean(lg[key][k]))  # noqa: E731
+    return (f" | R: maxRe {mx('maxre'):.2f} (max {max(lg['maxre_max'][k]):.2f}) chiG {mx('chiG'):.2f} causal "
+            f"{mx('causal'):.4f} within {mx('within'):.3f} L_obs {mx('L_obs'):.3f} rate {mx('rate'):.0f} Hz repeat "
+            f"{mx('repeat'):.2f}/{mx('repeat_chance'):.2f}" + (f" lat {mx('rate_lat0'):.0f}/{mx('rate_lat1'):.0f} Hz "
+                                                               f"lat_out {mx('lat_out'):.3f}" if hr.Kr > hr.K else ""))
+
+
+def result_ck(cfg, r, t0, eta_sgd, resumes, s_cal=None, rec_cal=None):
     Tf, Ts = pooled_times(cfg.task, r.returns)
     wall = time.perf_counter() - t0
     out = {"config": dataclasses.asdict(cfg), "returns": r.returns, "T_f": Tf, "T_s": Ts, "frames": r.frames,
@@ -501,6 +782,21 @@ def result_ck(cfg, r, t0, eta_sgd, resumes):
         out["returns_heads"] = r.returns_heads
     if eta_sgd is not None:
         out["eta_sgd_mV"] = eta_sgd.tolist()
+    if cfg.engine == "nlif":
+        out["s_in"] = cfg.s_in  # also in config; s_in_cal: [lif, nlif] initial post rate (absent after a resume)
+        if s_cal is not None:
+            out["s_in_cal"] = s_cal
+    if r.lowrate is not None:
+        out["low_rate"] = r.lowrate
+    if r.hr is not None:  # iteration 015: monitors per flush (HybridRec.log), calibration (absent after a resume)
+        hr = r.hr
+        out["rec"] = {"eta_rec": cfg.eta_rec, "lam": cfg.lam * cfg.lam_rec, "log": hr.log, "n_R": hr.nR,
+                      "n_syn": int(hr.mask.sum()),
+                      "within_final": float((hr.R * (hr.m[:, None] == hr.m[None, :])).sum() / hr.R.sum())}
+        H = np.eye(hr.m.max() + 1)[hr.m]  # module weight table [post, pre] / total R, per snapshot (SNAP_EVERY)
+        out["rec"]["RK"] = {str(k): (H.T @ v @ H / v.sum()).tolist() for k, v in sorted(r.snaps.items())}
+        if rec_cal is not None:
+            out["rec"]["cal"] = rec_cal
     return out
 
 
@@ -531,11 +827,11 @@ def solve_times(task, returns_heads):
     return Tf, Ts, ret.tolist()
 
 
-def run(cfg, log_every=50, out=None):
+def run(cfg, log_every=50, out=None, save_model=None):
     """Run cfg; the result goes to `out` (a .json path; .partial and .ckpt.npz alongside) or, by default, to
-    experiments/results/<name(cfg)>.json."""
+    experiments/results/<name(cfg)>.json. save_model (rec only): R snapshots."""
     if cfg.ck:
-        return run_ck(cfg, log_every, out)
+        return run_ck(cfg, log_every, out, save_model)
     eta_sgd = None
     if cfg.sgd:
         eta_sgd, rms = calibrate(cfg)
@@ -675,26 +971,52 @@ def main():
     ap.add_argument("--block", type=int, default=None)
     ap.add_argument("--legacy", action="store_true", help="pre-audit implementation (E1, E2, first E3/E4)")
     ap.add_argument("--rate0", type=float, default=None, help="legacy: initial spike probability per ms (post hoc)")
-    ap.add_argument("--engine", choices=("numpy", "snm", "lif", "lif-snm", "flow"), default="numpy",
+    ap.add_argument("--engine", choices=("numpy", "snm", "lif", "lif-snm", "flow", "nlif"), default="numpy",
                     help="lif: BindsNET's LIF (legacy: CK Eq. 1); lif-snm (legacy): SuperNeuroMAT's subtractive leak; "
-                         "flow: the branching step's noise-free limit")
+                         "flow: the branching step's noise-free limit; nlif: the noisy LIF of mapstdp.lif (dt 1 ms)")
+    ap.add_argument("--s-in", type=float, default=None, help="nlif: input scale (default: calibrate_s_in)")
+    ap.add_argument("--rate-target", type=float, default=None,
+                    help="nlif: low-rate regime: initial post rate (Hz; tau_ref 2 ms; calibrate_low)")
     ap.add_argument("--fast", action="store_true", help="update summed over copies in one product (not bit-identical)")
+    ap.add_argument("--rec", choices=("none", "cols", "lat"), default="none",
+                    help="nlif: recurrent E->E actor modules (iteration 015): cols, one per action; lat, + latents")
+    for f, t, h in (("chi-rec", float, "rec: total kick per spike (threshold units)"),
+                    ("lam", float, "rec: map term multiplier (0 = off)"),
+                    ("lam-ratio", float, "rec: lam_rec = ratio x RMS(task step) / RMS(structural step)"),
+                    ("lam-rec", float, "rec: structural rate (default: calibrate_rec)"),
+                    ("eta-rec", float, "rec: task rate on R (default: calibrate_rec)"),
+                    ("stat-windows", int, "rec: windows per statistics frame"),
+                    ("pair-ms", int, "rec: pair-count window (ms)"),
+                    ("n-lat-mod", int, "rec lat: latent modules"),
+                    ("la-beta", float, "rec lat: latent-output barrier")):
+        ap.add_argument(f"--{f}", type=t, default=None, help=h)
+    ap.add_argument("--rec-seal", action="store_true", help="rec: no cross-module synapses in R (enforced modularity)")
+    ap.add_argument("--save-model", default=None, help="rec: R snapshots (.npz) for structure analysis")
     ap.add_argument("--out", default=None, help="result .json path (default experiments/results/<name>.json)")
     ap.add_argument("--summary", action="store_true")
     a = ap.parse_args()
     if a.summary:
         return summary()
-    kw = {k: v for k, v in (("episodes", a.episodes), ("heads", a.heads), ("block", a.block), ("rate0", a.rate0))
-          if v is not None}
+    kw = {k: v for k, v in (("episodes", a.episodes), ("heads", a.heads), ("block", a.block), ("rate0", a.rate0),
+                            ("s_in", a.s_in)) if v is not None}
     if a.fast:
         kw["fast"] = True
+    kw.update({k: v for k, v in (("rate_target", a.rate_target), ("chi_rec", a.chi_rec), ("lam", a.lam),
+                                 ("lam_ratio", a.lam_ratio),
+                                 ("lam_rec", a.lam_rec), ("eta_rec", a.eta_rec), ("stat_windows", a.stat_windows),
+                                 ("pair_ms", a.pair_ms), ("n_lat_mod", a.n_lat_mod), ("la_beta", a.la_beta))
+               if v is not None})
+    if a.rec != "none":
+        kw["rec"] = a.rec
+    if a.rec_seal:
+        kw["rec_seal"] = True
     if a.episodes is not None and not a.legacy:
         kw["max_eps"] = a.episodes
     if a.sgd:
         kw.update(adam=False, sgd=True)
     elif a.adam is not None:
         kw["adam"] = a.adam
-    run(preset(a.task, legacy=a.legacy, seed=a.seed, engine=a.engine, **kw), out=a.out)
+    run(preset(a.task, legacy=a.legacy, seed=a.seed, engine=a.engine, **kw), out=a.out, save_model=a.save_model)
 
 
 if __name__ == "__main__":
