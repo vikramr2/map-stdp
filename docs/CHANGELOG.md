@@ -2,6 +2,10 @@
 
 ## 2026-10-29
 
+### Finished: study `race-acrobot` (iteration 016 §21)
+
+- 100/100 runs, 12 min, none failed (manifest `74f3dd1`). Race + hold + sealed columns non-inferior to CK's softmax at β_c −1.5 (+13.0 AUC [−5.0, +38.6]; last-100 −132 vs −147; 2/20 solved vs 0/20); learned −5.0 (inconclusive by 2.7 at Δ = 25); implicit −25, no columns −35 (inconclusive). **Regime matters after Holm:** sealed vs none +53.6 (0.0027), sealed vs implicit +42.2 (0.011). Energy: the race spends more actor spikes per decision here (30–33 vs 26; the band pins 40 Hz where the softmax's rate falls). Results in `../map-stdp-racr/reports/race-acrobot/`, uncommitted on branch `race-acrobot-study`.
+
 ### Result: hold pilot on Acrobot; study `race-acrobot` drafted (iteration 016 §21)
 
 - 40/40 dev runs through the real flags: with the hold and the band, sealed columns are level with CK's softmax at β_c −1.5 (AUC −174 vs −174, +3 [−27, +25]; last-100 −132 vs −150; 2/10 solved vs 0/10; fewer spikes), learned columns level (−4), implicit −43 and no columns −37 (worse). No floor runs. Ordering sealed ≈ learned > implicit > none. `race-acrobot` declared (seeds 7100–7119, 100 runs, reference CK's softmax at β_c −1.5, families headline / secondary); README drafted for approval. LunarLander full-length pilot running.
