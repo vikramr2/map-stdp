@@ -49,7 +49,9 @@ target rate over a decision window (--race-theta overrides; token th<theta>). Le
 p~ = softmax(beta log max(r_k, eps_r)) (eps_r = 1 / (tau_n n_ae), one spike's filtered rate) with its exact gradient
 as the per-column eligibility factor (race_factor); beta is pre-set by calibrate_race (a held-observation probe: the
 surrogate's mean per-state entropy at the mean column rates equals the realised race's) unless --race-beta is given
-(token rb<beta>). --norm-logits and --ent-match-rec are softmax-only. Both readouts log the actor spikes per decision
+(token rb<beta>); --race-reprobe N (016 §18 fix a; token rp<N>) re-runs the probe at the current W (and R) once every
+N pooled episodes on its own stream (reprobe_race) and the new beta applies from the next window on (the result's
+'race_cal_history'). --norm-logits and --ent-match-rec are softmax-only. Both readouts log the actor spikes per decision
 window per copy (the result's 'actor_spikes_per_decision'; the race adds 'race_decisions')."""
 import argparse
 import dataclasses
@@ -150,6 +152,7 @@ class Config:
     readout: str = "softmax"  # 'softmax' (CK Eq. 12) | 'race' (Eq. 1h on the columns' net counts, CKRunner.race_block)
     race_theta: float = 0.0  # race: bound on a column's net count (0 = round(n_ae rate_target freeze), CKRunner)
     race_beta: float = 0.0  # race: sharpness of the surrogate policy softmax(beta log r) (0 = calibrate_race)
+    race_reprobe: int = 0  # race: re-run the contrast probe at the current W (and R) every N episodes (0 = never)
 
 
 PRESETS = {  # the authors' configs, reference/td_stdp/config/config_{cp,ll}.ini (eta in mV, before trace scaling)
@@ -219,6 +222,7 @@ def tokens(cfg):
     if cfg.readout == "race":
         t += ["race"] + ([f"th{cfg.race_theta:g}"] if cfg.race_theta else [])
         t += [f"rb{cfg.race_beta:g}"] if cfg.race_beta else []
+        t += [f"rp{cfg.race_reprobe}"] if cfg.race_reprobe else []
     if cfg.rec != "none":
         d = Config()
         t += [cfg.rec, f"xr{cfg.chi_rec:g}"] + (["seal"] if cfg.rec_seal else [])
@@ -419,7 +423,9 @@ class CKRunner:
     (5 + 1 on the first episode, whose first window is live as in main.py). Episodes are pooled over copies in the
     order they end; the run stops when solved with >= `episodes` pooled episodes, or at `max_eps`.
     Engine nlif: the membranes (lif state lst: V, ref, z) are reset to mu_bg on code 2 like BindsNET's to rest; the
-    neuron noise draws from nrng. probe = True (calibrate_s_in) skips the rule and counts spikes in spk."""
+    neuron noise draws from nrng. probe = True (calibrate_s_in) skips the rule and counts spikes in spk.
+    rng_seed (an int, or a tuple of ints for a probe's own stream, reprobe_race) follows cfg.seed in every stream's
+    seed: rng (cfg.seed, *rng_seed), nrng (..., 1), HybridRec (..., 2)."""
 
     def __init__(self, cfg, rng_seed=TDSTDP_SEED, frozen=False):
         assert cfg.ck and cfg.engine in ("numpy", "snm", "lif", "flow", "nlif") and MS % cfg.block == 0
@@ -434,7 +440,8 @@ class CKRunner:
         self.phi, n_in = ck_encoder(cfg)
         n_lat = cfg.n_lat_mod * cfg.n_ae if cfg.rec == "lat" else 0
         self.lay = lay = td.Layout(n_in, cfg.n_ce, cfg.n_ci, cfg.n_ae, cfg.n_ai, K, n_lat)
-        self.rng = np.random.default_rng((cfg.seed, rng_seed))
+        rs = (cfg.seed, *(rng_seed if isinstance(rng_seed, tuple) else (rng_seed,)))
+        self.rng = np.random.default_rng(rs)
         self.lif = cfg.engine == "lif"  # BindsNET LIF, W in mV
         self.nlif = cfg.engine == "nlif"  # noisy LIF (mapstdp.lif, dt 1 ms), W in mV
         self.mv = 1.0 if self.lif or self.nlif else MV
@@ -443,7 +450,7 @@ class CKRunner:
             self.lp = dataclasses.replace(lif.LIFParams(), **(lif.DT1R if cfg.rate_target else lif.DT1))
             self.lst = lif.init_state(lay.n_post, H, self.lp)
             self.lst["V"] = np.full((H, lay.n_post), self.lp.mu_bg)
-            self.nrng = np.random.default_rng((cfg.seed, rng_seed, 1))
+            self.nrng = np.random.default_rng((*rs, 1))
         self.W = self.rng.uniform(0, cfg.init_scale / self.mv, (lay.n_post, lay.n_in))
         nc, na = lay.n_crit, lay.n_post - lay.n_crit
         self.nu = np.r_[np.full(nc, cfg.eta_c), np.full(na, cfg.eta_a)][:, None]  # mV
@@ -473,6 +480,9 @@ class CKRunner:
         assert not (self.race and (cfg.norm_logits or cfg.ent_match_rec)), "norm_logits, ent_match_rec: softmax only"
         self.theta = race_theta(cfg)
         self.eps_r = 1.0 / (cfg.tau_n * cfg.n_ae)
+        # the surrogate's gain: cfg.race_beta at init (calibrate_race's); with race_reprobe, reprobe_race replaces it
+        # every N episodes and appends its record to race_cal_history (both carried by the checkpoint)
+        self.beta, self.race_cal_history = cfg.race_beta, []
         # the tally counts a column's E posts only (user decision 2026-10-29, 016 §18: the I posts shape the dynamics
         # but are not counted, so theta means the same on every task; without I posts it is the net count of Eq. 1h)
         self.Mcnt = (lay.Ma[:, self.apost] > 0).astype(float)  # K x n_act
@@ -495,7 +505,7 @@ class CKRunner:
         self.hr = None  # rec: tdstdp.HybridRec (own stream (seed, rng_seed, 2)); W rows of latent posts frozen
         if cfg.rec != "none":
             self.hr = td.HybridRec(lay, K, cfg.n_ae, cfg.n_lat_mod if n_lat else 0, cfg.chi_rec, self.lp, H,
-                                   (cfg.seed, rng_seed, 2), cfg.stat_windows, cfg.pair_ms, cfg.lam * cfg.lam_rec,
+                                   (*rs, 2), cfg.stat_windows, cfg.pair_ms, cfg.lam * cfg.lam_rec,
                                    cfg.la_beta if n_lat else 0.0, seal=cfg.rec_seal)
             self.hs = np.zeros((H, self.hr.Kr))  # module scores of the window's credit
             self.snaps = {0: self.hr.R.copy()}
@@ -688,8 +698,8 @@ class CKRunner:
     def surrogate(self, rk):
         """readout race: the population surrogate of the race, p~ = softmax(beta log max(r_k, eps_r)) of column rates
         rk (..., K); eps_r = 1 / (tau_n n_ae), the filtered rate one spike gives, so the log never diverges (016
-        §14.1)."""
-        return td.softmax(self.cfg.race_beta * np.log(np.maximum(rk, self.eps_r)))
+        §14.1). beta is self.beta (cfg.race_beta, or the last re-probe's)."""
+        return td.softmax(self.beta * np.log(np.maximum(rk, self.eps_r)))
 
     def race_factor(self, rk):
         """readout race: the per-column eligibility factor beta / (alpha_a max(r_j, eps_r)) (H x K) of the window's
@@ -697,7 +707,7 @@ class CKRunner:
         column j (the exact gradient of the surrogate; test_race_gradient), and likewise for the entropy bonus with
         g(p~) (Eq. 25/26). Zero below the floor, where the surrogate is constant in r_j. A K-vector broadcast per
         copy."""
-        fr = self.cfg.race_beta / (self.cfg.alpha_a * np.maximum(rk, self.eps_r))
+        fr = self.beta / (self.cfg.alpha_a * np.maximum(rk, self.eps_r))
         return np.where(rk > self.eps_r, fr, 0.0)
 
     def race_block(self, X):
@@ -767,6 +777,8 @@ class CKRunner:
                   nrng=json.dumps(self.nrng.bit_generator.state)) if self.nlif else {}
         if self.lowrate is not None:
             nl["lowrate"] = json.dumps(self.lowrate)
+        if self.race:  # the surrogate's current gain and the re-probe records (race_reprobe)
+            nl |= dict(race_beta=self.beta, race_cal_history=json.dumps(self.race_cal_history))
         if self.hr is not None:
             nl |= self.hr.state() | dict(eta_rec=self.cfg.eta_rec, lam_rec=self.cfg.lam_rec,
                                         snaps=json.dumps({k: v.tolist() for k, v in self.snaps.items()}),
@@ -802,6 +814,8 @@ class CKRunner:
             self.espk, self.rdec = c["espk"].copy(), c["rdec"].copy()
         if "ebnd" in c:
             self.ebnd = c["ebnd"].copy()
+        if "race_beta" in c:
+            self.beta, self.race_cal_history = float(c["race_beta"]), json.loads(str(c["race_cal_history"]))
         return float(c["wall"]), int(c["resumes"]) + 1
 
 
@@ -965,6 +979,34 @@ def calibrate_race(cfg, n_states=8, rtol=2e-3):
     / 2) (the slope at zero contrast of a race between Poisson counts to theta, logit for probit)."""
     r = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=MS, race_beta=0.0), rng_seed=CAL_SEED,
                  frozen=True)
+    return _race_probe(r, n_states, rtol)
+
+
+def reprobe_race(runner, episode, n_states=8, rtol=2e-3):
+    """The contrast probe of calibrate_race re-run at the runner's current state (016 §18 fix a, --race-reprobe): a
+    frozen probe runner from the runner's cfg (its calibrated s_in and alphas) takes the runner's current W and, with
+    recurrence, its R (and mask), on its own stream (cfg.seed, CAL_SEED, episode), so the runner's rng and nrng draw
+    nothing and the probe is reproducible at a given state and episode. The runner is not changed: the caller sets
+    runner.beta from the record. Returns calibrate_race's record plus theta and episode (the race_cal shape)."""
+    cfg = runner.cfg
+    p = CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=MS, race_beta=0.0),
+                 rng_seed=(CAL_SEED, int(episode)), frozen=True)
+    p.W = runner.W.copy()
+    if runner.hr is not None:
+        p.hr.R, p.hr.mask = runner.hr.R.copy(), runner.hr.mask.copy()
+    beta, rec = _race_probe(p, n_states, rtol)
+    return dict(theta=runner.theta, episode=int(episode), **rec)
+
+
+def race_fit(rec):
+    """The surrogate's fit in a probe record: max |win0 - win0_surrogate| over the contrasts (the §18 gate is 0.05)."""
+    return float(np.abs(np.array(rec["win0"]) - np.array(rec["win0_surrogate"])).max())
+
+
+def _race_probe(r, n_states, rtol):
+    """The contrast probe on a frozen probe runner r (calibrate_race's body, shared with reprobe_race): r.W is the
+    probed W; returns (beta, record)."""
+    cfg = r.cfg
     r.probe = r.hold = True
     W0, nc, n_ae, K, nd = r.W.copy(), r.lay.n_crit, cfg.n_ae, r.K, len(RACE_DELTAS)
     per, win, lr = CAL_TICKS // n_states, np.zeros((n_states, nd, K)), np.zeros((n_states, nd, K))
@@ -1066,9 +1108,17 @@ def run_ck(cfg, log_every=50, out=None, save_model=None):
         wall0, resumes = r.load(ck)
         print(f"resumed from {ck.name} at {len(r.returns)} episodes", flush=True)
     t0, nxt = time.perf_counter() - wall0, (len(r.returns) // log_every + 1) * log_every
+    rp = cfg.race_reprobe if cfg.readout == "race" else 0
+    nxt_rp = (len(r.returns) // rp + 1) * rp if rp else None
     while not r.done:
         r.tick()
         e = len(r.returns)
+        if rp and e >= nxt_rp:  # 016 §18 fix (a): the contrast probe at the current W (and R); beta from the next
+            nxt_rp = (e // rp + 1) * rp  # window on; the probe draws from its own stream
+            rec = reprobe_race(r, e)
+            r.beta = rec["beta"]
+            r.race_cal_history.append(rec)
+            print(f"reprobe ep {e} beta {rec['beta']:.4g} fit {race_fit(rec):.3f}", flush=True)
         if e >= nxt:
             nxt = (e // log_every + 1) * log_every
             st = r.stats / max(r.stats[4], 1)
@@ -1135,6 +1185,8 @@ def result_ck(cfg, r, t0, eta_sgd, resumes, s_cal=None, rec_cal=None):
         # actor spikes up to the decision (the bound ms, or the whole window at the deadline), per copy-decision: the
         # energy a loop that stopped at the bound would spend (016 §18); actor_spikes_per_decision is the full window
         out["actor_spikes_to_decision"] = float(r.ebnd[0] / max(r.ebnd[1], 1))
+        if cfg.race_reprobe:  # the re-probe records (reprobe_race) and the surrogate's final gain
+            out["race_cal_history"], out["race_beta_final"] = r.race_cal_history, float(r.beta)
     if r.hr is not None:  # iteration 015: monitors per flush (HybridRec.log), calibration (absent after a resume)
         hr = r.hr
         out["rec"] = {"eta_rec": cfg.eta_rec, "lam": cfg.lam * cfg.lam_rec, "log": hr.log, "n_R": hr.nR,
@@ -1354,6 +1406,8 @@ def main():
                     help="nlif low-rate: race (016 §14.1 Stage B), the first column whose net count reaches theta")
     ap.add_argument("--race-theta", type=float, default=None, help="race: bound (default n_ae rate_target freeze)")
     ap.add_argument("--race-beta", type=float, default=None, help="race: surrogate sharpness (default calibrate_race)")
+    ap.add_argument("--race-reprobe", type=int, default=None,
+                    help="race: re-run the contrast probe at the current W every N episodes (016 §18 fix a; preset 50)")
     ap.add_argument("--save-model", default=None, help="rec: R snapshots (.npz) for structure analysis")
     ap.add_argument("--out", default=None, help="result .json path (default experiments/results/<name>.json)")
     ap.add_argument("--summary", action="store_true")
@@ -1381,7 +1435,8 @@ def main():
         kw["norm_logits"] = True
     if a.readout != "softmax":
         kw["readout"] = a.readout
-    kw.update({k: v for k, v in (("race_theta", a.race_theta), ("race_beta", a.race_beta)) if v is not None})
+    kw.update({k: v for k, v in (("race_theta", a.race_theta), ("race_beta", a.race_beta),
+                                 ("race_reprobe", a.race_reprobe)) if v is not None})
     if a.episodes is not None and not a.legacy:
         kw["max_eps"] = a.episodes
     if a.sgd:

@@ -2,6 +2,21 @@
 
 ## 2026-10-29
 
+### Finished: study `hybrid-columns-4` (iteration 016 §19)
+
+- 200/200 runs, 14 min, none failed. Against the normalised base all three regimes are non-inferior at n = 40 (CIs −22/−14/−17 to +4/+10/+10), settling §17's inconclusives. Against the published backbone (`base_ck`) implicit columns are **worse** (−14.7 AUC [−25.7, −3.9], Holm 0.041; the one failed expectation), learned and sealed columns non-inferior, the normalised base non-inferior (−5.7 [−18.6, +6.6]). Regimes do not differ. Post-solve actor-rate decay (→ 4–6 Hz) in every normalised arm, not in `base_ck`. Results in `../map-stdp-hc4/reports/hybrid-columns-4/`, uncommitted on branch `hybrid-columns-4-study`. `hybrid-columns-3-ck` launched 12:20 EDT.
+
+### Started: companion studies `hybrid-columns-4` and `hybrid-columns-3-ck` (iteration 016 §19); race re-pilot pre-registered (§18)
+
+- READMEs pre-registered 2026-10-29 12:03 EDT (user approved); user committed `0025470`. Worktrees `../map-stdp-hc4` (branch `hybrid-columns-4-study`) and `../map-stdp-hc3ck` (`hybrid-columns-3-ck-study`) at that commit, 63/63 tests in each. `hybrid-columns-4` launched 12:06 EDT, 200 runs, 50 workers; `hybrid-columns-3-ck` (60 runs, 60 workers) launches automatically when it finishes (detached launcher), about 7.5 h.
+- Re-pilot of the race readout pre-registered in §18 (user's selection: three variants per regime, `--rate-cost 5e-4`, `--race-reprobe 50`, both; 240 dev runs, seeds 20–29; gates as the first pilot plus the surrogate fit at every informative re-probe; energy read as `actor_spikes_to_decision`). Waits for the user's go-ahead to run on the idle cores during `hybrid-columns-3-ck`'s LunarLander phase.
+- §18's addenda (neuroscientist's review, sizing, fix (a)) moved to their place before §19.
+
+### Added: `--race-reprobe N`, the surrogate gain β re-estimated on a schedule (iteration 016 §18 fix a; user decision, neuroscientist's recommendation)
+
+- `Config.race_reprobe` (default 0, token `rp<N>`): with `--readout race`, once every N pooled episodes `reprobe_race` re-runs `calibrate_race`'s 1-s contrast probe at the run's current W (and R with recurrence), its calibrated s_in and alphas, on the probe's own stream `(seed, CAL_SEED, episode)`; the new β replaces the surrogate's from the next window on. **Pre-set N = 50**, one re-probe per log bin on CartPole and Acrobot, fixed before the re-pilot. The run's `rng` and `nrng` draw nothing for the probe (same draw sequence with and without it); the probe is frozen (W unchanged).
+- `CKRunner.beta` holds the gain (`surrogate`, `race_factor` read it, not `cfg.race_beta`); `race_cal_history` (records with `race_cal`'s keys plus `episode`) and the current β are in the checkpoint and the result (`race_cal_history`, `race_beta_final`); the log prints `reprobe ep N beta X fit Y` (fit = max |win0 − win0_surrogate|). `calibrate_race` shares the probe body (`_race_probe`) with `reprobe_race`; its init call is byte-identical (same runner, same stream; `test_race_reprobe` checks the hand-off, and the smoke run reproduces the pilot's init β 7.9403 on Acrobot seed 20). `CKRunner(rng_seed=...)` accepts a tuple of ints (an int is unchanged). Default off: nothing drawn, golden unchanged. Test `test_race_reprobe`.
+
 ### Added: `--rate-cost`, CK's target-rate term in `CKRunner` (iteration 016 §18 fix b; neuroscientist review, snn-expert sizing)
 
 - Per ms, on the copy's actor E rows, `kap -= c_t (mean actor-E rate − ρ̂)`, ρ̂ = `rate_target` by default (`rho_hat` overrides); the `c_t = 0` assert is lifted, token `rc<c_t>`. Default off: the broadcast `kap` is unchanged and nothing is drawn (golden bit-identical). Test `test_rate_cost_term`.

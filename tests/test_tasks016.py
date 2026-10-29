@@ -351,3 +351,65 @@ def test_rate_cost_term(monkeypatch):
     ai = q.lay.sign[q.lay.n_crit:] < 0
     assert ai.any() and np.allclose(kl[..., ai], kl[..., ai][..., :1]) and not np.allclose(kl[..., ai][..., 0],
                                                                                             kl[..., ~ai][..., 0])
+
+
+def test_race_reprobe(monkeypatch, tmp_path):
+    """--race-reprobe (016 §18 fix a): default 0 and token rp<N>; reprobe_race on a frozen runner returns a record with
+    race_cal's keys plus episode and a finite beta, the probe draws nothing from the runner's rng and nrng and leaves
+    its W, membranes and R untouched, two re-probes at the same state and episode agree exactly (own stream), setting
+    the runner's beta changes surrogate() and race_factor(), and a runner's streams after k windows are the same with
+    and without a re-probe between them. calibrate_race's init probe is byte-identical to the unshared body."""
+    d = ex.Config()
+    assert d.race_reprobe == 0 and "rp" not in "".join(ex.tokens(ex.preset("Acrobot", engine="nlif",
+                                                                               rate_target=40.0, readout="race")))
+    cfg = ex.preset("Acrobot", seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20, fast=True, sgd=True,
+                    adam=False, readout="race", race_beta=6.0, race_reprobe=50)
+    assert ex.tokens(cfg)[-2:] == ["rb6", "rp50"]
+    cfg = dataclasses.replace(cfg, rec="cols", eta_rec=1.0, lam_rec=1.0)
+    r = ex.CKRunner(cfg, frozen=True)
+    for _ in range(30):
+        r.tick()
+    st, nst, W, V, R = (r.rng.bit_generator.state, r.nrng.bit_generator.state, r.W.copy(), r.lst["V"].copy(),
+                        r.hr.R.copy())
+    rec = ex.reprobe_race(r, 30)
+    assert r.rng.bit_generator.state == st and r.nrng.bit_generator.state == nst  # own stream
+    assert np.array_equal(r.W, W) and np.array_equal(r.lst["V"], V) and np.array_equal(r.hr.R, R)
+    keys = {"theta", "beta", "loglik", "deltas", "win0", "win0_surrogate", "n_decisions", "H_race", "H_surrogate",
+            "beta_poisson"}
+    assert set(rec) == keys | {"episode"} and rec["episode"] == 30 and rec["theta"] == 16
+    assert np.isfinite(rec["beta"]) and 2 ** -3 < rec["beta"] < 2 ** 6 and 0 <= ex.race_fit(rec) <= 1
+    assert ex.reprobe_race(r, 30) == rec and ex.reprobe_race(r, 31)["beta"] != rec["beta"]
+    rk = np.array([[0.03, 0.05, 0.04]])
+    p0, f0 = r.surrogate(rk), r.race_factor(rk)
+    r.beta = 2 * rec["beta"]
+    assert not np.allclose(r.surrogate(rk), p0) and np.allclose(r.race_factor(rk), 2 * rec["beta"] / 6.0 * f0)
+    r.race_cal_history.append(rec)  # the checkpoint carries the current beta and the history
+    r.save(tmp_path / "c.npz", 0.0, 0)
+    q = ex.CKRunner(cfg, frozen=True)
+    q.load(tmp_path / "c.npz")
+    assert q.beta == 2 * rec["beta"] and q.race_cal_history == [rec]
+    assert "race_cal_history" in ex.result_ck(cfg, q, 0.0, None, 0) and ex.result_ck(
+        dataclasses.replace(cfg, race_reprobe=0), q, 0.0, None, 0).get("race_cal_history") is None
+    # the run's streams: k windows, a re-probe, k windows, against the same without the re-probe
+    a, b = ex.CKRunner(cfg, frozen=True), ex.CKRunner(cfg, frozen=True)
+    for _ in range(20):
+        a.tick()
+        b.tick()
+    a.beta = ex.reprobe_race(a, 20)["beta"]
+    for _ in range(20):
+        a.tick()
+        b.tick()
+    assert a.rng.bit_generator.state == b.rng.bit_generator.state
+    assert a.nrng.bit_generator.state == b.nrng.bit_generator.state and np.array_equal(a.W, b.W)
+    # calibrate_race builds the (seed, CAL_SEED) runner and hands it to the shared body unchanged
+    seen = []
+    orig = ex._race_probe
+
+    def spy(q, n_states, rtol):
+        seen.append((q.rng.bit_generator.state, q.cfg.race_beta, q.cfg.block, q.frozen))
+        return orig(q, n_states, rtol)
+    monkeypatch.setattr(ex, "_race_probe", spy)
+    base = dataclasses.replace(cfg, rec="none", race_beta=0.0, race_reprobe=0)
+    ex.calibrate_race(base)
+    ref = ex.CKRunner(dataclasses.replace(base, adam=False, sgd=False, block=ex.MS), rng_seed=ex.CAL_SEED, frozen=True)
+    assert seen == [(ref.rng.bit_generator.state, 0.0, ex.MS, True)]
