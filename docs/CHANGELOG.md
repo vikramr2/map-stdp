@@ -1,6 +1,36 @@
 # Changelog
 
+## 2026-10-29
+
+### Result: Stage B pilot, the race readout fails its gate on Acrobot (iteration 016 §18)
+
+- 120/120 dev runs. `base_race` is worse than CK's base on Acrobot (−84 AUC [−277, −4]; actor rate climbs 46 → 82 Hz, 2/10 collapsed) and inconclusive on CartPole (−11 [−56, +10]; rate falls 41 → 10 Hz). Every race column arm is worse on Acrobot. Hypothesis: a common-mode rate drift of task-dependent sign from the mismatch between the race's realised choices and the surrogate, through the 1/r_j factor and the TD error's sign. The structural contrast opened on CartPole (sealed − implicit +57 AUC, p 0.04, n = 10), the first regime contrast to move. Nothing changed; reported to the user with three pre-set candidate fixes (β on a schedule, CK's rate-cost term, the surrogate's sample as the choice).
+
+### Changed: the race tallies E counts; added `actor_spikes_to_decision`; Stage B pilot pre-registered (iteration 016 §18)
+
+- User decision 2026-10-29 (LunarLander θ): the race counts each column's E posts only (`CKRunner.Mcnt`; the I posts shape the dynamics but are not tallied), so θ = round(n_ae r₀ T) means the same on every task; CartPole and Acrobot (no I posts) are unchanged. A noted deviation from the §14.1 net-count tally. Test: an I-post raster moves no count.
+- `actor_spikes_to_decision`: actor spikes up to the bound ms (or the whole window at a deadline decision) per copy-decision, the energy a loop stopped at the bound would spend; checkpoints carry `ebnd`. Race only; the softmax path and the golden test are unchanged.
+- Pilot (development, dev seeds 20–29): CartPole and Acrobot × `base_ck` (CK's softmax), `base_nl`, `base_race` and the three column regimes under the race; co-primary AUC vs `base_ck` and spikes to decision; stability gates only; `cols_sealed_race` vs `cols_lam0_race` is the structural question.
+
+### Finished: study `hybrid-columns-3` (iteration 016 §17)
+
+- 240/240 runs, 10.3 h, none failed. No column arm is worse than base on any task; none improves after Holm. Non-inferior (Δ = 25): `cols_lam0` on CartPole, all three regimes on LunarLander (shifts +7 to +11, CIs above zero before Holm), `cols_sealed` on Acrobot; the other four contrasts inconclusive. Regimes never differ. Acrobot's deficit of `hybrid-columns-2` (−35, −31) is gone under the normalised scores (−9, −2), as §13 predicted.
+- Cross-study, not a test: the normalised readout's LunarLander base plateaus after episode 3000 (last-100 30 vs 58 for 015's CK-faithful base, same AUC-3000); the column arms recover part of it. Recorded as an open gain-control question for Stage B.
+- The study's `rec.RKc` (raw pairs) is chance-dominated and uninformative, as expected; the results of all three column studies are still untracked in their worktrees.
+
 ## 2026-10-28
+
+### Added: `--readout race`, Stage B of iteration 016 §14.1 (§16; user decision; pilot held)
+
+- The race readout on the columns' net counts (Eq. 1h; first to θ, leader at the deadline, ties by one draw), θ = round(n_ae r₀ T_freeze); the population surrogate p̃ = softmax(β log r) with its exact gradient as the learning signal (finite-difference test; no silencing drift); β by a contrast (psychometric) probe at init, `calibrate_race`, after the entropy-matching rule proved ill-conditioned; `actor_spikes_per_decision` in every result. Default off; softmax path byte-identical; golden unchanged. Implemented by the snn-expert; six tests.
+
+### Fixed: the `RKc` monitor records the causal counter per class; end-snapshot overwrite (iteration 016 §15)
+
+- `class_table` adds `cshare` / `cn`: the module-level counter (Eq. 8's causal transitions) split by executed action; the raw pair split (`share`) was chance-dominated (0.506 cross-column in every arm, sealed included). The end-of-run snapshot no longer overwrites the `SNAP_EVERY` snapshot of the same episode (which lost the last phase). The running study `hybrid-columns-3` carries the old monitor; its `RKc` is raw-only and lacks the last phase (recorded in §15). Interim CartPole look: every arm 20/20 solved, shifts vs base −4 to −13, none significant.
+
+### Started: study `hybrid-columns-3` (iteration 016 §15)
+
+- README pre-registered 2026-10-28 18:22 EDT (user approved; Δ = 25 confirmed). Launched from worktree `../map-stdp-hc3` at `4bdbe45`: CartPole, LunarLander, Acrobot × 4 arms × seeds 5000–5019, 64 workers.
 
 ### Added: the stimulus-conditioned walk monitor, `rec.RKc` (iteration 016 §15; user decision)
 

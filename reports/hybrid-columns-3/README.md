@@ -1,6 +1,6 @@
 # Study `hybrid-columns-3`: Map-STDP columns in the TD-STDP backbone on three tasks, matched starts, normalised scores
 
-**DRAFT, awaiting the user's approval. Not launched.** At launch this line becomes "Pre-registered <date, time>, before any run of this study". The design and tests below are then fixed.
+**Pre-registered 2026-10-28 18:22 EDT, before any run of this study** (approved by the user; code at commit `4bdbe45`). The design and tests below are fixed.
 
 Nothing in this directory is written by hand except this README. `manifest.json`, `code.patch`, `runs/`, `summary.*` and `pairs.csv` come only from `python -m experiments.report`.
 
@@ -55,7 +55,7 @@ Nothing in this directory is written by hand except this README. `manifest.json`
 
 For each headline contrast:
 - **Improves:** Holm-adjusted p < 0.05 and a positive shift.
-- **Keeps performance (non-inferiority):** the lower end of the 95% CI of the shift is above −Δ, with **Δ = 25** (25 points of last-100 return on LunarLander, 25 points of AUC on CartPole and Acrobot; as in the earlier studies, to be confirmed by the user).
+- **Keeps performance (non-inferiority):** the lower end of the 95% CI of the shift is above −Δ, with **Δ = 25** (25 points of last-100 return on LunarLander, 25 points of AUC on CartPole and Acrobot; as in the earlier studies, confirmed by the user).
 - **Worse:** a significant negative shift.
 
 Every contrast is reported, pass or fail. The claim the study can support is non-inferiority of columns across three tasks at matched gain, and which regime, if any, differs.
@@ -80,7 +80,7 @@ Every contrast is reported, pass or fail. The claim the study can support is non
 ## Run conditions
 
 - **Machine:** the local workstation (72 cores), with `OMP`, `MKL`, `OPENBLAS` and `NUMBA` threads set to 1, 64 workers.
-- **Code state:** a git worktree of a commit made for the study.
+- **Code state:** git worktree `../map-stdp-hc3` (branch `hybrid-columns-3-study`) at commit `4bdbe45`.
 - **Projected time:** 12–16 h, set by LunarLander (0.4–0.9 h per 3000 episodes, unsolved runs to 10000). CartPole runs take 5–10 min, Acrobot 2–6 min.
 - **One code state:** `manifest.json` records the git HEAD and the sha256 of the uncommitted code; the runner refuses to relaunch if it differs.
 

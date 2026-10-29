@@ -1,6 +1,7 @@
 """Iteration 016: the TD-STDP backbone on Acrobot and Taxi (experiments.tdstdp PRESETS by pre-set rules): the one-hot
 encoder, the presets' sizes, a short closed loop with recurrent columns, k from CartPole's BindsNET rate, the r_scale
-rule and the hybrid-columns-2 study declaration."""
+rule and the hybrid-columns-2 study declaration; the race readout of §14.1 Stage B (the decision, the theta rule, the
+surrogate's gradient, closed loops, calibrate_race, tokens)."""
 import dataclasses
 
 import gymnasium as gym
@@ -160,12 +161,153 @@ def test_class_pair_counts():
     assert np.array_equal(split, hr.acc["kappa"])
     hr.tail[:] = False
     hr.window(XR, xs, xq, cls)
+    csplit = hr.cc.sum(0)
     t = hr.class_table()
-    assert t["share"].shape == (r.K, hr.Kr, hr.Kr) and t["n"][1] == 0 and (t["n"][[0, 2, 3]] > 0).all()
-    assert np.allclose(t["share"].sum((1, 2)), [1, 0, 1, 1]) and not hr.kc.any()
+    assert t["share"].shape == t["cshare"].shape == (r.K, hr.Kr, hr.Kr)
+    assert t["n"][1] == 0 and (t["n"][[0, 2, 3]] > 0).all()
+    assert np.allclose(t["share"].sum((1, 2)), [1, 0, 1, 1]) and np.allclose(t["cshare"].sum((1, 2)), [1, 0, 1, 1])
+    assert not hr.kc.any() and not hr.cc.any() and np.allclose(csplit, hr.acc["c"])  # the counter's split sums too
     for _ in range(60):
         r.tick()
     out = ex.result_ck(cfg, r, 0.0, None, 0)["rec"]
     k = max(int(x) for x in out["RK"])
     assert str(k) in out["RK"] and set(out["RKc"]) <= set(out["RK"]) or out["RKc"] == {}
     assert "rec_kc" in hr.state()
+
+
+def _race_runner(**kw):
+    return ex.CKRunner(ex.preset("Acrobot", seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20, fast=True,
+                                 sgd=True, adam=False, readout="race", race_beta=6.0, **kw))
+
+
+def test_race_decision():
+    """The race (Eq. 1h, CKRunner.race_block) on a synthetic raster: the first column whose E count reaches theta
+    wins at that ms (an earlier lead does not), a copy with no column at theta takes the leader at the deadline, an
+    exact tie costs exactly one uniform draw (none otherwise), the actor spikes up to the bound ms (or the window at
+    the deadline) are tallied as the energy to decide, and I posts are not counted."""
+    r = _race_runner()
+    L, n, nc, n_ae = 20, r.lay.n_post, r.lay.n_crit, r.cfg.n_ae
+    assert r.theta == 16 and r.pend.tolist() == [-1] and not r.cnt.any()
+    X = np.zeros((L, 1, n), bool)
+    X[:, 0, nc + n_ae:nc + 2 * n_ae] = True  # column 1: 20 spikes per ms, at theta in the first ms
+    X[:, 0, nc] = True  # column 0: 1 spike per ms
+    r.race_block(X)
+    assert r.pend[0] == 1 and r.cnt[0].tolist() == [20, 400, 0] and r.rdec[0] == 1
+    assert r.ebnd.tolist() == [21, 1] and r.wspk[0] == 420  # 21 actor spikes in the bound ms; 420 in the block
+    r.cnt[:], r.pend[:], r.wspk[:] = 0, -1, 0
+    X = np.zeros((L, 1, n), bool)
+    X[:5, 0, nc] = True  # column 0 leads early (5 spikes), column 2 reaches theta at ms 7 (2 spikes per ms)
+    X[:, 0, nc + 2 * n_ae] = True
+    X[:16, 0, nc + 2 * n_ae + 1] = True
+    r.race_block(X)
+    assert r.pend[0] == 2 and r.cnt[0].tolist() == [5, 0, 36] and r.ebnd.tolist() == [42, 2]  # 5 + 16 by ms 7
+    # the deadline: no column at theta by the end of the decision window (theta out of reach), the leader wins
+    r = _race_runner(race_theta=1e9)
+    r.cnt[0], r.pend[0], r.timer[:] = [0.0, 1000.0, 0.0], -1, r.cfg.freeze - ex.MS
+    r.wspk[0] = 7.0
+    st = r.rng.bit_generator.state
+    r.tick()
+    assert r.action[0] == 1 and r.pend[0] == -1 and not r.cnt.any() and r.rdec[1] == 1 and r.rdec[2] == 0
+    assert r.ebnd[1] == 1 and r.ebnd[0] >= 7 and r.wspk[0] == 0  # the window's spikes (7 carried in plus the tick's)
+    # I posts (LunarLander: n_ai = n_ae) are not tallied: a raster of I spikes only moves no count
+    q = ex.CKRunner(ex.preset("LunarLander", seed=0, engine="nlif", s_in=0.1, rate_target=40.0, block=20, fast=True,
+                              sgd=True, adam=False, heads=1, readout="race", race_beta=4.0))
+    ipost = np.flatnonzero((q.lay.Ma < 0).any(0))  # the columns' I posts
+    assert len(ipost) == q.K * q.cfg.n_ae and np.isin(ipost, q.apost).all()
+    Xi = np.zeros((L, 1, q.lay.n_post), bool)
+    Xi[:, 0, ipost] = True  # every I post spikes every ms
+    q.race_block(Xi)
+    assert not q.cnt.any() and q.pend[0] == -1 and q.wspk[0] == L * len(ipost)
+    # ties: one draw among the tied columns; no draw without a tie
+    r = _race_runner()
+    st = r.rng.bit_generator.state
+    assert r._leader(np.array([3.0, 7.0, 7.0])) in (1, 2) and r.rdec[2] == 1
+    ref = np.random.default_rng(0)
+    ref.bit_generator.state = st
+    ref.choice(np.array([1, 2]))
+    assert r.rng.bit_generator.state == ref.bit_generator.state
+    st = r.rng.bit_generator.state
+    assert r._leader(np.array([3.0, 7.0, 2.0])) == 1 and r.rng.bit_generator.state == st
+
+
+def test_race_theta_rule():
+    """theta = round(n_ae r0 freeze): Acrobot 20 x 0.04 x 20 = 16, LunarLander 32 x 0.04 x 40 = 51; --race-theta
+    overrides."""
+    assert ex.race_theta(ex.preset("Acrobot", rate_target=40.0)) == 16
+    assert ex.race_theta(ex.preset("LunarLander", rate_target=40.0)) == 51
+    assert ex.race_theta(ex.preset("CartPole", rate_target=40.0, race_theta=9)) == 9
+
+
+def test_race_gradient():
+    """The per-column factor (race_factor) times (A - p~) and times g(p~) is the exact gradient of log p~_a and of H
+    with respect to the column rates (central differences; alpha_a / n_ae absorbed into eta as CK's rule), and the
+    common mode sum_j r_j dH / dr_j is zero (H is invariant to a common scaling of the rates above the floor)."""
+    r = _race_runner()
+    K, cfg, rng = r.K, r.cfg, np.random.default_rng(3)
+    assert r.eps_r == pytest.approx(1 / (cfg.tau_n * cfg.n_ae))
+    for _ in range(50):
+        rk = rng.uniform(0.005, 0.1, K)
+        p, a = r.surrogate(rk), int(rng.integers(K))
+        fr = r.race_factor(rk[None])[0]
+        claim = fr * (np.eye(K)[a] - p) * cfg.alpha_a
+        claimH = fr * ex.td.entropy_coef(p) * cfg.alpha_a
+
+        def f(x, a=a):
+            q = r.surrogate(x)
+            return np.log(q[a]), -(q * np.log(q)).sum()
+        for j in range(K):
+            d = 1e-6 * np.eye(K)[j]
+            (lp1, H1), (lp0, H0) = f(rk + d), f(rk - d)
+            assert claim[j] == pytest.approx((lp1 - lp0) / 2e-6, rel=1e-4, abs=1e-6)
+            assert claimH[j] == pytest.approx((H1 - H0) / 2e-6, rel=1e-4, abs=1e-6)
+        assert abs((rk * claimH).sum()) < 1e-9
+    assert np.allclose(r.surrogate(np.full(K, 1e-9)), 1 / K) and not r.race_factor(np.full((1, K), 1e-9)).any()
+
+
+def test_race_closed_loop():
+    """readout race in closed loop: Acrobot (one copy) and LunarLander (4 copies, rec cols) give finite W, R and p; the
+    result carries the energy monitor and the decision counts; the softmax path still reports the energy."""
+    r = _race_runner()
+    for _ in range(100):
+        r.tick()
+    assert r.frames > 0 and np.isfinite(r.W).all() and np.isfinite(r.p).all() and r.rdec[:2].sum() > 0
+    out = ex.result_ck(r.cfg, r, 0.0, None, 0)
+    assert out["actor_spikes_per_decision"] > 0 and out["race_decisions"]["theta"] == 16
+    assert out["race_decisions"]["at_bound"] + out["race_decisions"]["at_deadline"] == r.rdec[:2].sum()
+    cfg = ex.preset("LunarLander", seed=0, engine="nlif", s_in=0.1, rate_target=40.0, block=20, fast=True, sgd=True,
+                    adam=False, rec="cols", eta_rec=1.0, lam_rec=1.0, heads=4, readout="race", race_beta=4.0)
+    r = ex.CKRunner(cfg)
+    assert r.theta == 51
+    for _ in range(60):
+        r.tick()
+    assert np.isfinite(r.W).all() and np.isfinite(r.hr.R).all() and np.isfinite(r.p).all()
+    s = ex.CKRunner(dataclasses.replace(cfg, readout="softmax", race_beta=0.0, rec="none"))
+    for _ in range(10):
+        s.tick()
+    assert "race_decisions" not in ex.result_ck(s.cfg, s, 0.0, None, 0) and s.espk[0] > 0 and s.stats[6] > 0
+
+
+def test_calibrate_race():
+    """calibrate_race on Acrobot (the contrast probe): a finite beta strictly inside the bracket, the surrogate at beta
+    reproducing column 0's realised win rate within 0.1 at every contrast, the record's diagnostics."""
+    cfg = ex.preset("Acrobot", seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20, fast=True, sgd=True,
+                    adam=False, readout="race")
+    beta, rec = ex.calibrate_race(cfg)
+    assert np.isfinite(beta) and 2 ** -3 * 1.05 < beta < 2 ** 6 / 1.05 and rec["beta"] == beta
+    assert rec["deltas"] == list(ex.RACE_DELTAS) and rec["n_decisions"] == 8 * len(ex.RACE_DELTAS) * 25
+    w, ws = np.array(rec["win0"]), np.array(rec["win0_surrogate"])
+    assert np.abs(w - ws).max() < 0.1 and w[-1] > w[0]  # the contrast moves column 0's win rate
+    assert rec["loglik"] < 0 and 0 < rec["H_race"] < np.log(3) + 0.2 and 0 < rec["H_surrogate"] <= np.log(3) + 1e-9
+    assert rec["beta_poisson"] == pytest.approx(1.6 * np.sqrt(8))
+
+
+def test_race_tokens_and_defaults():
+    d = ex.Config()
+    assert d.readout == "softmax" and d.race_theta == 0.0 and d.race_beta == 0.0
+    cfg = ex.preset("Acrobot", engine="nlif", rate_target=40.0, readout="race")
+    assert ex.tokens(cfg)[-1] == "race" and "race" not in ex.tokens(ex.preset("Acrobot", engine="nlif"))
+    assert ex.tokens(dataclasses.replace(cfg, race_theta=12.0, race_beta=2.5))[-3:] == ["race", "th12", "rb2.5"]
+    with pytest.raises(AssertionError):
+        ex.CKRunner(dataclasses.replace(cfg, s_in=0.16, norm_logits=True))
+    with pytest.raises(AssertionError):
+        ex.CKRunner(dataclasses.replace(cfg, s_in=0.16, rate_target=0.0))
