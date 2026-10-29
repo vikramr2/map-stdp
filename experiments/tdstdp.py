@@ -107,8 +107,8 @@ class Config:
     tau_q: float = 40.0
     c_e: float = 0.0
     c_w: float = 0.0  # CK units (1 / mV)
-    c_t: float = 0.0
-    rho_hat: float = 0.0
+    c_t: float = 0.0  # CK's target-rate term [CK Eq. 31] on actor E rows; CKRunner: --rate-cost (016 §18 fix b)
+    rho_hat: float = 0.0  # its target (per ms); 0 with c_t > 0 means rate_target (CKRunner)
     tau_d: float = 1000.0  # discount time constant (ms)
     r_scale: float = 0.02
     resample: int = 1  # env steps per action sample
@@ -215,6 +215,7 @@ def tokens(cfg):
     t += ["rm"] if cfg.rate_match_rec else []
     t += ["em"] if cfg.ent_match_rec else []
     t += ["nl"] if cfg.norm_logits else []
+    t += [f"rc{cfg.c_t:g}"] if cfg.c_t else []
     if cfg.readout == "race":
         t += ["race"] + ([f"th{cfg.race_theta:g}"] if cfg.race_theta else [])
         t += [f"rb{cfg.race_beta:g}"] if cfg.race_beta else []
@@ -421,7 +422,7 @@ class CKRunner:
     neuron noise draws from nrng. probe = True (calibrate_s_in) skips the rule and counts spikes in spk."""
 
     def __init__(self, cfg, rng_seed=TDSTDP_SEED, frozen=False):
-        assert cfg.ck and cfg.engine in ("numpy", "snm", "lif", "flow", "nlif") and cfg.c_t == 0 and MS % cfg.block == 0
+        assert cfg.ck and cfg.engine in ("numpy", "snm", "lif", "flow", "nlif") and MS % cfg.block == 0
         assert cfg.engine != "nlif" or cfg.s_in > 0, "engine nlif needs s_in (run_ck calibrates it)"
         assert not cfg.rate_target or cfg.engine == "nlif", "rate_target: engine nlif"
         assert cfg.rec in ("none", "cols", "lat")
@@ -456,6 +457,12 @@ class CKRunner:
         assert not cfg.norm_logits or cfg.rate_target > 0, "norm_logits: the reference r0 is rate_target"
         self.apost = np.arange(nc, nc + K * (cfg.n_ae + cfg.n_ai))  # actor posts (latents excluded)
         self.r0 = cfg.rate_target * 1e-3  # norm_logits reference, per ms
+        # CK's target-rate term [CK Eq. 31; bindsnet_add targ_adj] (016 §18 fix b): per ms, on the copy's actor E rows,
+        # kap -= c_t (mean actor-E rate - rho_hat); rho_hat defaults to rate_target, the rate every arm is matched to
+        # (off in the frozen calibration probes, which measure CK's backbone at W fixed)
+        self.c_t = 0.0 if frozen else cfg.c_t
+        self.rho_hat = cfg.rho_hat if cfg.rho_hat > 0 else cfg.rate_target * 1e-3
+        assert self.c_t >= 0 and (not self.c_t or self.rho_hat > 0), "c_t: rho_hat or rate_target"
         self.eps_n = cfg.alpha_a * self.r0 / (cfg.tau_n * cfg.n_ae)  # norm_logits floor: one spike moves <= one nat
         self.prk, self.prbar = np.zeros((H, K)), np.zeros(H)  # norm_logits / race: column rates (pooled rate) of self.p
         # readout race (016 §14.1 Stage B): theta by the pre-set rule, the surrogate's floor eps_r, the columns' signed
@@ -627,12 +634,15 @@ class CKRunner:
         Vp = np.concatenate([self.Vprev[None], V[:-1]])
         d = learn * (np.exp(-1 / (2 * cfg.tau_d)) * r_ms + np.exp(-1 / cfg.tau_d) * V * live - Vp)  # Eq. 69
         bc = lambda a: np.broadcast_to(a, (L, *a.shape))  # noqa: E731
+        kapb = bc(kap)  # L x H x n_act
+        if self.c_t:  # CK's target-rate term, per ms: the copy's actor-E mean rate against rho_hat, E actor rows only
+            kapb = kapb - self.c_t * (R[..., nc:][..., lay.ae].mean(-1, keepdims=True) - self.rho_hat) * lay.ae
         if cfg.fast or K is not None:
-            G, self.z, self.q = td.block_learn_ck_fast(self.z, self.q, P, X, d, bc(c), bc(kap), lay, cfg.tau_z,
+            G, self.z, self.q = td.block_learn_ck_fast(self.z, self.q, P, X, d, bc(c), kapb, lay, cfg.tau_z,
                                                        cfg.tau_q, K)
             g = G / H
         else:
-            G, self.z, self.q = td.block_learn_ck(self.z, self.q, P, X, d, bc(c), bc(kap), lay, cfg.tau_z, cfg.tau_q)
+            G, self.z, self.q = td.block_learn_ck(self.z, self.q, P, X, d, bc(c), kapb, lay, cfg.tau_z, cfg.tau_q)
             g = G.mean(0)
         if lay.n_lat:
             g[nc:][lay.lat] = 0.0  # input -> latent W frozen at init
@@ -1319,6 +1329,8 @@ def main():
     ap.add_argument("--rate-target", type=float, default=None,
                     help="nlif: low-rate regime: initial post rate (Hz; tau_ref 2 ms; calibrate_low)")
     ap.add_argument("--fast", action="store_true", help="update summed over copies in one product (not bit-identical)")
+    ap.add_argument("--rate-cost", type=float, default=None,
+                    help="CK's target-rate term c_t on the actor E rows, target rate_target (016 §18; pre-set 5e-4)")
     ap.add_argument("--rec", choices=("none", "cols", "lat"), default="none",
                     help="nlif: recurrent E->E actor modules (iteration 015): cols, one per action; lat, + latents")
     for f, t, h in (("chi-rec", float, "rec: total kick per spike (threshold units)"),
@@ -1352,8 +1364,8 @@ def main():
                             ("s_in", a.s_in)) if v is not None}
     if a.fast:
         kw["fast"] = True
-    kw.update({k: v for k, v in (("rate_target", a.rate_target), ("chi_rec", a.chi_rec), ("lam", a.lam),
-                                 ("lam_ratio", a.lam_ratio),
+    kw.update({k: v for k, v in (("rate_target", a.rate_target), ("c_t", a.rate_cost), ("chi_rec", a.chi_rec),
+                                 ("lam", a.lam), ("lam_ratio", a.lam_ratio),
                                  ("lam_rec", a.lam_rec), ("eta_rec", a.eta_rec), ("stat_windows", a.stat_windows),
                                  ("pair_ms", a.pair_ms), ("n_lat_mod", a.n_lat_mod), ("la_beta", a.la_beta))
                if v is not None})

@@ -75,3 +75,22 @@ def test_summarize_tdstdp_pairs(tmp_path):
     p = mannwhitneyu([10.0, 20.0, 30.0], [1.0, 2.0, 3.0]).pvalue
     assert float(cp["primary_p"]) == p and float(cp["primary_p_holm"]) == min(1.0, 2 * p)
     assert "## Pairs" in (tmp_path / "pr" / "summary.md").read_text()
+
+
+def test_summarize_cross_study_pairs(tmp_path):
+    """A pair member of the form "<study>/<group>" is loaded from that study's runs/ (companion studies, 016 §19)."""
+    studies = STUDY | {"comp": dict(title="comp", reference={}, gates={}, pairs=[("fake/ref", "new", "x")],
+                                    groups={"new": dict(task="CartPole", engine="flow", flags=[], seeds=[0, 1])})}
+    run = lambda ret: {"config": {"task": "CartPole", "episodes": 2, "max_eps": 2}, "returns": ret,  # noqa: E731
+                       "T_f": None, "T_s": None, "ms_per_frame": 1.0}
+    data = {("fake", "ref"): [run([10.0, 10.0]), run([20.0, 20.0])],
+            ("comp", "new"): [run([1.0, 1.0]), run([2.0, 2.0])]}
+    for (st, g), rs in data.items():
+        (tmp_path / st / "runs" / g).mkdir(parents=True)
+        for i, r in enumerate(rs):
+            (tmp_path / st / "runs" / g / f"s{i}.json").write_text(json.dumps(r))
+    report.summarize("comp", root=tmp_path, studies=studies)
+    row = next(csv.DictReader(open(tmp_path / "comp" / "pairs.csv")))
+    assert (row["on"], row["off"], row["family"], row["n_on"], row["n_off"]) == ("fake/ref", "new", "x", "2", "2")
+    assert float(row["primary_hl"]) == 13.5 and float(row["primary_on"]) == 15.0
+    assert [r["group"] for r in csv.DictReader(open(tmp_path / "comp" / "summary.csv"))] == ["new"]

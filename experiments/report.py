@@ -191,6 +191,48 @@ def _hybrid_columns_3():
 
 
 STUDIES["hybrid-columns-3"] = _hybrid_columns_3()
+_HC3_COMMON = ["--rate-target", "40", "--block", "20", "--fast", "--rate-match-rec", "--ent-match-rec"]
+_HC3_ARMS = {"cols_lam0": ["--chi-rec", "0.3", "--rec", "cols", "--lam", "0"],
+             "cols_on": ["--chi-rec", "0.3", "--rec", "cols", "--lam", "1"],
+             "cols_sealed": ["--chi-rec", "0.3", "--rec", "cols", "--rec-seal", "--lam", "0"]}
+
+
+def _hybrid_columns_3_ck():
+    """hybrid-columns-3-ck (iteration 016 §19, companion A): the CK-faithful base, CK's softmax on the unnormalised
+    scores at the matched start (hybrid-columns-3's flags without --norm-logits; the Stage B pilot's base_ck arm, §18),
+    on the three tasks and the same seeds as hybrid-columns-3 (5000-5019, so every contrast is on the same environment
+    draws; this arm never ran on them). Pairs across studies: each regime of hybrid-columns-3 against base_ck
+    (primary, Holm per task), and hybrid-columns-3's normalised base against base_ck (the readout's own cost)."""
+    tasks = ("CartPole", "LunarLander", "Acrobot")
+    groups = {f"{t}_base_ck": dict(task=t, engine="nlif", seeds=range(5000, 5020),
+                                   flags=[*_HC3_COMMON, *([] if t == "CartPole" else ["--eta-cal"])])
+              for t in tasks}
+    pairs = [(f"hybrid-columns-3/{t}_{a}", f"{t}_base_ck", t) for t in tasks for a in _HC3_ARMS]  # Holm per task
+    pairs += [(f"hybrid-columns-3/{t}_base", f"{t}_base_ck", "readout") for t in tasks]
+    return dict(title="The CK-faithful base (softmax, unnormalised) against the regimes of hybrid-columns-3",
+                groups=groups, pairs=pairs, reference={t: f"{t}_base_ck" for t in tasks}, gates={})
+
+
+STUDIES["hybrid-columns-3-ck"] = _hybrid_columns_3_ck()
+
+
+def _hybrid_columns_4():
+    """hybrid-columns-4 (iteration 016 §19, companion B): hybrid-columns-3's CartPole arms at n = 40 (fresh seeds
+    6000-6039), the power its inconclusive contrasts lacked (CI half-width about 15 AUC at n = 20, margin 25), plus the
+    CK-faithful base of hybrid-columns-3-ck. Pairs: each regime vs base (primary); each regime and base vs base_ck
+    (family ck); between regimes (secondary)."""
+    t, seeds = "CartPole", range(6000, 6040)
+    arms = {"base": ["--norm-logits"], **{a: ["--norm-logits", *f] for a, f in _HC3_ARMS.items()}, "base_ck": []}
+    groups = {f"{t}_{a}": dict(task=t, engine="nlif", seeds=seeds, flags=[*_HC3_COMMON, *f]) for a, f in arms.items()}
+    pairs = [(f"{t}_{a}", f"{t}_base") for a in _HC3_ARMS]
+    pairs += [(f"{t}_{a}", f"{t}_base_ck", "ck") for a in (*_HC3_ARMS, "base")]
+    pairs += [(f"{t}_{a}", f"{t}_{b}", "secondary") for a, b in
+              (("cols_on", "cols_lam0"), ("cols_on", "cols_sealed"), ("cols_lam0", "cols_sealed"))]
+    return dict(title="Map-STDP columns in the TD-STDP backbone on CartPole at n = 40, both bases",
+                groups=groups, pairs=pairs, reference={t: f"{t}_base"}, gates={})
+
+
+STUDIES["hybrid-columns-4"] = _hybrid_columns_4()
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
            "T_s_sd", "T_s_median", "T_m_mean", "T_m_sd", "T_m_n", "ret_mean", "ret_sd", "ret_ge_M", "ms_per_frame",
            "resumes", "mw_ref", "mw_T_f", "mw_T_s", "mw_ret", "gate_min_solved", "gate_pass"]
@@ -321,8 +363,8 @@ def summarize(study, root=REPORTS, studies=None):
     if s.get("runner", "tdstdp") == "m3":
         return summarize_m3(study, s, d)
     runs = {k: load_runs(d, k) for k in s["groups"]}
-    for ref in s["reference"].values():  # "<study>/<group>": a group of another study
-        if "/" in ref:
+    for ref in list(s["reference"].values()) + [x for p in s.get("pairs", []) for x in p[:2]]:
+        if "/" in ref and ref not in runs:  # "<study>/<group>": a group of another study (a reference or a pair member)
             runs[ref] = load_runs(root / ref.split("/")[0], ref.split("/")[1])
     rows = []
     dropped = s.get("dropped", {})

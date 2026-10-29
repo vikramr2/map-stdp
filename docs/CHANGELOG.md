@@ -2,6 +2,22 @@
 
 ## 2026-10-29
 
+### Added: `--rate-cost`, CK's target-rate term in `CKRunner` (iteration 016 §18 fix b; neuroscientist review, snn-expert sizing)
+
+- Per ms, on the copy's actor E rows, `kap -= c_t (mean actor-E rate − ρ̂)`, ρ̂ = `rate_target` by default (`rho_hat` overrides); the `c_t = 0` assert is lifted, token `rc<c_t>`. Default off: the broadcast `kap` is unchanged and nothing is drawn (golden bit-identical). Test `test_rate_cost_term`.
+- Pre-set value for the race re-pilot, fixed before any run: **c_t = 5e-4**, the smallest power-of-ten multiple of the authors' `targ_firing_r` (5e-6, `config_cp_lfr.ini`; no unit conversion, like `c_e`) at which the restoring term exceeds the pilot's observed drift (+8 Hz / −11 Hz per 100 episodes) at the gate edge on both tasks; implied relaxation 19–33 episodes.
+- Neuroscientist (review-only): a coincidence-gated rate homeostasis on the population mean (a rapid compensatory process, Zenke et al. 2013), not synaptic scaling; crossbar-native; stabilises the common mode only, cannot revive a silent column, and makes `actor_spikes_per_decision` a constant across arms (only `actor_spikes_to_decision` remains an energy measure). Recommends fix (a), a rescheduled surrogate gain β, with (b) alongside, not instead; the user decides the re-pilot's arms.
+
+### Added: companion studies `hybrid-columns-3-ck` and `hybrid-columns-4` declared and pre-registered (iteration 016 §19; user decision)
+
+- `hybrid-columns-3-ck`: the CK-faithful base (softmax on the unnormalised scores, matched start) on the three tasks, seeds 5000–5019 as `hybrid-columns-3` (a stated exception: same initial W and first environment seed per contrast; the arm never ran on them). Pairs across studies: each regime of `hybrid-columns-3` vs `base_ck` (Holm per task) and its base vs `base_ck`. `report.summarize` now loads a pair member written `<study>/<group>` from that study's `runs/`, as it did for a cross-study reference; `test_summarize_cross_study_pairs`. Existing summaries byte-identical.
+- `hybrid-columns-4`: CartPole at n = 40 (seeds 6000–6039, fresh), `hybrid-columns-3`'s four arms plus `base_ck`; families headline / `ck` / secondary. The power the §17 inconclusives lacked.
+- Both READMEs are drafts awaiting the user's approval; launch after the user commits. Noted: `hybrid-columns-3`'s `pairs.csv` Holm is over the nine headline contrasts, not per task as its README says; the reading is unchanged (per-task LunarLander 0.051 ×3).
+
+### Merged: the four study result sets into `columns-tdstdp` (`cf72b9e`)
+
+- `hybrid-columns`, `hybrid-columns-2`, `hybrid-columns-3` and `emergent-v4`: each study's `manifest.json`, `runs/`, `summary.*`, `pairs.csv` (and `emergent-v4`'s models and structure comparison), committed on the worktree branches and merged; `summarize` reproduces every committed summary from `runs/`.
+
 ### Result: Stage B pilot, the race readout fails its gate on Acrobot (iteration 016 §18)
 
 - 120/120 dev runs. `base_race` is worse than CK's base on Acrobot (−84 AUC [−277, −4]; actor rate climbs 46 → 82 Hz, 2/10 collapsed) and inconclusive on CartPole (−11 [−56, +10]; rate falls 41 → 10 Hz). Every race column arm is worse on Acrobot. Hypothesis: a common-mode rate drift of task-dependent sign from the mismatch between the race's realised choices and the surrogate, through the 1/r_j factor and the TD error's sign. The structural contrast opened on CartPole (sealed − implicit +57 AUC, p 0.04, n = 10), the first regime contrast to move. Nothing changed; reported to the user with three pre-set candidate fixes (β on a schedule, CK's rate-cost term, the surrogate's sample as the choice).

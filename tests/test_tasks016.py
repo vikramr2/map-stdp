@@ -311,3 +311,43 @@ def test_race_tokens_and_defaults():
         ex.CKRunner(dataclasses.replace(cfg, s_in=0.16, norm_logits=True))
     with pytest.raises(AssertionError):
         ex.CKRunner(dataclasses.replace(cfg, s_in=0.16, rate_target=0.0))
+
+
+def test_rate_cost_term(monkeypatch):
+    """CK's target-rate term (016 §18 fix b, --rate-cost): per ms the copy's actor-E mean rate against rho_hat
+    (rate_target by default) enters kap on the E actor rows only, the same value on every E row of a copy; it draws
+    nothing (same raster at the same seed) and with c_t = 0 kap is what it was."""
+    cap, orig = [], ex.td.block_learn_ck_fast
+
+    def spy(z, q, P, X, d, c, kap, *a):
+        cap.append((X.copy(), np.array(kap)))
+        return orig(z, q, P, X, d, c, kap, *a)
+    monkeypatch.setattr(ex.td, "block_learn_ck_fast", spy)
+    runs = {}
+    mk = lambda **kw: ex.CKRunner(ex.preset("Acrobot", seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20,  # noqa: E731
+                                            fast=True, sgd=True, adam=False, **kw))
+    for key, kw in (("off", {}), ("lo", dict(c_t=1.0)), ("hi", dict(c_t=1.0, rho_hat=10.0))):
+        q = mk(**kw)
+        assert q.rho_hat == (10.0 if key == "hi" else 0.04) and q.c_t == (0.0 if key == "off" else 1.0)
+        assert ex.CKRunner(q.cfg, frozen=True).c_t == 0.0  # the calibration probes measure the backbone
+        cap.clear()
+        q.tick()
+        runs[key] = cap[0]
+    (X0, k0), (X1, k1), (X2, k2) = runs["off"], runs["lo"], runs["hi"]
+    assert np.array_equal(X0, X1) and np.array_equal(X0, X2) and k0.ndim == 3 and k1.shape == k0.shape
+    ae = q.lay.ae
+    d1, d2 = k1 - k0, k2 - k0
+    assert np.allclose(d1[..., ae], d1[..., ae][..., :1]) and np.allclose(d2[..., ae], d2[..., ae][..., :1])
+    rbar = 0.04 - d1[..., ae][..., 0]  # c_t = 1: d = -(rbar - rho_hat)
+    assert (rbar >= 0).all() and rbar.max() > 0 and np.allclose(d2[..., ae][..., 0] - d1[..., ae][..., 0], 10.0 - 0.04)
+    assert "rc0.0005" in ex.name(dataclasses.replace(q.cfg, c_t=5e-4)) and "rc" not in ex.name(q.cfg.__class__(**{
+        **dataclasses.asdict(q.cfg), "c_t": 0.0}))
+    # I posts (LunarLander) get no term
+    cap.clear()
+    q = ex.CKRunner(ex.preset("LunarLander", seed=0, engine="nlif", s_in=0.1, rate_target=40.0, block=20, fast=True,
+                              sgd=True, adam=False, heads=1, c_t=1.0))
+    q.tick()
+    kl = cap[0][1]
+    ai = q.lay.sign[q.lay.n_crit:] < 0
+    assert ai.any() and np.allclose(kl[..., ai], kl[..., ai][..., :1]) and not np.allclose(kl[..., ai][..., 0],
+                                                                                            kl[..., ~ai][..., 0])
