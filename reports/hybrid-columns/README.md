@@ -1,6 +1,6 @@
 # Study `hybrid-columns`: Map-STDP columns in the TD-STDP backbone, without Adam
 
-**DRAFT, awaiting the user's approval. Not launched.** When launched, this line becomes "Pre-registered <date, time>, before any run of this study". Design and tests below are then fixed.
+**Pre-registered 2026-10-27 20:02 EDT, before any run of this study.** Code at git `0d2d851`, branch `hybrid-columns-study` (worktree `../map-stdp-hc`). Design and tests below are fixed.
 
 Nothing in this directory is written by hand except this README: `manifest.json`, `code.patch`, `runs/`, `summary.*` and `pairs.csv` come only from `python -m experiments.report`.
 
