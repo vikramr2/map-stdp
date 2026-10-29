@@ -2,6 +2,31 @@
 
 ## 2026-10-29
 
+### Decided: CartPole's reported result is the race with the β re-probe (study `race-cartpole` declared); Acrobot and LunarLander continue (iteration 016 §20; user decision 2026-10-29)
+
+- User: the six CartPole arms of the dev table (CK softmax, normalised softmax, race + β re-probe on no / implicit / learned / sealed columns) are the reported set, with the settings stated as selected on dev seeds. Declared as `race-cartpole` in `report.py` (seeds 7000–7019, 120 runs, primary AUC, families headline / readout / secondary; README drafted). LunarLander pilot: the race trails the softmax by 40–60 points at 1000 episodes with a near-uniform policy; the score credit slower still. Next: the one-sided per-column rate floor (contrast floor; neuroscientist review in progress) piloted with the re-probe and rate-term variants on Acrobot and LunarLander.
+
+### Result: per-task grid pilot (iteration 016 §20)
+
+- 130/130 dev runs. CartPole: the exact score at 3× the RMS-matched actor step is level with CK's base (AUC 359 vs 364, 8/10 solved; ×1: 235; ×6: 306, 10/10 solved): the CartPole setting for score arms. Acrobot with β_c = −1.5: the critic now survives in every race run (43–52 Hz), but the race still collapses into perseveration (4–8/10 runs at every θ ∈ {16, 24, 32}; entropy 0.4–0.6 of ln 3 at a pinned mean rate): the race needs a floor on the contrast between columns, not on the mean. LunarLander race pilot (1000 episodes, 3 seeds, surrogate + rate term and exact score ×3) launched.
+
+### Added: `--beta-c` and `--eta-mult-a`; per-task grid pilot launched (iteration 016 §20; user go-ahead)
+
+- `--beta-c` overrides the preset's critic bias (token `bc<v>`); `--eta-mult-a` multiplies the calibrated actor step under `--eta-cal` (token `em<m>`, applied before the rate term's effective step is computed). Defaults reproduce the presets; `test_beta_c_and_eta_mult_flags`. Both are per-task settings for the declared grids (user decision: per-task tuning on dev seeds, reported on fresh seeds).
+- Grid pilot (dev seeds 20–29, main checkout, patch `grid_code.patch` in the scratchpad): Acrobot with β_c = −1.5 (the 1.5 V_rand rule from the critic diagnosis): `base_ck` (new reference), the surrogate race with the rate term and the exact-score race, each at θ ∈ {16, 24, 32}; CartPole: the exact-score race at actor-step multipliers {1, 3, 6}, base and sealed columns. 130 runs.
+
+### Result: CartPole score re-pilot after the η rule fix; the exact score learns CartPole, slowly (iteration 016 §20)
+
+- 80/80 dev runs. `--credit noise`: every arm near the ceiling at episode 400 (last-100 483–490), rates held, no collapse; AUC 187–235 vs 364 for CK's base and 380–403 for the stabilised surrogate race: about 2.5× slower, as the measured signal fraction predicts. `--credit hazard`: 5× slower again. Regimes equal. Acrobot critic death diagnosed (TD(0) bias from the critic's own spikes puts the floor's value below β_c = −1.2; the race's uniform initial policy never terminates an episode, the softmax's state-locked one does): recommended β_c = 1.5 V_rand (−1.5 on Acrobot; `base_ck` re-run as the reference), then a θ grid for the race's initial state-dependence. Nothing changed yet.
+
+### Fixed: `--eta-cal` on CartPole calibrates against the authors' Adam steps (iteration 016 §20; user go-ahead)
+
+- `Config.adam_step_c / adam_step_a` (default 0 = use `eta_c` / `eta_a`); CartPole's preset carries the LunarLander config's Adam steps (1.25e-4 / 6.25e-5). `calibrate_ck` divides the Adam step, not the preset's SGD rate, by the per-ms update RMS, so CartPole's `--eta-cal` gives η_c ≈ 0.02 mV instead of 0.8 (the §15 trap that killed the score pilot's CartPole arms in episode 1). No reported study used `--eta-cal` on CartPole; the other presets are unchanged (`test_eta_cal_cartpole_uses_adam_steps`). CartPole score re-pilot (80 runs, seeds 20–29, main checkout, uncommitted patch saved as `score_cp_code.patch` in the scratchpad) launched.
+
+### Result: score pilot; both spike-score credits fail to learn on both tasks (iteration 016 §20)
+
+- 160/160 dev runs (seeds 20–29). CartPole: every `--credit noise` / `hazard` arm at or below the random policy (AUC 9–16 vs CK's base 364), realised policy entropy falling; Acrobot: every arm at the floor. Rates held, clip 0, no NaN. Diagnosis (snn-expert, same day): not the credit. CartPole: `--eta-cal` with CartPole's SGD-rate preset (the §15 trap) gave a 68–280× step, the critic died in episode 1 and the actor random-walked; with the other tasks' η rule the exact score **solves CartPole** (last-100 496–497, slower than the surrogate). Acrobot: the critic dies at the floor in every race arm, the surrogate's included (β_c below the floor policy's value; an absorbing silent state), upstream of the credit. The live-path finite differences of the score eligibility match (0.96–1.24). Nothing changed; the η rule fix and the critic fix are the next steps.
+
 ### Result: surrogate re-pilot of the race readout; no variant passes the gates on both tasks (iteration 016 §18)
 
 - 240/240 dev runs (seeds 20–29). CartPole: every stabilised race arm (rate term, β re-probe, both) solves 10/10 and is +23 to +41 AUC above CK's base, nine of twelve CIs above zero, with fewer actor spikes to the decision (13–27 vs 36): the first race result above the published backbone. Acrobot: the rate term holds the mean rate and collapses 4–9/10 runs (silent columns under a pinned mean, the neuroscientist's issue 3); the β re-probe fails the rate gate (97–110 Hz). The first pilot's structural signal on CartPole (+57) does not survive the fixes (−3 / +18 / −2): it was carried by the drift. Nothing changed; the score pilot (§20) is next.

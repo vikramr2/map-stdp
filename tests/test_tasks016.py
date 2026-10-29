@@ -639,3 +639,33 @@ def test_credit_tokens_and_asserts():
     ex.CKRunner(dataclasses.replace(cfg, credit="hazard", sgd=False), frozen=True)  # the calibration probes
     with pytest.raises(AssertionError):
         ex.CKRunner(dataclasses.replace(cfg, credit="noise", engine="lif", rate_target=0.0, s_in=0.0))
+
+
+def test_eta_cal_cartpole_uses_adam_steps(monkeypatch):
+    """--eta-cal on CartPole calibrates against the authors' Adam steps (adam_step_c/a, the LunarLander config's), not
+    the preset's SGD rates, which gave a 68-280x step (016 §20); presets whose eta are Adam steps are unchanged."""
+    monkeypatch.setattr(ex, "CAL_TICKS", 20)
+    cp = ex.preset("CartPole", seed=0, engine="nlif", s_in=0.1, rate_target=40.0, block=20, fast=True, sgd=True,
+                   adam=False)
+    assert (cp.adam_step_c, cp.adam_step_a) == (1.25e-4, 6.25e-5) and (cp.eta_c, cp.eta_a) == (0.005, 0.01)
+    eta, rms = ex.calibrate_ck(cp)
+    assert np.allclose(eta, np.array([1.25e-4, 6.25e-5]) / rms) and eta[0] < 0.1 and eta[1] < 0.1
+    ac = ex.preset("Acrobot", seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20, fast=True, sgd=True,
+                   adam=False)
+    assert (ac.adam_step_c, ac.adam_step_a) == (0.0, 0.0)
+    eta2, rms2 = ex.calibrate_ck(ac)
+    assert np.allclose(eta2, np.array([ac.eta_c, ac.eta_a]) / rms2)
+
+
+def test_beta_c_and_eta_mult_flags():
+    """--beta-c overrides the preset's critic bias (token bc), --eta-mult-a multiplies the calibrated actor step (token
+    em); both default to the preset / 1 with no token (016 §20 per-task grid)."""
+    cfg = ex.preset("Acrobot", seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20, fast=True, sgd=True,
+                    adam=False)
+    assert cfg.beta_c == -1.2 and cfg.eta_mult_a == 1.0 and "bc" not in ex.name(cfg) and "em" not in ex.name(cfg)
+    c2 = dataclasses.replace(cfg, beta_c=-1.5, eta_mult_a=3.0)
+    assert "bc-1.5" in ex.name(c2) and "em3" in ex.name(c2)
+    a = ex.build_parser().parse_args(["--task", "Acrobot", "--beta-c", "-1.5", "--eta-mult-a", "3"]) \
+        if hasattr(ex, "build_parser") else None
+    if a is not None:
+        assert a.beta_c == -1.5 and a.eta_mult_a == 3.0

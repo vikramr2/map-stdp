@@ -233,6 +233,29 @@ def _hybrid_columns_4():
 
 
 STUDIES["hybrid-columns-4"] = _hybrid_columns_4()
+
+
+def _race_cartpole():
+    """race-cartpole (iteration 016 §20; user decision 2026-10-29): the reported CartPole result of the race readout.
+    Six arms on fresh seeds 7000-7019: CK's softmax (the reference), the normalised softmax, and the race with the
+    surrogate credit and the beta re-probe (every 50 episodes) on no columns and on the three column regimes. The race's
+    settings (theta by the rule, beta by the contrast probe re-run every 50 episodes, rate-matched start, CK's preset
+    eta) were selected on dev seeds 20-29 (016 §18, §20 grid): the pilots' best CartPole setting. Primary AUC."""
+    t, seeds = "CartPole", range(7000, 7020)
+    common = ["--rate-target", "40", "--block", "20", "--fast", "--rate-match-rec"]
+    race = ["--readout", "race", "--race-reprobe", "50"]
+    arms = {"base_ck": ["--ent-match-rec"], "base_nl": ["--ent-match-rec", "--norm-logits"], "base_race_rp": race,
+            **{f"{a}_race_rp": [*race, *f] for a, f in _HC3_ARMS.items()}}
+    groups = {f"{t}_{a}": dict(task=t, engine="nlif", seeds=seeds, flags=[*common, *f]) for a, f in arms.items()}
+    pairs = [(f"{t}_{a}_race_rp", f"{t}_base_ck") for a in ("base", *_HC3_ARMS)]
+    pairs += [(f"{t}_base_nl", f"{t}_base_ck", "readout")]
+    pairs += [(f"{t}_{a}_race_rp", f"{t}_{b}_race_rp", "secondary") for a, b in
+              (("cols_sealed", "base"), ("cols_lam0", "base"), ("cols_sealed", "cols_lam0"), ("cols_on", "cols_lam0"))]
+    return dict(title="The race readout on CartPole against the published backbone, best dev-seed settings",
+                groups=groups, pairs=pairs, reference={t: f"{t}_base_ck"}, gates={})
+
+
+STUDIES["race-cartpole"] = _race_cartpole()
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
            "T_s_sd", "T_s_median", "T_m_mean", "T_m_sd", "T_m_n", "ret_mean", "ret_sd", "ret_ge_M", "ms_per_frame",
            "resumes", "mw_ref", "mw_T_f", "mw_T_s", "mw_ret", "gate_min_solved", "gate_pass"]

@@ -116,6 +116,9 @@ class Config:
     n_ai: int = 0
     eta_c: float = 2.5e-3  # CK units (mV); with adam: the Adam step
     eta_a: float = 1e-2
+    adam_step_c: float = 0.0  # --eta-cal numerator when the preset's eta are SGD rates, not Adam steps (CartPole;
+    adam_step_a: float = 0.0  # 016 §15, §20); 0: use eta_c / eta_a (the presets whose eta are Adam steps)
+    eta_mult_a: float = 1.0  # --eta-cal: multiplier on the calibrated actor step (per-task grid, 016 §20)
     alpha_c: float = 2.0
     beta_c: float = -0.2
     alpha_a: float = 25.0
@@ -176,7 +179,7 @@ class Config:
 
 PRESETS = {  # the authors' configs, reference/td_stdp/config/config_{cp,ll}.ini (eta in mV, before trace scaling)
     "CartPole": dict(ck=True, episodes=400, max_eps=400, eta_c=0.005, eta_a=0.01, alpha_a=50.0, init_scale=0.1,
-                     adam_eps=1e-9),
+                     adam_eps=1e-9, adam_step_c=1.25e-4, adam_step_a=6.25e-5),  # eta: SGD rates; adam_step: LL's
     "LunarLander": dict(ck=True, episodes=3000, max_eps=10000, adam=True, heads=16, block=20, in_rep=16, f_order=1,
                         f_cross=False, f_double=True, f_basis=True, n_ce=128, n_ci=128, n_ae=32, n_ai=32,
                         eta_c=1.25e-4, eta_a=6.25e-5, init_scale=0.125, alpha_c=4.0, beta_c=-2.0, alpha_a=15.0,
@@ -238,6 +241,8 @@ def tokens(cfg):
     t += ["em"] if cfg.ent_match_rec else []
     t += ["nl"] if cfg.norm_logits else []
     t += [f"rc{cfg.c_t:g}"] if cfg.c_t else []
+    t += [f"em{cfg.eta_mult_a:g}"] if cfg.eta_mult_a != 1.0 else []
+    t += [f"bc{cfg.beta_c:g}"] if cfg.beta_c != p.beta_c else []
     if cfg.readout == "race":
         t += ["race"] + ([f"th{cfg.race_theta:g}"] if cfg.race_theta else [])
         t += [f"rb{cfg.race_beta:g}"] if cfg.race_beta else []
@@ -932,7 +937,8 @@ def calibrate_ck(cfg):
     for _ in range(CAL_TICKS):
         r.tick()
     rms = np.sqrt(r.gsq / r.nupd)
-    return np.array([cfg.eta_c, cfg.eta_a]) / rms, rms
+    step = np.array([cfg.adam_step_c or cfg.eta_c, cfg.adam_step_a or cfg.eta_a])  # Adam steps (016 §20: CartPole's
+    return step / rms, rms  # preset eta are SGD rates, 68-280x too large as a per-ms step; its adam_step is LL's)
 
 
 def probe_rate(cfg):
@@ -1198,6 +1204,7 @@ def run_ck(cfg, log_every=50, out=None, save_model=None):
                   f"{s_in:.4f}", flush=True)
     if cfg.sgd:
         eta_sgd, rms = calibrate_ck(cfg)
+        eta_sgd = eta_sgd * np.array([1.0, cfg.eta_mult_a])  # the per-task actor step multiplier (1 by default)
         if score:  # the rate term keeps the surrogate arm's effective step: c_t x eta_a(surrogate) / eta_a(score),
             eta_ref, rms_ref = calibrate_ck(dataclasses.replace(cfg, credit="surrogate"))  # both at the same W
             low["score"] = dict(credit=cfg.credit, eta_a=float(eta_sgd[1]), eta_a_ref=float(eta_ref[1]),
@@ -1502,6 +1509,8 @@ def main():
     ap.add_argument("--rate-target", type=float, default=None,
                     help="nlif: low-rate regime: initial post rate (Hz; tau_ref 2 ms; calibrate_low)")
     ap.add_argument("--fast", action="store_true", help="update summed over copies in one product (not bit-identical)")
+    ap.add_argument("--beta-c", type=float, default=None, help="critic bias (preset override; 016 §20 Acrobot rule)")
+    ap.add_argument("--eta-mult-a", type=float, default=None, help="--eta-cal: actor step multiplier (per-task grid)")
     ap.add_argument("--rate-cost", type=float, default=None,
                     help="CK's target-rate term c_t on the actor E rows, target rate_target (016 §18; pre-set 5e-4)")
     ap.add_argument("--rec", choices=("none", "cols", "lat"), default="none",
@@ -1542,6 +1551,7 @@ def main():
     if a.fast:
         kw["fast"] = True
     kw.update({k: v for k, v in (("rate_target", a.rate_target), ("c_t", a.rate_cost), ("chi_rec", a.chi_rec),
+                                 ("beta_c", a.beta_c), ("eta_mult_a", a.eta_mult_a),
                                  ("lam", a.lam), ("lam_ratio", a.lam_ratio),
                                  ("lam_rec", a.lam_rec), ("eta_rec", a.eta_rec), ("stat_windows", a.stat_windows),
                                  ("pair_ms", a.pair_ms), ("n_lat_mod", a.n_lat_mod), ("la_beta", a.la_beta))
