@@ -488,6 +488,14 @@ Keep the TD-STDP backbone [Chung & Kozma 2020] (Fourier input spikes, a feed-for
 
 The eligibility is (4b) with the signed counter; module activity supplies $\bar{e}^{obs}_j$ locally, and the $2K \times 2K$ offspring table is monitored each frame (§7). Noisy LIF first, QIF later.
 
+**Proposal: the decision and the credit carried by spikes.** The decision units run the race (1h) on the columns' excitatory spike counts, and the task credit on an input synapse $j \to i$ of an actor neuron is the per-neuron score of the neuron's own noise model. For the noisy LIF (§5), with the pre-noise membrane $m_i(t) = a V_i(t-1) + (1-a)\mu + \xi_i(t)$, $a = e^{-\Delta t / \tau_m}$, and the step's noise $g_i(t) = (V_i(t) - m_i(t)) / \sigma_n$ with density $f$, the score at step $t$ is
+
+$$
+Y_i(t) = \frac{f(z_i)}{\sigma_n h_i} \text{ on a spike step}, \qquad Y_i(t) = -\frac{f'(g_i)}{\sigma_n f(g_i)} \text{ on an active no-spike step}, \qquad h_i = 1 - F(z_i), \quad z_i = \frac{\theta - m_i}{\sigma_n} \qquad \text{(13)}
+$$
+
+and $0$ in the refractory period. $Y_i(t)$ is $\partial \log p(V_i(t) \mid V_i(t-1), \xi_i(t)) / \partial \xi_i(t)$, so with $\partial \xi_i(t) / \partial W_{ij} \propto x_j(t-1)$ the eligibility increment is $Y_i(t) x_j(t-1)$, summed up to the step at which the race reaches its bound, and the update is $\delta$ times the trace. The conditional expectation of (13) given only the spike, $(S_i - h_i) f(z_i) / (\sigma_n h_i (1 - h_i))$, is the escape-noise score [Pfister et al. 2006; Frémaux et al. 2013] at the realised membrane; for this neuron it is zero-mean but not the gradient, because the membrane carries the noise forward. Both are local: a post factor, a pre factor and one broadcast $\delta$; (13) additionally needs the neuron to separate its step's noise from its input [Fiete & Seung 2006]. The recurrent synapses receive the column's summed score as a module-level signal, with the per-synapse form $Y_i(t) S_j(t-1)$ open. Checked in Appendix A (H1–H3); the procedure is `docs/columns-recipe.md`.
+
 ## 9. Assumptions, limitations and open problems
 
 1. **Local split.** $\pi$, chance, indirect terms and gains are held fixed during updates, and (4) is exact only in expectation. The split drops indirect effects; in the inhibition-stabilised regime indirect feedback through inhibition is large (the "paradoxical" response), so the split may approximate the full gradient poorly there. Its cosine with the full gradient is unmeasured in any spiking engine.
@@ -567,6 +575,9 @@ and the second term is a column rescaling. Since $\mathbb{E}[c^{tot}_{ij}] = T_f
 | E4 branching with inhibition | 48 neurons, 4 modules of 10 E + 2 I, $w_0 / 2 \theta = 0.8$, stimuli redrawn every 50 steps | negative transitions; gated vs exact (11a) correlation, inhibition understated; inflow imbalance mean / max; causal share E / I columns | none; 0.9994, 16%; 1.5% / 4.2%; 16% / 18% |
 | E4 structural learning | same, 40 blocks × 5000 steps, columns renormalised | $L$ (bits), E weight leaving module, I weight to other modules: exact counter / pair count as the step | 4.611 → 4.096, 62% → 11%, 76% → 98% / 4.611 → 4.556, 62% → 53%, 76% → 83% |
 | E5 single LIF neuron, signed kicks | $\tau_m = 20$ ms, voltage s.d. $0.25 \theta$, 60000 paired trials | simulated / predicted (11b) with (11c): $b = -0.05 \theta$ at 7, 14, 33 Hz; $-0.15 \theta$; $+0.05 \theta$ | 0.88, 0.88, 0.98; 0.85; 1.05 |
+| H1 score (13), hazard $h$ | single noisy LIF, both noise kernels, frozen, $4 \times 10^4$ trajectories (`python -m mapstdp.lif`) | $\sum_t h$ vs spike count per neuron (s.d. units); $\mathbb{E}[\sum_t Y]$ of the escape-noise form | $\le 3.1$; $0.03 \pm 0.04$ |
+| H2 score (13) vs FD | one neuron, one Poisson input, $R$ = a 20-ms count, common random numbers, $1.5 \times 10^5$ trajectories | $\mathbb{E}[\sum_t Y x(t-1) (R - \bar{R})]$ / central FD of $\partial \mathbb{E}[R] / \partial w$ | 1.001; escape-noise form per step 0.22–0.29, with the 20-ms pre trace 1.5–2.0 |
+| H3 eligibility as computed (`python -m mapstdp.tdstdp`, h4) | one actor neuron, two Bernoulli inputs, `block_learn_ck_fast` driven as the runner drives it, $\tau_z \to \infty$, $\tau_q \to 0$ (the plain sum), $10^5$–$1.5 \times 10^5$ trajectories | per-input ratio to central FD of $\partial \mathbb{E}[R] / \partial W_j$ | 1.003, 1.005 (seed 11); 0.997, 1.009 (seed 3) |
 | LIF engine (`python -m mapstdp.lif`) | single neuron, $\sigma_V = 0.2 \theta$, 1.3–29 Hz; frozen 3 × 10 network, 16 heads, 3 s, common random numbers; v4 networks | Siegert (11c) rate and gain vs simulation; counter (11b) vs weight-scaled derivative: correlation, ratio; vs finite removal: correlation, ratio; pair counts $E_{ij} / (r_i w)$; max Re eig of $\hat{\Lambda}^K$ | 0.998–1.008, 0.993–1.007; 0.945, 1.04; 0.940, 1.54; 0.99; 0.59–0.64 |
 | QIF engine (`python -m mapstdp.qif`) | frozen CartPole-sized W, 32 heads, 300 frames, then 20 frames with common random numbers, 40 synapses removed, 20 neurons differentiated | counter (11b) vs finite removal: correlation, sum ratio; noise-instrument gain vs finite-difference f–I: correlation, ratio; max Re eig of $\hat{\Lambda}^K$ | 0.89, 1.04; 0.93, 1.01; 0.87 |
 
@@ -586,6 +597,7 @@ and the second term is a column rescaling. Since $\mathbb{E}[c^{tot}_{ij}] = T_f
 - Delvenne, J.-C., Yaliraki, S. N., & Barahona, M. (2010). Stability of graph communities across time scales. *PNAS*, 107(29), 12755–12760.
 - Engelhard, B., Finkelstein, J., Cox, J., et al. (2019). Specialized coding of sensory, motor and cognitive variables in VTA dopamine neurons. *Nature*, 570, 509–513.
 - Feller, W. (1968). *An Introduction to Probability Theory and Its Applications*, Vol. 1 (3rd ed.). Wiley.
+- Fiete, I. R., & Seung, H. S. (2006). Gradient learning in spiking neural networks by dynamic perturbation of conductances. *Physical Review Letters*, 97(4), 048104.
 - Foster, D. J., Morris, R. G. M., & Dayan, P. (2000). A model of hippocampally dependent navigation, using the temporal difference learning rule. *Hippocampus*, 10(1), 1–16.
 - Frank, M. J. (2006). Hold your horses: a dynamic computational role for the subthalamic nucleus in decision making. *Neural Networks*, 19(8), 1120–1136.
 - Frémaux, N., Sprekeler, H., & Gerstner, W. (2010). Functional requirements for reward-modulated spike-timing-dependent plasticity. *Journal of Neuroscience*, 30(40), 13326–13337.
@@ -609,6 +621,7 @@ and the second term is a column rescaling. Since $\mathbb{E}[c^{tot}_{ij}] = T_f
 - Ozeki, H., Finn, I. M., Schaffer, E. S., Miller, K. D., & Ferster, D. (2009). Inhibitory stabilization of the cortical network underlies visual surround suppression. *Neuron*, 62(4), 578–592.
 - Pernice, V., Staude, B., Cardanobile, S., & Rotter, S. (2011). How structure determines correlations in neuronal networks. *PLoS Computational Biology*, 7(5), e1002059.
 - Petreanu, L., Mao, T., Sternson, S. M., & Svoboda, K. (2009). The subcellular organization of neocortical excitatory connections. *Nature*, 457, 1142–1145.
+- Pfister, J.-P., Toyoizumi, T., Barber, D., & Gerstner, W. (2006). Optimal spike-timing-dependent plasticity for precise action potential firing in supervised learning. *Neural Computation*, 18(6), 1318–1348.
 - Plaçais, P.-Y., & Preat, T. (2013). To favor survival under food shortage, the brain disables costly memory. *Science*, 339(6118), 440–442.
 - Redgrave, P., Prescott, T. J., & Gurney, K. (1999). The basal ganglia: a vertebrate solution to the selection problem? *Neuroscience*, 89(4), 1009–1023.
 - Rosvall, M., & Bergstrom, C. T. (2008). Maps of random walks on complex networks reveal community structure. *PNAS*, 105(4), 1118–1123.

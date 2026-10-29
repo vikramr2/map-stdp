@@ -2,6 +2,30 @@
 
 ## 2026-10-29
 
+### Result: surrogate re-pilot of the race readout; no variant passes the gates on both tasks (iteration 016 §18)
+
+- 240/240 dev runs (seeds 20–29). CartPole: every stabilised race arm (rate term, β re-probe, both) solves 10/10 and is +23 to +41 AUC above CK's base, nine of twelve CIs above zero, with fewer actor spikes to the decision (13–27 vs 36): the first race result above the published backbone. Acrobot: the rate term holds the mean rate and collapses 4–9/10 runs (silent columns under a pinned mean, the neuroscientist's issue 3); the β re-probe fails the rate gate (97–110 Hz). The first pilot's structural signal on CartPole (+57) does not survive the fixes (−3 / +18 / −2): it was carried by the drift. Nothing changed; the score pilot (§20) is next.
+
+### Added: `--credit {hazard,noise}`, the per-neuron spike score as the race readout's credit (iteration 016 §20; derivation §8.1 Proposal, Eq. 13, Appendix A H1–H3)
+
+- `mapstdp/lif.py`: the kernel exports the pre-noise membrane and the noise draw per ms behind `score=True` (no extra draw; default path bit-identical); `post_scores` (hazard form, clipped at h = 1e-3; noise form, the exact observed-membrane score); self-check (h). `mapstdp/tdstdp.py`: `simulate_nlif(score=)`; self-check h4, the eligibility as the learner computes it vs finite differences (ratios 0.997–1.009).
+- `experiments/tdstdp.py`: `Config.credit`, CLI `--credit`, tokens `sch`/`scn`; two learner calls per block under a score credit (critic rows unchanged; actor E rows with Y as the post factor and **x(t−1)** as the pre factor, truncated at the bound, no entropy term); the rank-one rate term with its effective step held (c_t η_a_ref/η_a); R's `hs` from the column's summed score with G = 1/τ_eff on the task path; monitors `score_abs_mean`, `score_clip_frac`, `race_entropy` (`race_log`). Decision: the pre factor is x(t−1), not the 20-ms pre trace, which over-counts the gradient 1.7–1.9× on the toy. 71 tests, golden unchanged, default path fingerprint-identical to `4a74319`.
+- Docs: derivation §8.1 Proposal paragraph with Eq. 13 and Appendix A rows H1–H3; references Fiete & Seung 2006, Pfister et al. 2006; recipe doc rows to impl; 016 §20 implementation record.
+
+### Finished: study `hybrid-columns-3-ck` (iteration 016 §19)
+
+- 60/60 runs, 2.9 h, none failed. Against CK's own readout at the matched start (same seeds as `hybrid-columns-3`): LunarLander columns **worse** by 22–25 last-100 (Holm ≤ 1e-4) and the normalised base worse by 33 (CK's base reaches 62.3, the normalised 30.1): §17's LunarLander gain was a partial recovery of the normalisation's own loss. CartPole and Acrobot: the normalised base level with CK's; regimes non-inferior or inconclusive, never significantly worse at n = 20; Acrobot last-100 (secondary) better in every normalised arm (+9 to +18). Closes the softmax branch of the hybrid. Results in `../map-stdp-hc3ck/reports/hybrid-columns-3-ck/`, uncommitted on branch `hybrid-columns-3-ck-study`.
+- Surrogate re-pilot (§18) launched 15:20 EDT from a detached worktree `../map-stdp-rc` at `4a74319` (the committed code, isolated from the score-credit edits in the main checkout), 60 workers.
+
+### Added: `docs/columns-recipe.md`, the insertion recipe (user decision 2026-10-29), with a pointer in SPEC §11
+
+- Current-state recipe for converting a feed-forward spiking actor into recurrent action columns on the TD-STDP backbone: columns and loop-gain calibration, the race readout, the spike-score credit (spec), the rate term, structure control, what is not covered, the studies. Status tags as `model.md`. Updated as the score credit lands and the Stage B pilot and study report.
+
+### Decided: Stage B reframed as the insertion recipe; the spike score replaces the rate surrogate as the race's credit (iteration 016 §20; user decision, two expert reviews)
+
+- Lesson: the hybrid works when the walk makes the decision (v4 vs §17/§19: the softmax hides structure). Stage B = columns + race readout + **per-neuron spike score as the credit** (`--credit noise` headline, the exact observed-membrane score, within 2 % of finite differences; `--credit hazard` secondary, the escape-noise score at the realised membrane, biased 0.2–0.3× for this neuron) + CK's rate term (rank-one, no per-synapse state, effective step held) + structure control; no entropy bonus; realised race entropy gated; truncation at the bound; E actor posts only; R credited at the module level (per-synapse version a Proposal). Recipe doc `docs/columns-recipe.md` to follow. Implementation by the snn-expert in progress.
+- Surrogate re-pilot (§18) unchanged, runs as the stopgap comparison.
+
 ### Finished: study `hybrid-columns-4` (iteration 016 §19)
 
 - 200/200 runs, 14 min, none failed. Against the normalised base all three regimes are non-inferior at n = 40 (CIs −22/−14/−17 to +4/+10/+10), settling §17's inconclusives. Against the published backbone (`base_ck`) implicit columns are **worse** (−14.7 AUC [−25.7, −3.9], Holm 0.041; the one failed expectation), learned and sealed columns non-inferior, the normalised base non-inferior (−5.7 [−18.6, +6.6]). Regimes do not differ. Post-solve actor-rate decay (→ 4–6 Hz) in every normalised arm, not in `base_ck`. Results in `../map-stdp-hc4/reports/hybrid-columns-4/`, uncommitted on branch `hybrid-columns-4-study`. `hybrid-columns-3-ck` launched 12:20 EDT.

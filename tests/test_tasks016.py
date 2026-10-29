@@ -1,8 +1,11 @@
 """Iteration 016: the TD-STDP backbone on Acrobot and Taxi (experiments.tdstdp PRESETS by pre-set rules): the one-hot
 encoder, the presets' sizes, a short closed loop with recurrent columns, k from CartPole's BindsNET rate, the r_scale
 rule and the hybrid-columns-2 study declaration; the race readout of §14.1 Stage B (the decision, the theta rule, the
-surrogate's gradient, closed loops, calibrate_race, tokens)."""
+surrogate's gradient, closed loops, calibrate_race, tokens); the score credit of §20 Stage B' (lif.post_scores, the
+default path's lock, the truncation at the bound, the critic rows' identity, the rank-1 rate term, R's credit,
+tokens)."""
 import dataclasses
+import hashlib
 
 import gymnasium as gym
 import numpy as np
@@ -10,6 +13,7 @@ import pytest
 
 from experiments import report
 from experiments import tdstdp as ex
+from mapstdp import lif
 
 
 def test_onehot_encoder():
@@ -413,3 +417,225 @@ def test_race_reprobe(monkeypatch, tmp_path):
     ex.calibrate_race(base)
     ref = ex.CKRunner(dataclasses.replace(base, adam=False, sgd=False, block=ex.MS), rng_seed=ex.CAL_SEED, frozen=True)
     assert seen == [(ref.rng.bit_generator.state, 0.0, ex.MS, True)]
+
+
+_SC = dict(seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20, fast=True, sgd=True, adam=False, c_t=5e-4)
+# the default path's fingerprints (test_credit_default_path) at commit 4a74319, before --credit existed: the learner's
+# inputs (raster, P, delta, c, kap, signs) over 20 windows, W, and the rng / nrng states. Regenerate (print the
+# fingerprints) only for an intended change of the race or softmax path, and say so in the CHANGELOG.
+_LOCK = {"race": {"inputs": "c040f0a8b244eb50", "W": "0e3a63e3f786d10c", "rng": 176107796947934727478485008267928337156,
+                  "nrng": 203759873000756180637601557732678366663, "n": 20},
+         "softmax": {"inputs": "fd4ebd1b9474826f", "W": "3b94ac7a1ac18b07",
+                     "rng": 157346277774273280172225960227273939189, "nrng": 203759873000756180637601557732678366663,
+                     "n": 20}}
+
+
+def _spy_fingerprint(monkeypatch, cfg, ticks=20):
+    cap, orig = [], ex.td.block_learn_ck_fast
+
+    def spy(z, q, P, X, d, c, kap, lay, *a):
+        cap.append(hashlib.sha256(np.ascontiguousarray(X).tobytes() + np.ascontiguousarray(P).tobytes()
+                                  + np.ascontiguousarray(d).tobytes() + np.ascontiguousarray(c).tobytes()
+                                  + np.ascontiguousarray(kap).tobytes() + lay.sign.tobytes()).hexdigest())
+        return orig(z, q, P, X, d, c, kap, lay, *a)
+    monkeypatch.setattr(ex.td, "block_learn_ck_fast", spy)
+    r = ex.CKRunner(cfg)
+    for _ in range(ticks):
+        r.tick()
+    return dict(inputs=hashlib.sha256("".join(cap).encode()).hexdigest()[:16],
+                W=hashlib.sha256(r.W.tobytes()).hexdigest()[:16], rng=r.rng.bit_generator.state["state"]["state"],
+                nrng=r.nrng.bit_generator.state["state"]["state"], n=len(cap))
+
+
+def test_post_scores():
+    """lif.post_scores on a frozen random-input run: Y and h are 0 exactly on the refractory steps (the NaN mask of M,
+    nref steps after each spike), the hazard score's mean over active steps is 0 within 4 s.e. (both kernels), the
+    noise score's silent-step value is g / sig_n for Gaussian noise, and the self-check (finite differences of the
+    one-neuron toy) passes at a reduced size."""
+    for kern in ("nbf", "nb"):
+        p = dataclasses.replace(lif.LIFParams(), **lif.DT1R, kernel=kern)
+        rng = np.random.default_rng(5)
+        k, H, N = 1500, 6, 10
+        st = lif.init_state(N, H, p)
+        st["V"] = np.full((H, N), p.mu_bg)
+        Ix = (1 - p.a) * rng.uniform(0.4, 1.1, N) + rng.normal(0, 0.02, (k, H, N))
+        S, _, _, M, GN = lif.simulate_ext(Ix, np.zeros((0, 0)), [], st, rng, p, score=True)
+        nan = np.isnan(M)
+        ref = np.zeros_like(S)  # the refractory steps: nref after each spike
+        for s in range(1, p.nref + 1):
+            ref[s:] |= S[:-s]
+        assert np.array_equal(nan, ref) and nan.any() and not nan[S].any()
+        for kind in ("hazard", "noise"):
+            Y, h = lif.post_scores(S, M, GN, p, kind)
+            assert (Y[nan] == 0).all() and (h[nan] == 0).all() and np.isfinite(Y).all() and (0 <= h[~nan]).all()
+            assert (h[~nan] <= 1).all() and h[S].min() > 0 and (Y[S] > 0).all()
+        Y, h = lif.post_scores(S, M, GN, p, "hazard")
+        se = Y[~nan].std() / np.sqrt((~nan).sum())
+        assert abs(Y[~nan].mean()) < 4 * se and h.sum() == pytest.approx(S.sum(), rel=0.1)
+        assert (Y[~nan] * (1 - 2 * S[~nan]) <= 0).all()  # sign: positive on spikes, negative on silence
+        if kern == "nb":
+            Yn, _ = lif.post_scores(S, M, GN, p, "noise")
+            sil = ~nan & ~S
+            assert np.allclose(Yn[sil], GN[sil] / (p.sigma_V * np.sqrt(1 - p.a ** 2)))
+    out = lif._score_check(H=40000, verbose=False)
+    assert abs(out["est"] / out["fd"] - 1) < 0.05 and out["psi_max"] > 10
+
+
+def test_score_eligibility_rule():
+    """The rule the code applies (tdstdp self-check (h4)): block_learn_ck_fast driven with Y and x(t - 1) as learn_block
+    drives it gives, per input, d E[count] / dW within 5% of central finite differences (Appendix A)."""
+    r = ex.td.check_score_eligibility(H=100000, seed=3)
+    assert (np.abs(r["ratio"] - 1) < 0.05).all() and r["count"] > 0.3, r
+
+
+def test_credit_default_path(monkeypatch):
+    """credit='surrogate' (the default) is today's path: the learner's inputs over 20 windows, W and the rng / nrng
+    states of a race runner (with the rate term) and of a softmax runner are the fingerprints recorded before --credit
+    existed (_LOCK)."""
+    assert ex.Config().credit == "surrogate"
+    got = {"race": _spy_fingerprint(monkeypatch, ex.preset("Acrobot", readout="race", race_beta=6.0, **_SC)),
+           "softmax": _spy_fingerprint(monkeypatch, ex.preset("Acrobot", **_SC))}
+    assert got == _LOCK, got
+
+
+def test_credit_live_mask():
+    """race_block records, per copy, whether a decision was pending before the block and the bound ms within it, for
+    any block size; live_mask counts the ms up to and including the bound, the whole block without a bound, nothing
+    for a copy decided in an earlier block; pend persists until the resample."""
+    r = ex.CKRunner(ex.preset("LunarLander", heads=3, readout="race", race_beta=4.0, credit="noise",
+                              **dict(_SC, s_in=0.1)))
+    nc, n_ae, L = r.lay.n_crit, r.cfg.n_ae, 5
+    X = np.zeros((L, 3, r.lay.n_post), bool)
+    X[2:, 0, nc:nc + n_ae] = True  # copy 0: column 0 at 32 per ms from ms 2 (theta 51: bound at ms 3)
+    r.pend[1] = 2  # copy 1: decided in an earlier block
+    r.race_block(X)
+    assert r.was.tolist() == [True, False, True] and r.bnd.tolist() == [3, -1, -1] and r.pend.tolist() == [0, 2, -1]
+    m = r.live_mask(L)
+    assert m.shape == (L, 3) and m[:, 0].tolist() == [True] * 4 + [False] and not m[:, 1].any() and m[:, 2].all()
+    r.race_block(np.zeros((L, 3, r.lay.n_post), bool))  # the next block: copy 0's decision persists
+    assert r.was.tolist() == [False, False, True] and not r.live_mask(L)[:, :2].any() and r.live_mask(L)[:, 2].all()
+
+
+def test_credit_score_run(monkeypatch):
+    """A 20-window credit='noise' run against the surrogate run on a held observation (LunarLander, I posts present):
+    the critic rows of W are bit-identical, the actor I rows stay at their init, the actor E rows differ; the learner
+    is called twice per block, the critic rows with (X, P) as before and the actor rows with Y (float, 0 after each
+    copy's bound ms and on I posts) paired with x(t - 1) (a 0/1 input, not the P trace), c = 1 on E posts, 0 on I
+    posts, no sign and kap = 0; the rank-1 rate term on a block equals -c_t sum_t (rho_bar - rho_hat) rho_i P_j; the
+    checkpoint carries the bin monitors. (Tie draws are pinned: they come from the main rng.)"""
+    cfg = ex.preset("LunarLander", heads=2, readout="race", race_beta=4.0, c_e=0.0, **dict(_SC, s_in=0.1))
+    monkeypatch.setattr(ex.CKRunner, "_leader", lambda self, cnt: int(np.argmax(cnt)))  # a tie's draw would shift
+    runs, orig = {}, ex.td.block_learn_ck_fast  # the input stream of one run and not the other
+    for credit in ("surrogate", "noise"):
+        cap = []
+
+        def spy(z, q, P, X, d, c, kap, lay, *a, cap=cap, orig=orig):
+            cap.append((X.copy(), np.array(c), np.array(kap), lay.sign.copy(), runs["r"].was.copy(),
+                        runs["r"].bnd.copy(), P.copy(), lay.n_crit))
+            return orig(z, q, P, X, d, c, kap, lay, *a)
+        monkeypatch.setattr(ex.td, "block_learn_ck_fast", spy)
+        r = runs["r"] = ex.CKRunner(dataclasses.replace(cfg, credit=credit))
+        r.hold = True
+        W0 = r.W.copy()
+        for _ in range(20):
+            r.tick()
+        runs[credit] = (W0, r.W.copy(), cap, r)
+    nc, ap, cE = runs["r"].lay.n_crit, runs["r"].apost, runs["r"].cE > 0
+    (W0s, Ws, caps, rs), (W0n, Wn, capn, rn) = runs["surrogate"], runs["noise"]
+    assert np.array_equal(W0s, W0n) and np.array_equal(Ws[:nc], Wn[:nc]) and not np.array_equal(Ws[nc:], Wn[nc:])
+    assert np.array_equal(Wn[ap][~cE], W0n[ap][~cE]) and not np.array_equal(Ws[ap][~cE], W0s[ap][~cE])
+    assert (Wn[ap][cE] != W0n[ap][cE]).any() and (Wn[ap][cE] != Ws[ap][cE]).any()
+    assert len(capn) == 40 and len(caps) == 20 and caps[0][0].dtype == bool
+    capc, capa = capn[0::2], capn[1::2]  # per block: the critic call, then the actor call
+    ia = ap - nc
+    for (Xc, cc, _kc, sc, _, _, Pc, ncc), (X, c, kap, sign, was, bnd, P, nca) in zip(capc, capa):
+        L = len(X)
+        assert ncc == nc and nca == 0 and Xc.dtype == bool and Xc.shape[-1] == nc and cc.shape[-1] == 0
+        assert np.array_equal(sc, rs.lay.sign[:nc]) and X.dtype == float and (X[..., ia][..., ~cE] == 0).all()
+        assert (c[..., :len(cE)] == cE).all() and not kap.any() and (sign == 1).all() and X.shape[-1] == len(ia)
+        assert np.isin(P, (0.0, 1.0)).all() and P.any() and not np.isin(Pc, (0.0, 1.0)).all()  # x(t - 1), not P
+        assert np.allclose(P[2:], Pc[1:-1] - np.exp(-1 / cfg.tau_p) * Pc[:-2])  # P(t) = a P(t-1) + x(t): the
+        # actor call's P argument at ms t is x(t - 1) = P(t - 1) - a P(t - 2)
+        live = was[None] & ((bnd[None] < 0) | (np.arange(L)[:, None] <= bnd[None]))
+        assert not X[..., ia][~live].any() and (X[..., ia][live][:, cE] != 0).any()
+    for _X, c, kap, sign, _, _, _, ncs in caps[:3]:
+        assert np.array_equal(sign, rs.lay.sign) and (c != 1).any() and kap.any() and ncs == nc  # as before
+    assert rn.rdec[0] > 0 and rn.c_e == 0.0 and rs.c_e == 0.0
+    # the rank-1 rate term: one window at c_t = 1 against c_t = 0 from the same state, R from td.rates
+    Rc = []
+    monkeypatch.setattr(ex.td, "rates", lambda *a, _o=ex.td.rates: Rc.append(_o(*a)) or Rc[-1])
+    Ws = {}
+    for ct in (0.0, 1.0):
+        q = ex.CKRunner(dataclasses.replace(cfg, credit="noise", c_t=ct))
+        q.hold = True
+        Rc.clear()
+        q.tick()
+        Ws[ct] = q.W.copy()
+    dW = Ws[1.0] - Ws[0.0]
+    R = Rc[-1]  # the c_t = 1 run's rates (same draws as c_t = 0: identical rasters)
+    q = ex.CKRunner(dataclasses.replace(cfg, credit="noise", c_t=1.0))  # the same first window's inputs
+    q.hold = True
+    f = q.phi(q.obs)
+    x, _ = ex.td.draw(f, 20, q.lay.n_post, q.rng)
+    P = ex.td.pre_trace(q.P, x, cfg.tau_p)
+    rdev = R[..., nc:][..., q.lay.ae].mean(-1) - q.rho_hat
+    exp = -cfg.eta_a / q.H * np.einsum("lhi,lhj->ij", rdev[..., None] * R[..., ap] * q.cE, P)
+    assert np.allclose(dW[ap], exp, atol=1e-12) and np.abs(exp).max() > 0 and not dW[:nc].any()
+    assert not dW[ap][~cE].any()
+    # monitors and the checkpoint
+    row = rn.score_monitors(7)
+    assert row["score_abs_mean"] > 0 and 0 <= row["score_clip_frac"] < 0.05 and 0 <= row["race_entropy"] <= np.log(4)
+    assert rn.slog["episode"] == [7] and ex.result_ck(rn.cfg, rn, 0.0, None, 0)["race_log"] == rn.slog
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        rn.save(d + "/c.npz", 0.0, 0)
+        q = ex.CKRunner(rn.cfg)
+        q.load(d + "/c.npz")
+        assert q.slog == rn.slog
+
+
+def test_credit_rec_hs(monkeypatch):
+    """R's credit under the score: hs per window is the column's summed Y over its E posts up to the bound / n_ae
+    (latents 0), used at the next window (credit pairs it with the previous window's counter), and credit receives
+    G = 1 / tau_eff in place of the kernel's gain; calibrate_rec runs the frozen runner with the arm's credit."""
+    cfg = ex.preset("Acrobot", readout="race", race_beta=6.0, credit="hazard", rec="cols", eta_rec=1.0, lam_rec=1.0,
+                    **_SC)
+    r = ex.CKRunner(cfg)
+    seen, cap = [], []
+    orig_c, orig_l = r.hr.credit, ex.td.block_learn_ck_fast
+    monkeypatch.setattr(r.hr, "credit", lambda s, G, n, decay: seen.append((s.copy(), G.copy())) or orig_c(s, G, n,
+                                                                                                             decay))
+    monkeypatch.setattr(ex.td, "block_learn_ck_fast", lambda z, q, P, X, *a: cap.append(X.copy()) or orig_l(z, q, P,
+                                                                                                             X, *a))
+    for _ in range(3):
+        r.tick()
+    K, ia, n_ae = r.K, r.apost - r.lay.n_crit, cfg.n_ae
+    cap = [X for X in cap if X.dtype == float]  # the actor calls (the critic calls pass the bool raster)
+    assert len(seen) == 3 and len(cap) == 3 and np.allclose(seen[0][1], 1 / r.hr.p.tau_eff) and not seen[0][0].any()
+    for t in (1, 2):  # window t's credit uses window t - 1's summed scores
+        hs = np.einsum("lhi,ki->hk", cap[t - 1][..., ia], r.Mcnt) / n_ae
+        assert np.allclose(seen[t][0][:, :K], hs) and hs.any()
+    assert np.allclose(r.hs[:, :K], np.einsum("lhi,ki->hk", cap[2][..., ia], r.Mcnt) / n_ae)
+    s = ex.CKRunner(dataclasses.replace(cfg, credit="surrogate"))  # the surrogate's hs as before: from the window's
+    s.tick()  # (action, p~, rates) at the start of the next tick
+    a0, p0, rk0 = s.action.copy(), s.p.copy(), s.prk.copy()
+    s.tick()
+    assert np.allclose(s.hs[:, :K], cfg.alpha_a * (np.eye(K)[a0] - p0) * s.race_factor(rk0) / n_ae)
+    eta, lam, rec = ex.calibrate_rec(dataclasses.replace(cfg, eta_rec=0.0, lam_rec=0.0))
+    assert np.isfinite([eta, lam]).all() and eta > 0 and rec["rms_u"] > 0
+
+
+def test_credit_tokens_and_asserts():
+    cfg = ex.preset("Acrobot", readout="race", race_beta=6.0, **_SC)
+    assert ex.tokens(dataclasses.replace(cfg, credit="hazard"))[-1] == "sch"
+    assert ex.tokens(dataclasses.replace(cfg, credit="noise", rec="cols"))[-4:] == ["rb6", "scn", "cols", "xr0.3"]
+    assert not {"sch", "scn"} & set(ex.tokens(cfg)) and ex.name(dataclasses.replace(cfg, credit="noise")).endswith(
+        "_race_rb6_scn_s0")
+    ex.CKRunner(dataclasses.replace(cfg, credit="noise"))
+    for bad in (dict(credit="noise", readout="softmax", race_beta=0.0), dict(credit="hazard", sgd=False),
+                dict(credit="noise", race_reprobe=50), dict(credit="score")):
+        with pytest.raises((AssertionError, ValueError)):
+            ex.CKRunner(dataclasses.replace(cfg, **bad))
+    ex.CKRunner(dataclasses.replace(cfg, credit="hazard", sgd=False), frozen=True)  # the calibration probes
+    with pytest.raises(AssertionError):
+        ex.CKRunner(dataclasses.replace(cfg, credit="noise", engine="lif", rate_target=0.0, s_in=0.0))

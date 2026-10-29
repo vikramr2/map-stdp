@@ -143,14 +143,61 @@ def simulate_bindsnet(W, x_prev, x, v):
     return X, v
 
 
-def simulate_nlif(W, x_prev, x, st, rng, p, s_in, Bt=None, ridx=()):
+def simulate_nlif(W, x_prev, x, st, rng, p, s_in, Bt=None, ridx=(), score=False):
     """Noisy-LIF engine (experiments.tdstdp --engine nlif): lif.simulate_ext with p.dt = 1 ms = one CK step. W in mV
     (as simulate_bindsnet); feed-forward current Iext(t) = s_in x(t-1) W^T / THETA_L in threshold units (s_in = 1: a
     BindsNET spike's mV over its 13 mV gap), x(-1) = x_prev (H x n_in); leak, background noise and refractory period
     of p on every post; recurrent kicks Bt on the posts ridx (none by default). st: lif state (V, ref, z), mutated and
-    carried across blocks. One rng draw. Returns (X, xsum, xsq): X is L x H x n_post bool."""
+    carried across blocks. One rng draw. Returns (X, xsum, xsq): X is L x H x n_post bool; with score=True also the
+    kernel's (M, GN) for lif.post_scores (the score credit of experiments.tdstdp; same draws)."""
     Iext = (s_in / THETA_L) * (np.concatenate([x_prev[None], x[:-1]]) @ W.T)
-    return lif.simulate_ext(Iext, np.zeros((0, 0)) if Bt is None else Bt, ridx, st, rng, p)
+    return lif.simulate_ext(Iext, np.zeros((0, 0)) if Bt is None else Bt, ridx, st, rng, p, score)
+
+
+def check_score_eligibility(H=150000, L=20, seed=11, s_in=0.5):
+    """Self-check (h4; experiments.tdstdp --credit, derivation Appendix A): the actor rows' score eligibility, as
+    CKRunner.learn_block builds it, is the REINFORCE estimate of d E[R] / dW. One actor E post (Layout(2, 0, 0, 1, 0,
+    1)), two Bernoulli input units (one shared spike train over H trajectories), the nlif kernel at the DT1R point with
+    W (mV) at a free-membrane mean of 1.3, R = the L-ms spike count. block_learn_ck_fast is driven exactly as the
+    runner drives it: the 'noise' score Y (lif.post_scores) as the post factor, the shifted input x(t - 1) (the input
+    the kernel paired with step t) as the P argument, c = 1, kap = 0, over an L + 1 ms block whose last ms has Y = 0,
+    with delta = R_h - mean R at that last ms and tau_z = 1e9 (a = 1), tau_q = 1e-2 (b = 0): then q(t) = z(t - 1) /
+    tau_q and G / H = mean_h (R_h - Rbar) sum_(s<L) Y_h(s) x(s - 1) / (tau_z tau_q), the plain sum of the pairing
+    (the run's tau_z = 20, tau_q = 40 weight it in time, CK's backbone; the pairing is what is checked). The kernel's
+    derivative is d m(t) / d W_j = (s_in / THETA_L) x_j(t - 1), so (s_in / THETA_L) tau_z tau_q G / H is compared per
+    input to the central finite difference of E[R] in W_j with common random numbers (one noise seed). Returns
+    dict(est, fd, fd_se, ratio) over the two inputs."""
+    p = dataclasses.replace(lif.LIFParams(), **lif.DT1R)
+    lay = Layout(2, 0, 0, 1, 0, 1)
+    rng = np.random.default_rng(seed)
+    f = np.array([0.2, 0.3])
+    x = np.broadcast_to((rng.random((L, 1, 2)) < f).astype(float), (L, H, 2)).copy()
+    x_prev = np.zeros((H, 2))
+    W = np.array([[1.0, 0.6]])
+    W = W * (1.3 - p.mu_bg) * (1 - p.a) * THETA_L / s_in / float((W @ f)[0])  # free-membrane mean 1.3
+    V0 = np.minimum(p.mu_bg + p.sigma_V * rng.standard_normal((H, 1)), p.th - 1e-3)
+
+    def run(Wm):
+        st = lif.init_state(1, H, p)
+        st["V"] = V0.copy()
+        return simulate_nlif(Wm, x_prev, x, st, np.random.default_rng(seed + 1), p, s_in, score=True)
+    S, _, _, M, GN = run(W)
+    R = S.sum((0, 2)).astype(float)
+    Y, _ = lif.post_scores(S, M, GN, p, "noise")
+    tau_z, tau_q = 1e9, 1e-2
+    Xl = np.concatenate([Y, np.zeros((1, H, 1))])  # L + 1 ms: the last one carries no score
+    Pl = np.concatenate([x_prev[None], x])  # x(t - 1) for t = 0..L
+    d = np.zeros((L + 1, H))
+    d[L] = R - R.mean()
+    G = block_learn_ck_fast(np.zeros((H, 1, 2)), np.zeros((H, 1, 2)), Pl, Xl, d, np.ones((L + 1, H, 1)),
+                            np.zeros((L + 1, H, 1)), lay, tau_z, tau_q)[0]
+    est = (s_in / THETA_L) * tau_z * tau_q * G[0] / H
+    fd, se = np.zeros(2), np.zeros(2)
+    for j in range(2):
+        dw = 0.02 * W[0, j]
+        Rp, Rm = (run(W + dw * np.eye(1, 2, j))[0].sum((0, 2)), run(W - dw * np.eye(1, 2, j))[0].sum((0, 2)))
+        fd[j], se[j] = (Rp.mean() - Rm.mean()) / (2 * dw), np.std(Rp - Rm) / (2 * dw) / np.sqrt(H)
+    return dict(est=est, fd=fd, fd_se=se, ratio=est / fd, count=float(R.mean()))
 
 
 def check_bindsnet_limit(seed=5, L=400, B=20):
@@ -874,4 +921,10 @@ if __name__ == "__main__":
           f"{r3['corr']:.3f} ratio c / marginal {r3['ratio']:.3f} | corr {r3['corr_rem']:.3f} ratio c / removal "
           f"{r3['ratio_rem']:.3f}; replay mismatch {r3['mismatch']}")
     assert r3["mismatch"] == 0 and r3["corr"] >= 0.9 and 0.85 < r3["ratio"] < 1.2, r3
+    # (h4) the score credit's eligibility (Y paired with x(t - 1)) against finite differences of E[count]
+    r4 = check_score_eligibility()
+    print(f"(h4) score eligibility (1 actor E post, 2 inputs, nlif DT1R, mean count {r4['count']:.2f}): "
+          f"(s_in / theta_L) sum_t Y x(t-1) (R - Rbar) = {np.round(r4['est'], 4)} vs finite differences "
+          f"{np.round(r4['fd'], 4)} +- {np.round(r4['fd_se'], 4)}; ratio {np.round(r4['ratio'], 3)}")
+    assert (np.abs(r4["ratio"] - 1) < 0.05).all(), r4
     print("tdstdp self-check ok")

@@ -373,11 +373,17 @@ def _simulate_nb(Bt, v, st, k, rng, p):
     return S, xsum, xsq, None, None
 
 
-def _kernel_ext_py(Iext, Bt, ridx, V, ref, z, k, seed, a, drift, sig_n, th, vr, nref, S, xsum, xsq, fast):
+_NO_SCORE = np.empty((1, 1, 1))  # _kernel_ext_py: the score outputs when score=False (never written)
+
+
+def _kernel_ext_py(Iext, Bt, ridx, V, ref, z, k, seed, a, drift, sig_n, th, vr, nref, S, xsum, xsq, fast, score=False,
+                   M=_NO_SCORE, GN=_NO_SCORE):
     """_kernel_py with a given external current instead of the teleport pulses: neuron i of head h gets Iext[t, h, i]
     (signed, any units of th) at step t, plus the recurrent kicks Bt[q, r] from spikes of ridx[q] at step t - 1 onto
     ridx[r] (an index set; empty = none). Same noise (Gaussian, or fast=True Irwin-Hall(4) from xorshift64*), leak,
-    threshold, reset and refractory clamp. Mutates V, ref, z, S, xsum, xsq."""
+    threshold, reset and refractory clamp. Mutates V, ref, z, S, xsum, xsq. score=True (post_scores): also writes
+    M[t, h, i] = the pre-noise membrane m = a V + drift + I (NaN while refractory: the inactive mask) and GN[t, h, i] =
+    the standardised noise draw g of the step (V' = m + g sig_n); no extra draw, the default path is unchanged."""
     np.random.seed(seed)
     xs = np.uint64(seed) * np.uint64(0x9E3779B97F4A7C15) | np.uint64(1)
     H, N = V.shape
@@ -411,8 +417,12 @@ def _kernel_ext_py(Iext, Bt, ridx, V, ref, z, k, seed, a, drift, sig_n, th, vr, 
                     g = ((float(u4) + 2.0) / 65536.0 - 2.0) * 1.7320508075688772  # Irwin-Hall(4), mean 0, var 1
                 else:
                     g = np.random.standard_normal()
-                Vi = V[h, i] * a + drift + xi + g * sig_n
+                m = V[h, i] * a + drift + xi
+                Vi = m + g * sig_n
                 act = ref[h, i] == 0
+                if score:
+                    M[t, h, i] = m if act else np.nan
+                    GN[t, h, i] = g
                 if ref[h, i] > 0:
                     ref[h, i] -= 1
                 if not act:
@@ -429,24 +439,26 @@ def _kernel_ext_py(Iext, Bt, ridx, V, ref, z, k, seed, a, drift, sig_n, th, vr, 
 _kernel_ext_nb = numba.njit(cache=True)(_kernel_ext_py) if numba is not None else None
 
 
-def simulate_ext(Iext, Bt, ridx, st, rng, p):
+def simulate_ext(Iext, Bt, ridx, st, rng, p, score=False):
     """k = len(Iext) steps of H heads from state st (mutated: V, ref, z) driven by the external current Iext (k x H x N,
     signed, units of th; the caller's feed-forward input) plus recurrent kicks Bt (len(ridx) x len(ridx), [pre, post]
     within the index set ridx; pass np.zeros((0, 0)) and an empty ridx for none). Hard threshold only (delta_V = 0).
     Kernel by p.kernel: 'nbf' (numba, fast noise), 'nb' (numba, Gaussian), 'np' (the same loop interpreted, Gaussian;
     the reference). One rng draw (the seed). Returns (S (k, H, N) bool, xsum, xsq (H, N) sums of the per-step input
-    and its square, as _simulate)."""
+    and its square, as _simulate); with score=True also (M, GN), the pre-noise membrane (NaN while refractory) and the
+    standardised noise draw per step (post_scores), from the same draws."""
     assert p.delta_V == 0
     k, H, N = Iext.shape
     S = np.zeros((k, H, N), bool)
     xsum, xsq = np.zeros((H, N)), np.zeros((H, N))
+    M, GN = (np.empty((k, H, N)), np.empty((k, H, N))) if score else (_NO_SCORE, _NO_SCORE)
     seed = int(rng.integers(1 << 31))
     kern = _kernel_ext_nb if _kernel_ext_nb is not None and p.kernel in ("nb", "nbf") else _kernel_ext_py
     with np.errstate(over="ignore"):  # the interpreted xorshift wraps uint64 by design
         kern(np.ascontiguousarray(Iext, float), np.ascontiguousarray(Bt, float), np.asarray(ridx, np.int64), st["V"],
              st["ref"], st["z"], k, seed, p.a, (1 - p.a) * p.mu_bg, p.sigma_V * np.sqrt(1 - p.a ** 2), p.th, p.vr,
-             p.nref, S, xsum, xsq, p.kernel == "nbf")
-    return S, xsum, xsq
+             p.nref, S, xsum, xsq, p.kernel == "nbf", score, M, GN)
+    return (S, xsum, xsq, M, GN) if score else (S, xsum, xsq)
 
 
 def _warmup(Bt, v, st, rng, p):
@@ -541,6 +553,102 @@ def _ih4_cdf(x):
     """CDF of the 'nbf' kernel noise, (U_1 + ... + U_4 - 2) sqrt(3) (Irwin-Hall(4), mean 0, variance 1)."""
     y = np.clip(np.asarray(x, float) / np.sqrt(3) + 2, 0, 4)
     return sum((-1) ** k * comb(4, k) * np.where(y > k, y - k, 0.0) ** 4 for k in range(5)) / 24
+
+
+def _ih4_pdf(x):
+    """Density of the 'nbf' kernel noise (the derivative of _ih4_cdf)."""
+    y = np.clip(np.asarray(x, float) / np.sqrt(3) + 2, 0, 4)
+    return sum((-1) ** k * comb(4, k) * np.where(y > k, y - k, 0.0) ** 3 for k in range(5)) / (6 * np.sqrt(3))
+
+
+def _ih4_dpdf(x):
+    """Derivative of _ih4_pdf."""
+    y = np.clip(np.asarray(x, float) / np.sqrt(3) + 2, 0, 4)
+    return sum((-1) ** k * comb(4, k) * np.where(y > k, y - k, 0.0) ** 2 for k in range(5)) / 6
+
+
+H_CLIP = 1e-3  # post_scores: the hazard score's psi is clipped at its value where the hazard is H_CLIP
+_IH4_C = [(-1) ** k * comb(4, k) for k in range(5)]
+
+
+def _ih4_fused(x, need_df=False):
+    """(F, f, f') of the Irwin-Hall(4) noise from one evaluation of the (y - k)_+ terms (post_scores; the same
+    arithmetic as _ih4_cdf, _ih4_pdf, _ih4_dpdf term by term, so the values are theirs)."""
+    y = np.clip(np.asarray(x, float) / np.sqrt(3) + 2, 0, 4)
+    t = [np.maximum(y - k, 0.0) for k in range(5)]
+    F = sum(c * tk ** 4 for c, tk in zip(_IH4_C, t)) / 24
+    f = sum(c * tk ** 3 for c, tk in zip(_IH4_C, t)) / (6 * np.sqrt(3))
+    return F, f, (sum(c * tk ** 2 for c, tk in zip(_IH4_C, t)) / 6 if need_df else None)
+
+
+def _gauss_fused(x, need_df=False):
+    f = _gauss_pdf(x)
+    return ndtr(x), f, (-x * f if need_df else None)
+
+
+def noise_dist(p):
+    """(F, f, f') of the kernel's standardised noise: Irwin-Hall(4) for p.kernel 'nbf', Gaussian otherwise."""
+    if p.kernel == "nbf":
+        return _ih4_cdf, _ih4_pdf, _ih4_dpdf
+    return ndtr, _gauss_pdf, lambda u: -u * _gauss_pdf(u)
+
+
+def _gauss_pdf(u):
+    return np.exp(-0.5 * np.square(u)) / np.sqrt(2 * np.pi)
+
+
+_PSI_MAX = {}
+
+
+def psi_max(p):
+    """The hazard score's clip: psi = f(z) / (sig_n h (1 - h)) at the z where the hazard h = 1 - F(z) is H_CLIP
+    (cached per kernel and noise scale)."""
+    key = (p.kernel == "nbf", p.sigma_V, p.a, p.th)
+    if key not in _PSI_MAX:
+        F, f, _ = noise_dist(p)
+        sig_n = p.sigma_V * np.sqrt(1 - p.a ** 2)
+        if p.kernel == "nbf":
+            from scipy.optimize import brentq
+            zc = brentq(lambda z: 1 - F(z) - H_CLIP, 0.0, 2 * np.sqrt(3) - 1e-9)
+        else:
+            from scipy.special import ndtri
+            zc = float(ndtri(1 - H_CLIP))
+        _PSI_MAX[key] = float(f(zc) / (sig_n * H_CLIP * (1 - H_CLIP)))
+    return _PSI_MAX[key]
+
+
+def post_scores(S, M, GN, p, kind):
+    """Per-step score of every post's spike or silence with respect to its input current (the derivative of log P of
+    the step given the past, exact for the kernel: the likelihood factorises per step; reset and refractoriness are
+    deterministic given the spike history), from simulate_ext(score=True)'s raster S, pre-noise membrane M (NaN while
+    refractory) and noise draw GN (all L x H x N). With z = (th - m) / sig_n, the hazard h = 1 - F(z) = P(spike | past):
+      kind 'hazard': Y = (S - h) psi, psi = f(z) / (sig_n h (1 - h)), the derivative of log P(S) under the Bernoulli
+        of the step (Pfister et al. 2006's per-neuron score for this noise model); psi is clipped at psi_max(p) (its
+        value at h = H_CLIP) on both branches, so E[Y | past] stays 0;
+      kind 'noise': the observed-membrane score, exact in the finite differences of E[R] (self-check (h)): a spike step
+        f(z) / (sig_n h), an active silent step -f'(g) / (sig_n f(g)) (= g / sig_n for Gaussian noise), no clip.
+    Returns (Y, h), both 0 on refractory steps. Y is a per-post scalar (the post's own membrane and spike), so
+    Y_i P_j is a product of two local factors."""
+    fused = _ih4_fused if p.kernel == "nbf" else _gauss_fused
+    sig_n = p.sigma_V * np.sqrt(1 - p.a ** 2)
+    act = ~np.isnan(M)
+    z = np.where(act, (p.th - M) / sig_n, 0.0)
+    Fz, fz, _ = fused(z)
+    h = np.where(act, np.clip(1 - Fz, 0.0, 1.0), 0.0)  # the IH4 polynomial rounds to 1 +- eps at its edges
+    Sf = S.astype(float)
+    if kind == "hazard":
+        ok = act & (h > 0) & (h < 1)
+        psi = np.minimum(np.where(ok, fz / (sig_n * np.where(ok, h * (1 - h), 1.0)), 0.0), psi_max(p))
+        Y = (Sf - h) * psi
+    elif kind == "noise":
+        spk = S & act
+        _, fg, dfg = fused(GN, need_df=True)
+        sil = act & ~S & (fg > 0)
+        Y = np.where(spk, fz / (sig_n * np.where(h > 0, h, 1.0)), 0.0)
+        Y = np.where(sil, -dfg / (sig_n * np.where(fg > 0, fg, 1.0)), Y)
+    else:
+        raise ValueError(kind)
+    return Y, h
 
 
 def markov_rate(mu, sig_x, p, nbins=400, lo=-1.5):
@@ -844,6 +952,69 @@ def _check_pairs(p, seed=0):
     assert np.allclose(X[t], ref)
 
 
+def _score_check(p=None, H=200000, T=20, seed=7, verbose=True):
+    """Self-check (h) of post_scores (experiments.tdstdp --credit): (i) on a frozen random-input run of both numba
+    kernels, each neuron's summed hazard equals its spike count within the martingale's s.d. (sum h (1 - h)); (ii) on a
+    one-neuron toy (H trajectories of T steps, Bernoulli input spikes through one weight w, the free-membrane mean 1.3
+    at the DT1R point), the 'noise' score's REINFORCE estimate of d E[R] / d w for R = the T-step spike count,
+    sum_t s_t x(t-1) (R - mean R), matches the central finite difference of E[R] with common random numbers within
+    5%; (iii) the 'hazard' score's sum over the toy has zero mean within 4 s.e. (the clip keeps it). Returns the
+    ratios."""
+    p = dataclasses.replace(LIFParams(), **DT1R) if p is None else p
+    out = {}
+    # (i) sum of h vs the spike count per neuron, both kernels
+    for kern in ("nbf", "nb"):
+        pk = dataclasses.replace(p, kernel=kern)
+        rng = np.random.default_rng(seed)
+        N, Hh, k = 12, 8, 2000
+        st = init_state(N, Hh, pk)
+        st["V"] = np.full((Hh, N), pk.mu_bg)
+        Ix = (1 - pk.a) * rng.uniform(0.3, 1.2, N)[None, None, :] + rng.normal(0, 0.02, (k, Hh, N))
+        S, _, _, M, GN = simulate_ext(Ix, np.zeros((0, 0)), [], st, rng, pk, score=True)
+        Y, h = post_scores(S, M, GN, pk, "hazard")
+        n, hs, sd = S.sum((0, 1)), h.sum((0, 1)), np.sqrt((h * (1 - h)).sum((0, 1)))
+        dev = np.abs(n - hs) / sd
+        assert (dev < 4).all() and (n > 50).all(), (kern, n, hs, sd)
+        assert np.isnan(M[S.astype(bool)]).sum() == 0 and (Y[np.isnan(M)] == 0).all() and (h[np.isnan(M)] == 0).all()
+        out[f"h_{kern}"] = float(dev.max())
+        if verbose:
+            print(f"(h) kernel {kern}: sum h vs spike count per neuron, max |dev| {dev.max():.2f} s.d. "
+                  f"(rates {n.min() / (k * Hh * pk.dt):.0f}-{n.max() / (k * Hh * pk.dt):.0f} Hz)")
+    # (ii, iii) the one-neuron toy: three common-random-number runs (w - dw, w, w + dw)
+    rng = np.random.default_rng(seed + 1)
+    frate, mu_free = 0.2, 1.3
+    x = (rng.random(T) < frate).astype(float)
+    w = (mu_free - p.mu_bg) * (1 - p.a) / frate
+    V0 = np.minimum(p.mu_bg + p.sigma_V * rng.standard_normal((H, 1)), p.th - 1e-3)
+    xin = np.r_[0.0, x[:-1]]  # x(t - 1)
+
+    def run(ww):
+        st = init_state(1, H, p)
+        st["V"] = V0.copy()
+        Ix = np.broadcast_to((ww * xin)[:, None, None], (T, H, 1))
+        return simulate_ext(Ix, np.zeros((0, 0)), [], st, np.random.default_rng(seed + 2), p, score=True)
+    dw = 0.02 * w
+    Rp, Rm = run(w + dw)[0].sum((0, 2)), run(w - dw)[0].sum((0, 2))
+    S, _, _, M, GN = run(w)
+    R = S.sum((0, 2)).astype(float)
+    fd, fd_se = (Rp.mean() - Rm.mean()) / (2 * dw), np.std(Rp - Rm) / (2 * dw) / np.sqrt(H)
+    Yn, _ = post_scores(S, M, GN, p, "noise")
+    est = (Yn[:, :, 0] * xin[:, None]).sum(0) * (R - R.mean())
+    Yh, h = post_scores(S, M, GN, p, "hazard")
+    ysum = Yh[:, :, 0].sum(0)
+    out["fd"], out["est"], out["est_se"] = float(fd), float(est.mean()), float(est.std() / np.sqrt(H))
+    out["EY"], out["EY_se"] = float(ysum.mean()), float(ysum.std() / np.sqrt(H))
+    out["psi_max"], out["clip_frac"] = psi_max(p), float((h[S] < H_CLIP).mean())
+    if verbose:
+        print(f"    toy (mu 1.3, {H} trajectories x {T} ms, mean count {R.mean():.2f}): d E[count] / dw by finite "
+              f"differences {fd:.3f} +- {fd_se:.3f}, by the noise score {est.mean():.3f} +- {out['est_se']:.3f} "
+              f"(ratio {est.mean() / fd:.3f}); hazard score: E[sum_t Y] {ysum.mean():.4f} +- {out['EY_se']:.4f}, "
+              f"psi_max {out['psi_max']:.1f}, spikes at h < {H_CLIP:g}: {out['clip_frac']:.4f}")
+    assert abs(est.mean() / fd - 1) < 0.05, (est.mean(), fd)
+    assert abs(ysum.mean()) < 4 * out["EY_se"], (ysum.mean(), out["EY_se"])
+    return out
+
+
 def _main():
     t0 = time.time()
     p = LIFParams()
@@ -990,6 +1161,8 @@ def _main():
             line.append(f"mu={mu:.1f}: sim {g_sim:5.1f}, Markov {g_mk:5.1f}, Siegert {g_sg:5.1f}")
             assert abs(g_mk / g_sim - 1) < 0.06, (kern, mu, g_sim, g_mk)
         print(f"(g) gain at dt = 1 ms, tau_ref {pk.tau_ref * 1e3:.0f} ms, kernel {kern}: " + "; ".join(line))
+    # (h) the post scores (post_scores; experiments.tdstdp --credit hazard | noise) at the DT1R point
+    out["score"] = _score_check()
     print(f"lif self-check ok ({time.time() - t0:.0f} s)")
     return out
 
