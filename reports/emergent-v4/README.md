@@ -1,6 +1,6 @@
 # Study `emergent-v4`: does the map term help on CartPole, on four engines?
 
-**DRAFT, awaiting the user's approval. Not launched.** When launched, this line becomes "Pre-registered <date, time>, before any run of this study". Design and tests below are then fixed.
+**Pre-registered 2026-10-27 14:20 EDT, before any run of this study** (approved by the user; code at git `086996f`, branch `emergent-v4-study`). Design and tests below are fixed.
 
 Nothing in this directory is written by hand except this README:
 - `manifest.json`, `code.patch`, `runs/`, `models/`, `summary.*` and `pairs.csv` come only from `python -m experiments.report`;
