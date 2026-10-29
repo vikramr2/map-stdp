@@ -1,6 +1,6 @@
 # Study `hybrid-columns-2`: Map-STDP columns in the TD-STDP backbone on Acrobot, without Adam
 
-**DRAFT, awaiting the user's approval. Not launched.** At launch this line becomes "Pre-registered <date, time>, before any run of this study". The design and tests below are then fixed.
+**Pre-registered 2026-10-28 15:25 EDT, before any run of this study** (approved by the user; code at commit `8d0a9e4`). The design and tests below are fixed.
 
 Nothing in this directory is written by hand except this README. `manifest.json`, `code.patch`, `runs/`, `summary.*` and `pairs.csv` come only from `python -m experiments.report`.
 
@@ -64,7 +64,7 @@ Nothing in this directory is written by hand except this README. `manifest.json`
 
 For each headline contrast:
 - **Improves:** Holm-adjusted p < 0.05 and a positive shift.
-- **Keeps performance (non-inferiority):** the lower end of the 95% CI of the shift is above −Δ, with **Δ = 25 points of AUC** (as in `hybrid-columns`; to be confirmed by the user).
+- **Keeps performance (non-inferiority):** the lower end of the 95% CI of the shift is above −Δ, with **Δ = 25 points of AUC** (as in `hybrid-columns`; confirmed by the user).
 - **Worse:** a significant negative shift.
 
 Every contrast is reported, pass or fail.
@@ -91,7 +91,7 @@ Every contrast is reported, pass or fail.
 ## Run conditions
 
 - **Machine:** the local workstation (72 cores), with `OMP`, `MKL`, `OPENBLAS` and `NUMBA` threads set to 1, 64 workers.
-- **Code state:** a git worktree of a commit made for the study.
+- **Code state:** git worktree `../map-stdp-hc2` (branch `hybrid-columns-2-study`) at commit `8d0a9e4`.
 - **Projected time:** about 30 min. Pilot runs took 1.3 min (base) and 3–6 min (column arms, including about 1 min of entropy matching).
 - **One code state:** `manifest.json` records the git HEAD and the sha256 of the uncommitted code; the runner refuses to relaunch if it differs.
 
