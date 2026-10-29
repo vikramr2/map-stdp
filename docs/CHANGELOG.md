@@ -2,6 +2,37 @@
 
 ## 2026-10-29
 
+### Result: hold pilot on Acrobot; study `race-acrobot` drafted (iteration 016 §21)
+
+- 40/40 dev runs through the real flags: with the hold and the band, sealed columns are level with CK's softmax at β_c −1.5 (AUC −174 vs −174, +3 [−27, +25]; last-100 −132 vs −150; 2/10 solved vs 0/10; fewer spikes), learned columns level (−4), implicit −43 and no columns −37 (worse). No floor runs. Ordering sealed ≈ learned > implicit > none. `race-acrobot` declared (seeds 7100–7119, 100 runs, reference CK's softmax at β_c −1.5, families headline / secondary); README drafted for approval. LunarLander full-length pilot running.
+
+### Added: `--freeze`, the re-probe fit gate, `action_repeat_probability` (iteration 016 §21; neuroscientist review of the hold)
+
+- `--freeze MS` sets the decision window (token `fz<ms>` when it differs from the preset); with `--race-theta` from the 20-ms rule it is the decision hold (`--freeze 40 --race-theta 16`: decide within 20 ms, hold 2 env steps). `reprobe_step`: a re-probed β is accepted only when the probe's fit is within `RACE_FIT_GATE` = 0.05 (rejected records marked `accepted: False`). Monitor `action_repeat_probability` (the race's own persistence at resamples, held steps excluded) in `race_log`. 79 tests, golden unchanged; the hold smoke run is bit-identical to the screen's. Neuroscientist: the hold is action persistence (temporally correlated exploration variability), impl / abstraction with a supported class; the leaky race counter a Proposal; `action_repeat_probability` its monitor; recipe doc §2 rows added.
+- Hold pilot launched (dev seeds; Acrobot hold 2 × four regimes with the band and β_c −1.5, 40 runs; LunarLander full length, θ 26 at 20 ms, base / sealed / learned, 9 runs, hours).
+
+### Result: the decision hold fixes the race on Acrobot; LunarLander's θ rule (iteration 016 §21; user decision to keep fixing)
+
+- Diagnosis (snn-expert, dev seeds): the race's Acrobot failure is temporal inconsistency of exploration (a fresh decision every 20 ms never pumps the pendulum; a uniform random policy terminates 0/100 episodes per step, 21/100 when each action is held 2 steps); the softmax's persistence is a filtered-noise sample read at high gain, not state knowledge. Every knob that sharpens the race (longer window at θ by the rule, more neurons, less noise) collapses. **Hold 2** (decide within 20 ms at θ = 16, hold the decision 40 ms): 0/10 floor seeds, and with sealed or learned columns level with CK's base (AUC −174 vs −174, +3 [−27, +25]; 2/10 solved vs 0/10; fewer spikes); the hold does nothing for the softmax. LunarLander: no temporal gap; θ = 26 at a 20-ms decision matches the backbone's AUC-1000 at half the spikes; the β re-probe is broken there (probe fit 0.24–0.64, β at the floor). Pre-set rule: n_hold = the smallest hold at which a uniform random policy terminates ≥ 20 % of episodes (Acrobot 2, others 1); re-probed β accepted only within the 0.05 fit gate. Code (`--freeze`, the gate) and the neuroscientist's review of the hold in progress; next pilots scripted (`pilot016_hold.sh`: Acrobot hold 2 × four regimes, LunarLander full length × three).
+
+### Result: contrast-floor pilot; Acrobot remains the race's limit, LunarLander trails at 1000 episodes (iteration 016 §20)
+
+- 72/72 dev runs. Acrobot with the band: no silent columns (minima 17–40 Hz), entropy held at 0.7 of max, yet 5–10/10 runs at the floor: the policy is near uniform, and uniform is −500; one surrogate run solved. Per the user's rule, Acrobot is reported as the race readout's limit on a sparse-reward floor (diagnosis in §20; Proposals not built). LunarLander at 1000 episodes: the band holds the race steady at −170 vs the softmax's −103 with a near-uniform policy; the re-probe alone is unstable. Open: a full-length LunarLander pilot or reporting it as trailing.
+
+### Finished: study `race-cartpole` (iteration 016 §20); the floor pilot relaunched
+
+- 120/120 runs, 5 min, none failed. Race + β re-probe on columns beats CK's softmax after Holm in every regime: sealed +45.2 AUC [+29.4, +62.9] (Holm 9e-5, 20/20 solved, T_s 194 vs 293, 12.9 vs 36.0 actor spikes to decision), implicit +29.2 (0.013), learned +25.0 (0.041); the race without columns +14.5 (n.s., one run unsolved); the normalised softmax non-inferior. Sealed vs no columns +27.8 (Holm 0.033). The first reported improvement over the backbone. Results in `../map-stdp-rcp/reports/race-cartpole/`, uncommitted on branch `race-cartpole-study`.
+- The floor pilot's first launch merged commands (a trailing blank on lines without column flags is a line continuation for `xargs -L 1`); stopped by process group, fixed (`sed 's/ *$//'`), relaunched 18:17 EDT.
+
+### Added: `--rate-floor`, the one-sided per-column rate floor (iteration 016 §20; neuroscientist review; user decision)
+
+- Per ms, column k's actor-E rows receive +c_t (ρ_min − ρ_k)_+ with ρ_k the column's mean E rate and ρ_min = `rate_floor` × r₀ (pre-set 0.5); surrogate arms on the coincidence trace, score arms rank-one; requires `--rate-cost` (the same coefficient and effective step); with the mean term it forms a band (copy mean at r₀, each column ≥ r₀/2). Token `rf<frac>`; monitors `col_rate_min` (min over columns of the bin-averaged column rate) and `col_rate_min_ms` in `race_log` for every race run. Default off, nothing drawn; 76 tests, golden unchanged, the default-path fingerprint unchanged. Smoke (Acrobot seed 20, 100 episodes): the surrogate race with the band leaves the floor (T_f 78) with the column minimum at 19–25 Hz; under the score credit the floor never binds (columns ≥ 32 Hz while the realised entropy halves): there the perseveration is a small persistent contrast, not a deprived column.
+- Floor pilot (72 runs: Acrobot β_c −1.5, band × {surrogate, surrogate + β re-probe, exact score ×3} on base and sealed columns; LunarLander 1000 episodes: β re-probe alone and the three band variants) queued behind `race-cartpole`.
+
+### Started: study `race-cartpole` (iteration 016 §20)
+
+- README pre-registered 2026-10-29 18:02 EDT (user approved); user committed `23cc0b9`; the stamp committed on branch `race-cartpole-study` (`93f1880`, worktree `../map-stdp-rcp`); 73/73 tests there; launched 18:08 EDT, 120 runs, 60 workers.
+
 ### Decided: CartPole's reported result is the race with the β re-probe (study `race-cartpole` declared); Acrobot and LunarLander continue (iteration 016 §20; user decision 2026-10-29)
 
 - User: the six CartPole arms of the dev table (CK softmax, normalised softmax, race + β re-probe on no / implicit / learned / sealed columns) are the reported set, with the settings stated as selected on dev seeds. Declared as `race-cartpole` in `report.py` (seeds 7000–7019, 120 runs, primary AUC, families headline / readout / secondary; README drafted). LunarLander pilot: the race trails the softmax by 40–60 points at 1000 episodes with a near-uniform policy; the score credit slower still. Next: the one-sided per-column rate floor (contrast floor; neuroscientist review in progress) piloted with the re-probe and rate-term variants on Acrobot and LunarLander.

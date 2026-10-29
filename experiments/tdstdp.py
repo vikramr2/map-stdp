@@ -50,9 +50,12 @@ p~ = softmax(beta log max(r_k, eps_r)) (eps_r = 1 / (tau_n n_ae), one spike's fi
 as the per-column eligibility factor (race_factor); beta is pre-set by calibrate_race (a held-observation probe: the
 surrogate's mean per-state entropy at the mean column rates equals the realised race's) unless --race-beta is given
 (token rb<beta>); --race-reprobe N (016 §18 fix a; token rp<N>) re-runs the probe at the current W (and R) once every
-N pooled episodes on its own stream (reprobe_race) and the new beta applies from the next window on (the result's
-'race_cal_history'). --norm-logits and --ent-match-rec are softmax-only. Both readouts log the actor spikes per decision
-window per copy (the result's 'actor_spikes_per_decision'; the race adds 'race_decisions').
+N pooled episodes on its own stream (reprobe_race) and the new beta applies from the next window on if the record's
+fit is within RACE_FIT_GATE (reprobe_step; a rejected record is marked 'accepted': False in the result's
+'race_cal_history'). --freeze MS (token fz<ms> off the preset) sets the decision window, the race's deadline and the
+hold of the sampled action over freeze / 20 env steps; the decision hold of 016 §21 is --freeze 40 --race-theta 16.
+--norm-logits and --ent-match-rec are softmax-only. Both readouts log the actor spikes per decision window per copy
+(the result's 'actor_spikes_per_decision'; the race adds 'race_decisions').
 --credit {hazard,noise} (016 §20 Stage B', readout race, --eta-cal; tokens sch | scn): the surrogate is replaced by the
 spike score (lif.post_scores): every actor E post's spike or silence at ms t, up to the copy's bound ms (the whole
 window at a deadline decision), is credited by its own score Y_i(t) = d log P(S_i(t)) / d(input) (hazard: (S - h) psi
@@ -67,7 +70,16 @@ eta_a(score) (both from calibrate_ck) so its effective step is the
 surrogate arm's; c_e is forced to 0; race_reprobe must be 0 (the surrogate's beta is still calibrated, for the
 reference eta_a only). R's credit (HybridRec) is the column's summed score up to the bound, paired with the delivered
 current b n_j (credit called with G = 1 / tau_eff). Monitors per log bin (the result's 'race_log'): mean |Y| over
-active actor-E ms, the fraction of actor-E spikes at h < 1e-3, the entropy of the realised actions per copy."""
+active actor-E ms, the fraction of actor-E spikes at h < 1e-3, the entropy of the realised actions per copy, and
+(every race run) the columns' mean E rates: col_rate_min, the minimum over columns of the bin-averaged column rate,
+and col_rate_min_ms, the bin average of the per-ms, per-copy minimum over columns (Hz).
+--rate-floor F (016 §20, the neuroscientist's contrast floor; requires --rate-cost; token rf<F>; pre-set 0.5): a
+one-sided per-column rate floor added to the mean pin, a band (copy mean at r0, each column >= F r0). Per ms, with
+rho_k(t) the mean rate of column k's E posts and rho_min = F rate_target, column k's E actor rows get
++c_t (rho_min - rho_k(t))_+: potentiation only, zero at or above rho_min, never lowers a winner (the deprivation side
+of rate homeostasis). Surrogate arms: on kap per ms (it rides z, like the mean term); score arms: rank-1 per block,
++c_t sum_t (rho_min - rho_k(t))_+ rho_i P_j on column k's E rows, with the mean term's effective step c_t_eff.
+Latents and I posts untouched; off in the frozen calibration probes."""
 import argparse
 import copy
 import dataclasses
@@ -96,6 +108,8 @@ M_THR = {"CartPole": 475.0, "LunarLander": 200.0, "Acrobot": -100.0, "Taxi": 8.0
 SNAP_EVERY = {"CartPole": 100, "LunarLander": 500, "Acrobot": 100, "Taxi": 200}  # rec: R snapshots (pooled episodes)
 TD_TASKS = TASKS | {"Taxi": Task("Taxi-v4", 6, 0, 2000, None, "onehot")}  # CKRunner's tasks (Taxi: tdstdp only)
 R_CK_CARTPOLE = 140.0  # Hz: BindsNET's initial post rate on CartPole (hybrid-columns, 20 seeds: 138-142)
+SLOG_KEYS = ("episode", "score_abs_mean", "score_clip_frac", "race_entropy",  # race_log (score_monitors)
+             "col_rate_min", "col_rate_min_ms", "action_repeat_probability")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -130,6 +144,8 @@ class Config:
     c_w: float = 0.0  # CK units (1 / mV)
     c_t: float = 0.0  # CK's target-rate term [CK Eq. 31] on actor E rows; CKRunner: --rate-cost (016 §18 fix b)
     rho_hat: float = 0.0  # its target (per ms); 0 with c_t > 0 means rate_target (CKRunner)
+    rate_floor: float = 0.0  # one-sided per-column rate floor, a fraction of rate_target (016 §20; pre-set 0.5): per
+    # ms +c_t (rho_min - rho_k)_+ on column k's E rows, rho_k its E posts' mean rate; needs c_t > 0 (--rate-floor)
     tau_d: float = 1000.0  # discount time constant (ms)
     r_scale: float = 0.02
     resample: int = 1  # env steps per action sample
@@ -140,7 +156,9 @@ class Config:
     ck: bool = False
     max_eps: int = 0  # pooled episodes cap (main.py max_eps); episodes is min_eps
     init_scale: float = 0.1  # W ~ U(0, init_scale) mV
-    freeze: int = 20  # ms between action samples (freeze_action)
+    freeze: int = 20  # ms between action samples (freeze_action; --freeze): the decision window, the race's deadline
+    # and the hold of the sampled action over freeze / 20 env steps. A decision hold (016 §21) is freeze = n_hold x 20
+    # with theta from the 20-ms rule (--race-theta): the race decides within one env step and the action is held.
     f_order: int = 2  # Fourier encoder (util.State_to_spike_Fourier): order, cross terms, ON/OFF split, constant unit
     f_cross: bool = True
     f_double: bool = False
@@ -241,8 +259,10 @@ def tokens(cfg):
     t += ["em"] if cfg.ent_match_rec else []
     t += ["nl"] if cfg.norm_logits else []
     t += [f"rc{cfg.c_t:g}"] if cfg.c_t else []
+    t += [f"rf{cfg.rate_floor:g}"] if cfg.rate_floor else []
     t += [f"em{cfg.eta_mult_a:g}"] if cfg.eta_mult_a != 1.0 else []
     t += [f"bc{cfg.beta_c:g}"] if cfg.beta_c != p.beta_c else []
+    t += [f"fz{cfg.freeze}"] if cfg.freeze != p.freeze else []
     if cfg.readout == "race":
         t += ["race"] + ([f"th{cfg.race_theta:g}"] if cfg.race_theta else [])
         t += [f"rb{cfg.race_beta:g}"] if cfg.race_beta else []
@@ -495,6 +515,14 @@ class CKRunner:
         self.c_t = 0.0 if frozen else cfg.c_t
         self.rho_hat = cfg.rho_hat if cfg.rho_hat > 0 else cfg.rate_target * 1e-3
         assert self.c_t >= 0 and (not self.c_t or self.rho_hat > 0), "c_t: rho_hat or rate_target"
+        # the one-sided per-column rate floor (016 §20, the neuroscientist's contrast floor, added to the mean pin):
+        # per ms, column k's E rows get +c_t (rho_min - rho_k)_+, rho_k the mean rate of its E posts and rho_min =
+        # rate_floor x rate_target; zero at or above rho_min, so it potentiates a deprived column and never lowers a
+        # winner. It uses the mean term's coefficient (self.c_t: c_t_eff under a score credit; 0 when frozen).
+        assert cfg.rate_floor >= 0 and (not cfg.rate_floor or frozen or (cfg.c_t > 0 and cfg.rate_target > 0)), \
+            "rate_floor: c_t > 0 (--rate-cost) and rate_target"  # frozen probes (engine lif, rate_target 0): exempt
+        self.rho_min = cfg.rate_floor * cfg.rate_target * 1e-3
+        self.floor = bool(cfg.rate_floor) and self.c_t > 0
         self.eps_n = cfg.alpha_a * self.r0 / (cfg.tau_n * cfg.n_ae)  # norm_logits floor: one spike moves <= one nat
         self.prk, self.prbar = np.zeros((H, K)), np.zeros(H)  # norm_logits / race: column rates (pooled rate) of self.p
         # readout race (016 §14.1 Stage B): theta by the pre-set rule, the surrogate's floor eps_r, the columns' signed
@@ -512,6 +540,11 @@ class CKRunner:
         # but are not counted, so theta means the same on every task; without I posts it is the net count of Eq. 1h)
         self.Mcnt = (lay.Ma[:, self.apost] > 0).astype(float)  # K x n_act
         self.cnt, self.pend = np.zeros((H, K)), np.full(H, -1)
+        # rate_floor: the column -> actor-row expansion (K x n_act + n_lat; 1 on column k's E posts, 0 on I posts and
+        # latents), and the race monitor's sums: per-column rate, per-ms minimum over columns, ms x copies in an episode
+        self.Mfl = np.zeros((K, na))
+        self.Mfl[:, :len(self.apost)] = self.Mcnt
+        self.fsum = np.zeros(K + 2)
         # the score credit (016 §20, --credit hazard | noise): the actor E posts' own scores replace the surrogate
         assert cfg.credit in ("surrogate", "hazard", "noise"), cfg.credit
         self.score = cfg.credit != "surrogate"
@@ -529,7 +562,8 @@ class CKRunner:
         self.was, self.bnd = np.ones(H, bool), np.full(H, -1)  # race_block: no decision pending before the block;
         self.ssum = np.zeros(4)  # the bound ms within it (-1: none). Sums: |Y| and count over active actor-E ms,
         self.abin = np.zeros((H, K))  # actor-E spikes at h < H_CLIP and all; the bin's realised actions per copy
-        self.slog = {k: [] for k in ("episode", "score_abs_mean", "score_clip_frac", "race_entropy")}
+        self.arep = np.zeros((H, 2))  # per copy in the bin: resamples whose action repeats the previous one, resamples
+        self.slog = {k: [] for k in SLOG_KEYS}
         self.rdec = np.zeros(3)  # race decisions: at the bound, at the deadline, tie draws
         self.wspk = np.zeros(H)  # actor spikes (E and I) per copy since its window started (spikes to decision)
         self.ebnd = np.zeros(2)  # energy: summed actor spikes up to the decision (bound ms, else the window), decisions
@@ -606,8 +640,10 @@ class CKRunner:
                     self.rdec[1] += 1
                     self.ebnd += [self.wspk[h], 1]
                 self.action[h] = self.pend[h]
-            ok = nb & (self.code < 2)  # the bin's realised actions of copies in an episode (race_entropy)
-            self.abin[ok, self.action[ok]] += 1
+            ok = nb & (self.code < 2)  # the bin's realised actions of copies in an episode (race_entropy) and
+            self.abin[ok, self.action[ok]] += 1  # whether each resample repeats the previous decision (the held
+            self.arep[ok, 0] += self.action[ok] == prev[ok]  # steps between resamples are not counted)
+            self.arep[ok, 1] += 1
             self.cnt[nb], self.pend[nb], self.wspk[nb] = 0, -1, 0
         else:
             for h in np.flatnonzero(nb):
@@ -693,6 +729,10 @@ class CKRunner:
         rdev = R[..., nc:][..., lay.ae].mean(-1) - self.rho_hat  # L x H: the copy's actor-E mean rate against rho_hat
         if self.c_t and not self.score:  # CK's target-rate term, per ms, E actor rows only
             kapb = kapb - self.c_t * rdev[..., None] * lay.ae
+        if self.floor:  # the per-column floor (module doc): per ms and copy, c_t (rho_min - rho_k)_+ for column k
+            flc = self.c_t * np.maximum(self.rho_min - R[..., self.apost] @ self.Mcnt.T / cfg.n_ae, 0.0)  # L x H x K
+            if not self.score:  # on column k's E rows (0 on I posts and latents), riding z like the mean term
+                kapb = kapb + flc @ self.Mfl
         if self.score:  # the score credit (module doc): Y on the actor E posts up to the bound, paired with x(t - 1)
             ap = self.apost  # the scores of the actor posts only (the critic's are not used)
             Y, hz = lif.post_scores(X[..., ap], out[3][..., ap], out[4][..., ap], self.lp, cfg.credit)
@@ -722,6 +762,8 @@ class CKRunner:
             g = G.mean(0)
         if self.score and self.c_t:  # the rate term, rank-1 per block (no per-synapse state): E[z_ij] ~ rho_i P_j
             g[self.apost] -= self.c_t / H * np.einsum("lhi,lhj->ij", rdev[..., None] * R[..., self.apost] * self.cE, P)
+            if self.floor:  # the floor, rank-1 in the same form: +c_t sum_t (rho_min - rho_k)_+ rho_i P_j, column k's E
+                g[self.apost] += np.einsum("lhi,lhj->ij", (flc @ self.Mcnt) * R[..., self.apost], P) / H
         if lay.n_lat:
             g[nc:][lay.lat] = 0.0  # input -> latent W frozen at init
         if self.frozen:
@@ -742,6 +784,8 @@ class CKRunner:
         if learn.any():
             if self.race:
                 s = self.surrogate(R[:, learn] @ lay.Ma.T)
+                rk = R[:, learn][..., self.apost] @ self.Mcnt.T / cfg.n_ae  # L x h x K: the columns' mean E rates
+                self.fsum += [*rk.sum((0, 1)), rk.min(-1).sum(), rk[..., 0].size]  # col_rate_min(_ms) monitors
             else:
                 s = td.softmax(self.scores(R[:, learn])[0])
             self.stats[:5] += [R[..., :nc][:, learn].mean(), R[..., nc:][:, learn].mean(),
@@ -814,16 +858,27 @@ class CKRunner:
         """The score credit's monitors of the bin since the last call, appended to self.slog (the result's 'race_log'):
         score_abs_mean (mean |Y| over active actor-E ms, truncation not applied), score_clip_frac (actor-E spikes at
         h < lif.H_CLIP), race_entropy (entropy, nats, of the realised actions of copies in an episode, per copy,
-        averaged over the copies with a decision). Resets the sums. Returns the row."""
-        s, ab = self.ssum, self.abin
+        averaged over the copies with a decision), col_rate_min (Hz; the minimum over columns of the column's mean E
+        rate averaged over the bin's ms x copies in an episode: the marginal, perseveration monitor of the rate floor)
+        and col_rate_min_ms (Hz; the bin average of the per-ms, per-copy minimum over columns: what the floor sees),
+        action_repeat_probability (016 §21: the fraction of resamples, of copies in an episode, at which the new
+        decision equals the previous one, per copy, averaged over the copies with a resample; the held env steps
+        between resamples are not counted, so under a hold it is the race's own persistence). Resets the sums.
+        Returns the row."""
+        s, ab, fs, K, ar = self.ssum, self.abin, self.fsum, self.K, self.arep
         n = ab.sum(1)
         q = ab[n > 0] / n[n > 0, None]
         ent = float(-(q * np.log(np.maximum(q, 1e-300))).sum(1).mean()) if len(q) else float("nan")
+        nf = fs[K + 1]
         row = dict(episode=int(episode), score_abs_mean=float(s[0] / max(s[1], 1)),
-                   score_clip_frac=float(s[2] / max(s[3], 1)), race_entropy=ent)
+                   score_clip_frac=float(s[2] / max(s[3], 1)), race_entropy=ent,
+                   col_rate_min=float(1e3 * fs[:K].min() / nf) if nf else float("nan"),
+                   col_rate_min_ms=float(1e3 * fs[K] / nf) if nf else float("nan"),
+                   action_repeat_probability=float((ar[ar[:, 1] > 0, 0] / ar[ar[:, 1] > 0, 1]).mean())
+                   if (ar[:, 1] > 0).any() else float("nan"))
         for k, v in row.items():
             self.slog[k].append(v)
-        self.ssum[:], self.abin[:] = 0, 0
+        self.ssum[:], self.abin[:], self.fsum[:], self.arep[:] = 0, 0, 0, 0
         return row
 
     def _leader(self, cnt):
@@ -921,6 +976,8 @@ class CKRunner:
             self.beta, self.race_cal_history = float(c["race_beta"]), json.loads(str(c["race_cal_history"]))
         if "race_log" in c:
             self.slog = json.loads(str(c["race_log"]))
+            for k in SLOG_KEYS:  # a checkpoint from before a monitor existed: NaN for its bins
+                self.slog.setdefault(k, [float("nan")] * len(self.slog["episode"]))
         return float(c["wall"]), int(c["resumes"]) + 1
 
 
@@ -1104,9 +1161,32 @@ def reprobe_race(runner, episode, n_states=8, rtol=2e-3):
     return dict(theta=runner.theta, episode=int(episode), **rec)
 
 
+RACE_FIT_GATE = 0.05  # reprobe_step: a re-probed beta is accepted only if its record's fit is within it (§18, §21)
+
+
 def race_fit(rec):
-    """The surrogate's fit in a probe record: max |win0 - win0_surrogate| over the contrasts (the §18 gate is 0.05)."""
+    """The surrogate's fit in a probe record: max |win0 - win0_surrogate| over the contrasts (the gate, RACE_FIT_GATE,
+    is 0.05)."""
     return float(np.abs(np.array(rec["win0"]) - np.array(rec["win0_surrogate"])).max())
+
+
+def reprobe_step(runner, episode):
+    """run_ck's re-probe hook (--race-reprobe): reprobe_race at the runner's current state, the new beta accepted only
+    if the record's fit is within RACE_FIT_GATE (016 §21: a poor fit means the surrogate does not describe the race,
+    and the bisection's beta is then arbitrary); a rejected record keeps the current beta and is marked
+    'accepted': False (absent on an accepted record, so runs whose re-probes all pass are unchanged). The record goes
+    to race_cal_history either way, and the line printed. Returns the record. The init probe (calibrate_race) is not
+    gated: its fit is reported."""
+    rec = reprobe_race(runner, episode)
+    fit = race_fit(rec)
+    if fit <= RACE_FIT_GATE:
+        runner.beta = rec["beta"]
+    else:
+        rec["accepted"] = False
+    runner.race_cal_history.append(rec)
+    print(f"reprobe ep {episode} beta {rec['beta']:.4g} fit {fit:.3f}" + ("" if fit <= RACE_FIT_GATE else " rejected"),
+          flush=True)
+    return rec
 
 
 def _race_probe(r, n_states, rtol):
@@ -1236,11 +1316,8 @@ def run_ck(cfg, log_every=50, out=None, save_model=None):
         r.tick()
         e = len(r.returns)
         if rp and e >= nxt_rp:  # 016 §18 fix (a): the contrast probe at the current W (and R); beta from the next
-            nxt_rp = (e // rp + 1) * rp  # window on; the probe draws from its own stream
-            rec = reprobe_race(r, e)
-            r.beta = rec["beta"]
-            r.race_cal_history.append(rec)
-            print(f"reprobe ep {e} beta {rec['beta']:.4g} fit {race_fit(rec):.3f}", flush=True)
+            nxt_rp = (e // rp + 1) * rp  # window on if the fit passes the gate; the probe draws from its own stream
+            reprobe_step(r, e)
         if e >= nxt:
             nxt = (e // log_every + 1) * log_every
             st = r.stats / max(r.stats[4], 1)
@@ -1251,6 +1328,9 @@ def run_ck(cfg, log_every=50, out=None, save_model=None):
                   f"{st[5] / max(st[6], 1e-12):.1f} {(time.perf_counter() - t0) / 60:.1f} min"
                   + (f" | score |Y| {sm['score_abs_mean']:.3f} clip {sm['score_clip_frac']:.4f} H_race "
                      f"{sm['race_entropy']:.3f}" if score else "")
+                  + (f" | colmin {sm['col_rate_min']:.1f}/{sm['col_rate_min_ms']:.1f} Hz"  # bin-mean / per-ms
+                     + ("" if score else f" H_race {sm['race_entropy']:.3f}") if cfg.rate_floor else "")
+                  + (f" rep {sm['action_repeat_probability']:.2f}" if r.race else "")
                   + (rec_line(r.hr) if r.hr else ""), flush=True)
             fn.with_suffix(".partial").write_text(json.dumps(result_ck(cfg, r, t0, eta_sgd, resumes, s_cal,
                                                                        rec_cal)))
@@ -1312,7 +1392,8 @@ def result_ck(cfg, r, t0, eta_sgd, resumes, s_cal=None, rec_cal=None):
         out["actor_spikes_to_decision"] = float(r.ebnd[0] / max(r.ebnd[1], 1))
         if cfg.race_reprobe:  # the re-probe records (reprobe_race) and the surrogate's final gain
             out["race_cal_history"], out["race_beta_final"] = r.race_cal_history, float(r.beta)
-        out["race_log"] = r.slog  # per log bin: score_abs_mean, score_clip_frac (score credit), race_entropy
+        out["race_log"] = r.slog  # per log bin: score_abs_mean, score_clip_frac (score credit), race_entropy,
+        # col_rate_min, col_rate_min_ms, action_repeat_probability (SLOG_KEYS; score_monitors)
         if cfg.credit != "surrogate":
             out["c_t_eff"] = float(r.c_t)
     if r.hr is not None:  # iteration 015: monitors per flush (HybridRec.log), calibration (absent after a resume)
@@ -1513,6 +1594,9 @@ def main():
     ap.add_argument("--eta-mult-a", type=float, default=None, help="--eta-cal: actor step multiplier (per-task grid)")
     ap.add_argument("--rate-cost", type=float, default=None,
                     help="CK's target-rate term c_t on the actor E rows, target rate_target (016 §18; pre-set 5e-4)")
+    ap.add_argument("--rate-floor", type=float, default=None,
+                    help="one-sided per-column rate floor, fraction of rate_target, +c_t (rho_min - rho_k)_+ on column "
+                         "k's E rows (016 §20; needs --rate-cost; pre-set 0.5)")
     ap.add_argument("--rec", choices=("none", "cols", "lat"), default="none",
                     help="nlif: recurrent E->E actor modules (iteration 015): cols, one per action; lat, + latents")
     for f, t, h in (("chi-rec", float, "rec: total kick per spike (threshold units)"),
@@ -1534,6 +1618,10 @@ def main():
                     help="nlif low-rate: policy scores normalised by the pooled actor rate against --rate-target")
     ap.add_argument("--readout", choices=("softmax", "race"), default="softmax",
                     help="nlif low-rate: race (016 §14.1 Stage B), the first column whose net count reaches theta")
+    ap.add_argument("--freeze", type=int, default=None,
+                    help="ms between action samples (preset 20; LunarLander 40): the decision window and the hold of "
+                         "the action over freeze / 20 env steps (016 §21: --freeze 40 --race-theta 16 decides within "
+                         "20 ms and holds for 2 env steps)")
     ap.add_argument("--race-theta", type=float, default=None, help="race: bound (default n_ae rate_target freeze)")
     ap.add_argument("--race-beta", type=float, default=None, help="race: surrogate sharpness (default calibrate_race)")
     ap.add_argument("--race-reprobe", type=int, default=None,
@@ -1550,7 +1638,8 @@ def main():
                             ("s_in", a.s_in)) if v is not None}
     if a.fast:
         kw["fast"] = True
-    kw.update({k: v for k, v in (("rate_target", a.rate_target), ("c_t", a.rate_cost), ("chi_rec", a.chi_rec),
+    kw.update({k: v for k, v in (("rate_target", a.rate_target), ("c_t", a.rate_cost), ("rate_floor", a.rate_floor),
+                                 ("chi_rec", a.chi_rec),
                                  ("beta_c", a.beta_c), ("eta_mult_a", a.eta_mult_a),
                                  ("lam", a.lam), ("lam_ratio", a.lam_ratio),
                                  ("lam_rec", a.lam_rec), ("eta_rec", a.eta_rec), ("stat_windows", a.stat_windows),
@@ -1570,7 +1659,7 @@ def main():
         kw["readout"] = a.readout
     if a.credit != "surrogate":
         kw["credit"] = a.credit
-    kw.update({k: v for k, v in (("race_theta", a.race_theta), ("race_beta", a.race_beta),
+    kw.update({k: v for k, v in (("freeze", a.freeze), ("race_theta", a.race_theta), ("race_beta", a.race_beta),
                                  ("race_reprobe", a.race_reprobe)) if v is not None})
     if a.episodes is not None and not a.legacy:
         kw["max_eps"] = a.episodes

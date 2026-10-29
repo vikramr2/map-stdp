@@ -6,6 +6,7 @@ default path's lock, the truncation at the bound, the critic rows' identity, the
 tokens)."""
 import dataclasses
 import hashlib
+import sys
 
 import gymnasium as gym
 import numpy as np
@@ -669,3 +670,240 @@ def test_beta_c_and_eta_mult_flags():
         if hasattr(ex, "build_parser") else None
     if a is not None:
         assert a.beta_c == -1.5 and a.eta_mult_a == 3.0
+
+
+_ORIG_RATES = ex.td.rates
+
+
+def _craft_rates(monkeypatch, nc, apost, Mcnt, low_col, lo=0.01, hi=0.04):
+    """td.rates returns R with column low_col's E posts at `lo` per ms and every other actor E post at `hi` (I posts and
+    the critic as computed), so the rate floor's term is known: c_t (rho_min - lo)_+ on low_col's E rows only."""
+    orig = ex.td.rates
+    cap = []
+
+    def rates(*a):
+        R = orig(*a).copy()
+        E = Mcnt.sum(0) > 0
+        R[..., apost[E]] = hi
+        R[..., apost[Mcnt[low_col] > 0]] = lo
+        cap.append(R)
+        return R
+    monkeypatch.setattr(ex.td, "rates", rates)
+    return cap
+
+
+def test_rate_floor_term(monkeypatch):
+    """The one-sided per-column rate floor (016 §20, --rate-floor): with rate_floor 0.5 at rate_target 40 Hz (rho_min
+    0.02 per ms) and column 0's E rate crafted at 0.01 (the others at 0.04), the surrogate path's kap gains +c_t (0.02
+    - 0.01) on column 0's E rows only (0 on the other columns, on I posts and on the mean term, which is the same in
+    both runs); the rasters are unchanged (no draw) and the frozen probes have it off."""
+    cap, orig = [], ex.td.block_learn_ck_fast
+
+    def spy(z, q, P, X, d, c, kap, *a):
+        cap.append((X.copy(), np.array(kap)))
+        return orig(z, q, P, X, d, c, kap, *a)
+    monkeypatch.setattr(ex.td, "block_learn_ck_fast", spy)
+    for task, s_in in (("Acrobot", 0.16), ("LunarLander", 0.1)):
+        cfg = ex.preset(task, seed=0, engine="nlif", s_in=s_in, rate_target=40.0, block=20, fast=True, sgd=True,
+                        adam=False, heads=2, c_t=1.0, readout="race", race_beta=6.0)
+        r0 = ex.CKRunner(cfg)
+        nc, ap, Mcnt = r0.lay.n_crit, r0.apost, r0.Mcnt
+        _craft_rates(monkeypatch, nc, ap, Mcnt, 0)
+        runs = {}
+        for rf in (0.0, 0.5):
+            q = ex.CKRunner(dataclasses.replace(cfg, rate_floor=rf))
+            assert q.rho_min == rf * 0.04 and q.floor == (rf > 0) and not ex.CKRunner(q.cfg, frozen=True).floor
+            cap.clear()
+            q.tick()
+            runs[rf] = cap[0]
+        (X0, k0), (X1, k1) = runs[0.0], runs[0.5]
+        assert np.array_equal(X0, X1) and k1.shape == k0.shape
+        d = k1 - k0
+        exp = np.zeros(d.shape[-1])
+        exp[:len(ap)] = (Mcnt[0] > 0) * (0.02 - 0.01)
+        assert np.allclose(d, exp) and d.max() == pytest.approx(0.01)
+        if task == "LunarLander":  # I posts of column 0 untouched
+            assert (Mcnt.sum(0) == 0).any() and not d[..., :len(ap)][..., Mcnt.sum(0) == 0].any()
+        monkeypatch.setattr(ex.td, "rates", _ORIG_RATES)  # the next task crafts from the original
+
+
+def test_rate_floor_score_rank1(monkeypatch):
+    """Under a score credit the floor is rank-1 per block: one window at rate_floor 0.5 against 0 from the same state
+    (credit noise, c_t 1, rates crafted as test_rate_floor_term, column 0 deprived): dW on the actor rows equals
+    eta_a / H sum_t c_t (rho_min - rho_0)_+ rho_i P_j on column 0's E rows and 0 elsewhere; the critic rows are
+    unchanged."""
+    cfg = ex.preset("LunarLander", heads=2, readout="race", race_beta=4.0, c_e=0.0, credit="noise",
+                    **dict(_SC, s_in=0.1, c_t=1.0))
+    monkeypatch.setattr(ex.CKRunner, "_leader", lambda self, cnt: int(np.argmax(cnt)))
+    r0 = ex.CKRunner(cfg)
+    nc, ap, Mcnt = r0.lay.n_crit, r0.apost, r0.Mcnt
+    Rc = _craft_rates(monkeypatch, nc, ap, Mcnt, 0)
+    Ws = {}
+    for rf in (0.0, 0.5):
+        q = ex.CKRunner(dataclasses.replace(cfg, rate_floor=rf))
+        q.hold = True
+        Rc.clear()
+        q.tick()
+        Ws[rf] = q.W.copy()
+    R = Rc[-1]
+    dW = Ws[0.5] - Ws[0.0]
+    q = ex.CKRunner(dataclasses.replace(cfg, rate_floor=0.5))  # the same first window's inputs
+    q.hold = True
+    f = q.phi(q.obs)
+    x, _ = ex.td.draw(f, 20, q.lay.n_post, q.rng)
+    P = ex.td.pre_trace(q.P, x, cfg.tau_p)
+    flc = 1.0 * np.maximum(0.02 - R[..., ap] @ Mcnt.T / cfg.n_ae, 0.0)  # L x H x K; column 0: 0.01, others 0
+    assert np.allclose(flc[..., 0], 0.01) and not flc[..., 1:].any()
+    exp = cfg.eta_a / q.H * np.einsum("lhi,lhj->ij", (flc @ Mcnt) * R[..., ap], P)
+    assert np.allclose(dW[ap], exp, atol=1e-12) and np.abs(exp).max() > 0 and not dW[:nc].any()
+    assert not dW[ap][Mcnt[0] == 0].any() and (dW[ap][Mcnt[0] > 0] != 0).any()
+    monkeypatch.setattr(ex.td, "rates", _ORIG_RATES)
+    # the monitors: col_rate_min is the minimum over columns of the bin mean, col_rate_min_ms the mean per-ms minimum
+    q = ex.CKRunner(dataclasses.replace(cfg, rate_floor=0.5))
+    q.hold = True
+    for _ in range(3):
+        q.tick()
+    row = q.score_monitors(3)
+    assert 0 < row["col_rate_min_ms"] <= row["col_rate_min"] < 1e3 * q.rho.max() and q.fsum.sum() == 0
+    assert set(q.slog) == set(ex.SLOG_KEYS) and ex.result_ck(q.cfg, q, 0.0, None, 0)["race_log"] == q.slog
+
+
+def test_rate_floor_tokens_and_asserts():
+    """rate_floor 0 is the default (no token; the fingerprints of test_credit_default_path hold); rf<frac> after rc;
+    the floor needs c_t > 0 and rate_target; the CLI flag maps to it."""
+    assert ex.Config().rate_floor == 0.0
+    cfg = ex.preset("Acrobot", readout="race", race_beta=6.0, **_SC)
+    assert "rf" not in ex.name(cfg)
+    t = ex.tokens(dataclasses.replace(cfg, rate_floor=0.5))
+    assert t[t.index("rc0.0005") + 1] == "rf0.5" and ex.name(dataclasses.replace(cfg, rate_floor=0.5, credit="noise")) \
+        .endswith("_rc0.0005_rf0.5_race_rb6_scn_s0")
+    ex.CKRunner(dataclasses.replace(cfg, rate_floor=0.5))
+    for bad in (dict(rate_floor=0.5, c_t=0.0), dict(rate_floor=-0.1),
+                dict(rate_floor=0.5, readout="softmax", race_beta=0.0, rate_target=0.0, rho_hat=0.04)):
+        with pytest.raises(AssertionError):
+            ex.CKRunner(dataclasses.replace(cfg, **bad))
+    assert ex.CKRunner(dataclasses.replace(cfg, rate_floor=0.5), frozen=True).floor is False
+
+
+class _SpyRng:
+    """A delegating wrapper of a Generator that counts the policy draws (choice with p=)."""
+
+    def __init__(self, rng):
+        self._rng, self.n_policy = rng, 0
+
+    def choice(self, *a, **k):
+        self.n_policy += "p" in k
+        return self._rng.choice(*a, **k)
+
+    def __getattr__(self, k):
+        return getattr(self._rng, k)
+
+
+def test_freeze_hold(monkeypatch):
+    """--freeze MS (016 §21, the decision hold): with freeze 40 and race_theta 16 on Acrobot theta is 16 (the 20-ms
+    rule, not the window's 32), the race's deadline is the 40-ms window (a copy with no column at theta takes the
+    leader at ms 40, not 20), the action is resampled once per 40 ms while the env steps every 20 ms (two env steps
+    per decision, the action held over both), the energy denominator counts 40-ms windows, the softmax path with
+    freeze 40 resamples every 40 ms too, the token is fz40 (none at the preset's; LunarLander's preset is 40) and
+    the CLI flag maps to Config.freeze."""
+    r = _race_runner(freeze=40, race_theta=16.0)
+    assert r.cfg.freeze == 40 and r.theta == 16
+    assert ex.race_theta(dataclasses.replace(r.cfg, race_theta=0.0)) == 32  # the rule over the full window
+    # the deadline at ms 40: theta out of reach, column 1 leads, no decision at ms 20
+    r = _race_runner(freeze=40, race_theta=1e9)
+    r.cnt[0], r.pend[0], r.timer[:] = [0.0, 1000.0, 0.0], -1, 0
+    a0 = int(r.action[0])
+    r.tick()
+    assert r.timer[0] == 20 and r.pend[0] == -1 and r.rdec[1] == 0 and r.action[0] == a0 and r.cnt[0, 1] >= 1000
+    r.tick()
+    assert r.timer[0] == 0 and r.action[0] == 1 and r.pend[0] == -1 and r.rdec[1] == 1 and not r.cnt.any()
+    assert r.espk[1] == pytest.approx(1.0)  # two 20-ms blocks of one copy: one 40-ms decision window
+    # the hold: the env steps every tick, the action is resampled every second tick and held over both steps
+    r = _race_runner(freeze=40, race_theta=16.0)
+    steps, orig = [], r.envs[0].step
+    r.envs[0].step = lambda a: steps.append(int(a)) or orig(a)
+    timers, ticks = [], 2 * (ex.WARM_N + 1) + 20
+    for _ in range(ticks):
+        r.tick()
+        timers.append(int(r.timer[0]))
+    assert timers == [20, 0] * (ticks // 2) and not r.is_end[0]
+    assert len(steps) == ticks - ex.WARM_N  # one env step per tick once live (the first window is live, WARM_N after)
+    held = [steps[i] == steps[i + 1] for i in range(len(steps) - 1)]
+    assert all(held[(ex.WARM_N + 1) % 2::2]) and r.arep[0, 1] > 0  # pairs aligned to the resample ticks (odd ticks)
+    # the softmax path: a policy draw every 40 ms
+    s = ex.CKRunner(ex.preset("Acrobot", seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20, fast=True,
+                              sgd=True, adam=False, freeze=40))
+    s.rng = _SpyRng(s.rng)
+    for _ in range(10):
+        s.tick()
+    assert s.rng.n_policy == 5 and s.timer[0] == 0 and s.espk[1] == pytest.approx(5.0)
+    # tokens and the CLI
+    cfg = ex.preset("Acrobot", engine="nlif", rate_target=40.0, readout="race", freeze=40, race_theta=16.0)
+    t = ex.tokens(cfg)
+    assert t[-3:] == ["fz40", "race", "th16"] and ex.name(cfg).endswith("_fz40_race_th16_s0")
+    assert "fz" not in "".join(ex.tokens(ex.preset("Acrobot", engine="nlif", rate_target=40.0, readout="race")))
+    assert "fz" not in "".join(ex.tokens(ex.preset("LunarLander"))) and "fz20" in ex.tokens(ex.preset("LunarLander",
+                                                                                                        freeze=20))
+    got = []
+    monkeypatch.setattr(ex, "run", lambda cfg, **kw: got.append(cfg))
+    base = ["tdstdp", "--task", "Acrobot", "--seed", "3", "--engine", "nlif", "--rate-target", "40", "--readout",
+            "race"]
+    monkeypatch.setattr(sys, "argv", base + ["--freeze", "40", "--race-theta", "16"])
+    ex.main()
+    monkeypatch.setattr(sys, "argv", base)
+    ex.main()
+    assert (got[0].freeze, got[0].race_theta, got[1].freeze, got[1].race_theta) == (40, 16.0, 20, 0.0)
+    assert ex.name(got[0]).endswith("_fz40_race_th16_s3") and "fz" not in ex.name(got[1])
+
+
+def test_reprobe_fit_gate(monkeypatch, capsys):
+    """The re-probe gate (016 §21, reprobe_step, RACE_FIT_GATE 0.05): a record whose fit exceeds the gate leaves beta
+    unchanged and is marked accepted False; a record within the gate (or exactly at it) sets beta and carries no mark;
+    every record goes to race_cal_history and the result; run_ck's hook is reprobe_step."""
+    import inspect
+    assert ex.RACE_FIT_GATE == 0.05 and "reprobe_step(r, e)" in inspect.getsource(ex.run_ck)
+    cfg = ex.preset("Acrobot", seed=0, engine="nlif", s_in=0.16, rate_target=40.0, block=20, fast=True, sgd=True,
+                    adam=False, readout="race", race_beta=6.0, race_reprobe=50)
+    r = ex.CKRunner(cfg, frozen=True)
+
+    def fake(fit, beta):
+        def probe(runner, episode):
+            return dict(theta=runner.theta, episode=int(episode), beta=beta, win0=[0.0] * 5,
+                        win0_surrogate=[fit, 0.0, 0.0, 0.0, 0.0])
+        return probe
+    monkeypatch.setattr(ex, "reprobe_race", fake(0.3, 9.0))
+    rec = ex.reprobe_step(r, 50)
+    assert r.beta == 6.0 and rec["accepted"] is False and ex.race_fit(rec) == pytest.approx(0.3)
+    assert "reprobe ep 50 beta 9 fit 0.300 rejected" in capsys.readouterr().out
+    monkeypatch.setattr(ex, "reprobe_race", fake(0.01, 9.0))
+    rec2 = ex.reprobe_step(r, 100)
+    assert r.beta == 9.0 and "accepted" not in rec2 and r.race_cal_history == [rec, rec2]
+    out = capsys.readouterr().out
+    assert "reprobe ep 100 beta 9 fit 0.010" in out and "rejected" not in out
+    monkeypatch.setattr(ex, "reprobe_race", fake(0.05, 3.0))
+    assert "accepted" not in ex.reprobe_step(r, 150) and r.beta == 3.0
+    hist = ex.result_ck(cfg, r, 0.0, None, 0)["race_cal_history"]
+    assert [x.get("accepted", True) for x in hist] == [False, True, True]
+
+
+def test_action_repeat_monitor():
+    """action_repeat_probability (016 §21, race_log): the fraction of resamples at which the decision repeats the
+    previous one, per copy averaged over copies in an episode; the held steps between resamples are not counted, so
+    the count of resamples in a bin is the number of 40-ms windows under a hold of 2, not the env steps."""
+    assert "action_repeat_probability" in ex.SLOG_KEYS
+    r = _race_runner(freeze=40, race_theta=16.0)
+    for _ in range(2 * (ex.WARM_N + 1)):
+        r.tick()
+    r.arep[:] = 0
+    n, reps = 0, 0
+    for _ in range(20):
+        prev = int(r.action[0])
+        r.tick()
+        if r.timer[0] == 0:  # a resample: the decision against the previous one (the held tick between is not counted)
+            n, reps = n + 1, reps + (int(r.action[0]) == prev)
+    assert r.arep[0].tolist() == [reps, n] and n == 10 and r.code[0] == 0
+    rep = reps / n
+    row = r.score_monitors(1)
+    assert row["action_repeat_probability"] == pytest.approx(rep) and not r.arep.any()
+    assert np.isnan(r.score_monitors(2)["action_repeat_probability"])  # an empty bin
+    assert set(r.slog) == set(ex.SLOG_KEYS) and len(r.slog["action_repeat_probability"]) == 2

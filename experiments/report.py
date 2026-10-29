@@ -256,6 +256,29 @@ def _race_cartpole():
 
 
 STUDIES["race-cartpole"] = _race_cartpole()
+
+
+def _race_acrobot():
+    """race-acrobot (iteration 016 §21; draft, to pre-register after the hold pilot): the race on Acrobot with the
+    decision hold. Every arm --eta-cal and beta_c -1.5 (the 1.5 V_rand rule, 016 §20). Reference: CK's softmax at that
+    beta_c. Race arms: --readout race with the band (--rate-cost 5e-4 --rate-floor 0.5), theta 16 from the 20-ms rule
+    and the decision held 2 env steps (--freeze 40; n_hold = the smallest hold at which a uniform random policy
+    terminates >= 20 % of episodes), surrogate credit, no re-probe; on no columns and the three regimes. Settings
+    selected on dev seeds 20-29 (016 §20-21). Primary AUC. Seeds 7100-7119, fresh."""
+    t, seeds = "Acrobot", range(7100, 7120)
+    common = ["--rate-target", "40", "--block", "20", "--fast", "--rate-match-rec", "--eta-cal", "--beta-c", "-1.5"]
+    race = ["--readout", "race", "--rate-cost", "5e-4", "--rate-floor", "0.5", "--race-theta", "16", "--freeze", "40"]
+    arms = {"base_ck": ["--ent-match-rec"], "base_race_h2": race,
+            **{f"{a}_race_h2": [*race, *f] for a, f in _HC3_ARMS.items()}}
+    groups = {f"{t}_{a}": dict(task=t, engine="nlif", seeds=seeds, flags=[*common, *f]) for a, f in arms.items()}
+    pairs = [(f"{t}_{a}_race_h2", f"{t}_base_ck") for a in ("base", *_HC3_ARMS)]
+    pairs += [(f"{t}_{a}_race_h2", f"{t}_{b}_race_h2", "secondary") for a, b in
+              (("cols_sealed", "base"), ("cols_on", "base"), ("cols_sealed", "cols_lam0"), ("cols_on", "cols_lam0"))]
+    return dict(title="The race readout with the decision hold on Acrobot against the published backbone",
+                groups=groups, pairs=pairs, reference={t: f"{t}_base_ck"}, gates={})
+
+
+STUDIES["race-acrobot"] = _race_acrobot()
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
            "T_s_sd", "T_s_median", "T_m_mean", "T_m_sd", "T_m_n", "ret_mean", "ret_sd", "ret_ge_M", "ms_per_frame",
            "resumes", "mw_ref", "mw_T_f", "mw_T_s", "mw_ret", "gate_min_solved", "gate_pass"]
