@@ -42,18 +42,22 @@ lr<lam_ratio>, lx<lam_rec>, er<eta_rec>, sw<stat_windows>, pw<pair_ms>, nl<n_lat
 only, except the first two). The result's 'rec' holds the calibration and the monitors (HybridRec.log, one row per
 pooled-episode event); --save-model PATH writes R snapshots (episode 0, every SNAP_EVERY, end) with m, roles, mask.
 --readout race (iteration 016 §14.1 Stage B, engine nlif with --rate-target; token race): the softmax is replaced by a
-race on the columns' net spike counts (E minus own opponent I, the quantity Layout.Ma reads) at 1 ms resolution: the
-first column whose count since the copy's last resample reaches theta wins (ties: one uniform draw), else the leader
-at the deadline (the freeze window), Eq. 1h. theta = round(n_ae rate_target freeze), the mean count of one column at the
-target rate over a decision window (--race-theta overrides; token th<theta>). Learning uses the population surrogate
-p~ = softmax(beta log max(r_k, eps_r)) (eps_r = 1 / (tau_n n_ae), one spike's filtered rate) with its exact gradient
-as the per-column eligibility factor (race_factor); beta is pre-set by calibrate_race (a held-observation probe: the
-surrogate's mean per-state entropy at the mean column rates equals the realised race's) unless --race-beta is given
+race on the columns' E spike counts (CKRunner.Mcnt: the excitatory posts of each column, §18; the opponent I posts
+shape the dynamics but are not tallied) at 1 ms resolution: the first column whose count since the copy's last
+resample reaches theta wins (ties: one uniform draw), else the leader at the deadline (the freeze window), Eq. 1h.
+theta = round(n_ae rate_target freeze), the mean count of one column at the target rate over a decision window
+(--race-theta overrides; token th<theta>). Learning uses the population surrogate p~ = softmax(beta log max(r_k,
+eps_r)) of the columns' E rates r_k (the quantity the race tallies, CKRunner.MaE, 016 §21; eps_r = 1 / (tau_n n_ae),
+one spike's filtered rate) with its exact gradient as the per-column eligibility factor (race_factor) on the E actor
+rows (the I rows get no policy credit and no entropy term; a no-op where n_ai = 0); beta is pre-set by calibrate_race
+(a held-observation probe: the surrogate's mean per-state entropy at the mean column rates equals the realised
+race's) unless --race-beta is given
 (token rb<beta>); --race-reprobe N (016 §18 fix a; token rp<N>) re-runs the probe at the current W (and R) once every
 N pooled episodes on its own stream (reprobe_race) and the new beta applies from the next window on if the record's
 fit is within RACE_FIT_GATE (reprobe_step; a rejected record is marked 'accepted': False in the result's
 'race_cal_history'). --freeze MS (token fz<ms> off the preset) sets the decision window, the race's deadline and the
-hold of the sampled action over freeze / 20 env steps; the decision hold of 016 §21 is --freeze 40 --race-theta 16.
+hold of the sampled action over freeze / 20 env steps; the decision hold of 016 §21 is theta from the 20-ms rule
+(--race-theta round(n_ae r0 20 ms)) with the preset's freeze (see Config.freeze).
 --norm-logits and --ent-match-rec are softmax-only. Both readouts log the actor spikes per decision window per copy
 (the result's 'actor_spikes_per_decision'; the race adds 'race_decisions').
 --credit {hazard,noise} (016 §20 Stage B', readout race, --eta-cal; tokens sch | scn): the surrogate is replaced by the
@@ -157,8 +161,11 @@ class Config:
     max_eps: int = 0  # pooled episodes cap (main.py max_eps); episodes is min_eps
     init_scale: float = 0.1  # W ~ U(0, init_scale) mV
     freeze: int = 20  # ms between action samples (freeze_action; --freeze): the decision window, the race's deadline
-    # and the hold of the sampled action over freeze / 20 env steps. A decision hold (016 §21) is freeze = n_hold x 20
-    # with theta from the 20-ms rule (--race-theta): the race decides within one env step and the action is held.
+    # and the hold of the sampled action over freeze / 20 env steps. The hold rule (016 §21): the race decides within
+    # 20 ms at theta = round(n_ae r0 x 20 ms) (--race-theta; r0 = rate_target per ms) and holds the decision for the
+    # preset's freeze / 20 env steps, i.e. the race runs at the backbone's own control rate. The recipe is thus
+    # LunarLander --race-theta 26 with the preset freeze 40 (2 env steps), CartPole the preset freeze 20 (1 step; the
+    # 20-ms rule is the default theta there), Acrobot --freeze 40 (2 steps) with --race-theta 16.
     f_order: int = 2  # Fourier encoder (util.State_to_spike_Fourier): order, cross terms, ON/OFF split, constant unit
     f_cross: bool = True
     f_double: bool = False
@@ -186,9 +193,9 @@ class Config:
     ent_match_rec: bool = False  # calibrate_low: alpha_a per arm so its initial policy entropy is the base run's
     norm_logits: bool = False  # policy scores normalised by the pooled actor rate against rate_target (016 §13)
     # iteration 016 §14.1 Stage B (engine nlif, rate_target): the race readout in place of the softmax
-    readout: str = "softmax"  # 'softmax' (CK Eq. 12) | 'race' (Eq. 1h on the columns' net counts, CKRunner.race_block)
-    race_theta: float = 0.0  # race: bound on a column's net count (0 = round(n_ae rate_target freeze), CKRunner)
-    race_beta: float = 0.0  # race: sharpness of the surrogate policy softmax(beta log r) (0 = calibrate_race)
+    readout: str = "softmax"  # 'softmax' (CK Eq. 12) | 'race' (Eq. 1h on the columns' E counts, CKRunner.race_block)
+    race_theta: float = 0.0  # race: bound on a column's E count (0 = round(n_ae rate_target freeze), CKRunner)
+    race_beta: float = 0.0  # race: sharpness of the surrogate softmax(beta log r_E) of the E rates (0 = calibrate_race)
     race_reprobe: int = 0  # race: re-run the contrast probe at the current W (and R) every N episodes (0 = never)
     # iteration 016 §20 Stage B' (race, --eta-cal): the actor rows' credit, 'surrogate' (p~ = softmax(beta log r)) or
     # the spike score of lif.post_scores, 'hazard' ((S - h) psi, clipped) | 'noise' (the exact observed-membrane score)
@@ -539,6 +546,12 @@ class CKRunner:
         # the tally counts a column's E posts only (user decision 2026-10-29, 016 §18: the I posts shape the dynamics
         # but are not counted, so theta means the same on every task; without I posts it is the net count of Eq. 1h)
         self.Mcnt = (lay.Ma[:, self.apost] > 0).astype(float)  # K x n_act
+        # the surrogate reads what the race tallies (016 §21): the column's E rate r_E,k = mean rate of its E posts,
+        # R @ MaE.T with MaE = Ma with its I entries (-1 / n_ai) zeroed, i.e. (R[apost] @ Mcnt.T) / n_ae up to
+        # rounding. Where n_ai = 0 MaE is Ma itself, so the product is bit-identical to the net rate R @ Ma.T (CK's
+        # score, which the softmax readout keeps). With I posts the net rate E - I sits near 0, below eps_r, and the
+        # credit factor was mostly dead (LunarLander).
+        self.MaE = np.where(lay.Ma > 0, lay.Ma, 0.0)  # K x n_post
         self.cnt, self.pend = np.zeros((H, K)), np.full(H, -1)
         # rate_floor: the column -> actor-row expansion (K x n_act + n_lat; 1 on column k's E posts, 0 on I posts and
         # latents), and the race monitor's sums: per-column rate, per-ms minimum over columns, ms x copies in an episode
@@ -615,6 +628,8 @@ class CKRunner:
             Ap, ge = fr * Ap, fr * ge
         c = Ap[:, act]
         kap = self.c_e * sa * ge[:, act]  # Eq. 26 (c_e = 0 under the score credit)
+        if self.race:  # the surrogate is a function of the E rates only (MaE), so its credit and entropy term go to
+            c, kap = np.where(lay.ae, c, 0.0), np.where(lay.ae, kap, 0.0)  # the E actor rows (I posts, latents: 0)
         if self.hr is not None:  # CK's action score per module (latents 0; their W rows get no update)
             if not self.score:  # the score credit sets hs from the window's scores in learn_block
                 self.hs[:, :K] = cfg.alpha_a * Ap / cfg.n_ae
@@ -624,8 +639,8 @@ class CKRunner:
         end, learn = self.is_end & ~self.trunc, self.code < 2
         for b in range(MS // cfg.block):
             self.learn_block(f, r_ms, end, learn, c, kap, np.arange(b * cfg.block, (b + 1) * cfg.block))
-        if self.race:  # p~ of the window's column rates; the action is the race's pending winner, else the leader now
-            self.prk = self.rho @ lay.Ma.T
+        if self.race:  # p~ of the window's column E rates; the action is the race's pending winner, else the leader now
+            self.prk = self.rho @ self.MaE.T
             self.p = self.surrogate(self.prk)
         else:
             sc, self.prk, self.prbar = self.scores(self.rho)
@@ -767,7 +782,10 @@ class CKRunner:
         if lay.n_lat:
             g[nc:][lay.lat] = 0.0  # input -> latent W frozen at init
         if self.frozen:
-            self.gsq += [(g[:nc] ** 2).mean(), (g[nc:] ** 2).mean()]
+            # the actor RMS over the credited rows: under the race only the E actor rows receive the policy credit
+            # (016 §21), so the I rows would dilute the E4' rule's RMS and inflate eta_a by sqrt(2) where n_ai > 0
+            ga = g[nc:][self.lay.ae] if self.race else g[nc:]
+            self.gsq += [(g[:nc] ** 2).mean(), (ga ** 2).mean()]
             self.nupd += 1
         elif self.opt is not None:
             self.W += self.opt.step(g, self.nu / self.mv, L)
@@ -783,7 +801,7 @@ class CKRunner:
         self.xprev, self.P, self.rho, self.Vprev = x[-1], P[-1], R[-1], V[-1]
         if learn.any():
             if self.race:
-                s = self.surrogate(R[:, learn] @ lay.Ma.T)
+                s = self.surrogate(R[:, learn] @ self.MaE.T)  # H(s) monitor: the surrogate of the E rates
                 rk = R[:, learn][..., self.apost] @ self.Mcnt.T / cfg.n_ae  # L x h x K: the columns' mean E rates
                 self.fsum += [*rk.sum((0, 1)), rk.min(-1).sum(), rk[..., 0].size]  # col_rate_min(_ms) monitors
             else:
@@ -814,16 +832,17 @@ class CKRunner:
 
     def surrogate(self, rk):
         """readout race: the population surrogate of the race, p~ = softmax(beta log max(r_k, eps_r)) of column rates
-        rk (..., K); eps_r = 1 / (tau_n n_ae), the filtered rate one spike gives, so the log never diverges (016
-        §14.1). beta is self.beta (cfg.race_beta, or the last re-probe's)."""
+        rk (..., K), the columns' E rates R @ MaE.T (what the race tallies, 016 §21); eps_r = 1 / (tau_n n_ae), the
+        filtered rate one spike gives, so the log never diverges (016 §14.1). beta is self.beta (cfg.race_beta, or
+        the last re-probe's)."""
         return td.softmax(self.beta * np.log(np.maximum(rk, self.eps_r)))
 
     def race_factor(self, rk):
         """readout race: the per-column eligibility factor beta / (alpha_a max(r_j, eps_r)) (H x K) of the window's
-        column rates rk, so that factor x (A_j - p~_j) x alpha_a / n_ae = d log p~_a / d rho_i for every post i of
-        column j (the exact gradient of the surrogate; test_race_gradient), and likewise for the entropy bonus with
-        g(p~) (Eq. 25/26). Zero below the floor, where the surrogate is constant in r_j. A K-vector broadcast per
-        copy."""
+        column E rates rk, so that factor x (A_j - p~_j) x alpha_a / n_ae = d log p~_a / d rho_i for every E post i
+        of column j (the exact gradient of the surrogate; test_race_gradient; the I posts do not enter r_j and get no
+        credit, tick), and likewise for the entropy bonus with g(p~) (Eq. 25/26). Zero below the floor, where the
+        surrogate is constant in r_j. A K-vector broadcast per copy."""
         fr = self.beta / (self.cfg.alpha_a * np.maximum(rk, self.eps_r))
         return np.where(rk > self.eps_r, fr, 0.0)
 
@@ -1130,8 +1149,9 @@ def calibrate_race(cfg, n_states=8, rtol=2e-3):
     frozen at init, rule off, the (seed, CAL_SEED) stream): for n_states fresh observations (env copy 0's reset,
     broadcast to every copy) and each contrast delta in RACE_DELTAS, column 0's excitatory input rows of W are scaled
     by 1 + delta (WARM_N + 1 warm-up ticks, then CAL_TICKS / n_states ticks), and the closed loop's own race decisions
-    (once per freeze window) give the winners and the mean window-end column rates rbar(state, delta). Conventions:
-    the perturbed column (0), its E rows (so the contrast is in the net rate the surrogate reads) and the delta set.
+    (once per freeze window) give the winners and the mean window-end column E rates rbar(state, delta) (CKRunner.prk,
+    the quantity the surrogate reads). Conventions: the perturbed column (0), its E rows (so the contrast is in the
+    E rate the surrogate reads and the race tallies) and the delta set.
     beta is the maximum-likelihood fit of the winners under softmax(beta log max(rbar(state, delta), eps_r)) over all
     states and conditions (one scalar; the log-likelihood is concave in beta, so log2 beta is bisected on the sign of
     its slope over [-3, 6]). Biologically the probe is a psychometric curve of the action channel: the win probability

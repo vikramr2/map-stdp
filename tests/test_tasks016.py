@@ -519,11 +519,12 @@ def test_credit_live_mask():
 
 def test_credit_score_run(monkeypatch):
     """A 20-window credit='noise' run against the surrogate run on a held observation (LunarLander, I posts present):
-    the critic rows of W are bit-identical, the actor I rows stay at their init, the actor E rows differ; the learner
-    is called twice per block, the critic rows with (X, P) as before and the actor rows with Y (float, 0 after each
-    copy's bound ms and on I posts) paired with x(t - 1) (a 0/1 input, not the P trace), c = 1 on E posts, 0 on I
-    posts, no sign and kap = 0; the rank-1 rate term on a block equals -c_t sum_t (rho_bar - rho_hat) rho_i P_j; the
-    checkpoint carries the bin monitors. (Tie draws are pinned: they come from the main rng.)"""
+    the critic rows of W are bit-identical, the actor I rows stay at their init under both credits (the surrogate's
+    credit goes to the E rows only, 016 §21; c_e = 0 and the rate term is E-only here), the actor E rows differ; the
+    learner is called twice per block, the critic rows with (X, P) as before and the actor rows with Y (float, 0
+    after each copy's bound ms and on I posts) paired with x(t - 1) (a 0/1 input, not the P trace), c = 1 on E
+    posts, 0 on I posts, no sign and kap = 0; the rank-1 rate term on a block equals -c_t sum_t (rho_bar - rho_hat)
+    rho_i P_j; the checkpoint carries the bin monitors. (Tie draws are pinned: they come from the main rng.)"""
     cfg = ex.preset("LunarLander", heads=2, readout="race", race_beta=4.0, c_e=0.0, **dict(_SC, s_in=0.1))
     monkeypatch.setattr(ex.CKRunner, "_leader", lambda self, cnt: int(np.argmax(cnt)))  # a tie's draw would shift
     runs, orig = {}, ex.td.block_learn_ck_fast  # the input stream of one run and not the other
@@ -544,7 +545,7 @@ def test_credit_score_run(monkeypatch):
     nc, ap, cE = runs["r"].lay.n_crit, runs["r"].apost, runs["r"].cE > 0
     (W0s, Ws, caps, rs), (W0n, Wn, capn, rn) = runs["surrogate"], runs["noise"]
     assert np.array_equal(W0s, W0n) and np.array_equal(Ws[:nc], Wn[:nc]) and not np.array_equal(Ws[nc:], Wn[nc:])
-    assert np.array_equal(Wn[ap][~cE], W0n[ap][~cE]) and not np.array_equal(Ws[ap][~cE], W0s[ap][~cE])
+    assert np.array_equal(Wn[ap][~cE], W0n[ap][~cE]) and np.array_equal(Ws[ap][~cE], W0s[ap][~cE])
     assert (Wn[ap][cE] != W0n[ap][cE]).any() and (Wn[ap][cE] != Ws[ap][cE]).any()
     assert len(capn) == 40 and len(caps) == 20 and caps[0][0].dtype == bool
     capc, capa = capn[0::2], capn[1::2]  # per block: the critic call, then the actor call
@@ -907,3 +908,75 @@ def test_action_repeat_monitor():
     assert row["action_repeat_probability"] == pytest.approx(rep) and not r.arep.any()
     assert np.isnan(r.score_monitors(2)["action_repeat_probability"])  # an empty bin
     assert set(r.slog) == set(ex.SLOG_KEYS) and len(r.slog["action_repeat_probability"]) == 2
+
+
+_LL = dict(seed=0, engine="nlif", s_in=0.1, rate_target=40.0, block=20, fast=True, sgd=True, adam=False, heads=1)
+
+
+def test_race_surrogate_e_rate():
+    """The surrogate reads what the race tallies (016 §21): on LunarLander (n_ai = 32) prk after a tick is the
+    columns' E rate (rho @ Mcnt.T) / n_ae, non-negative and not CK's net rate rho @ Ma.T (which sits near 0, below
+    eps_r); calibrate_race's probe fits the race (fit <= RACE_FIT_GATE) with a sharp beta (> 3), where the net-rate
+    surrogate (MaE = Ma, today's) gives a floor artefact: a worse fit and a smaller beta. The probe's record carries
+    the E rates (rsum / rn >= 0)."""
+    cfg = ex.preset("LunarLander", readout="race", race_beta=4.0, c_t=5e-4, **_LL)
+    r = ex.CKRunner(cfg)
+    assert cfg.n_ai > 0 and (r.MaE >= 0).all() and (r.MaE > 0).sum() == r.K * cfg.n_ae and (r.lay.Ma < 0).any()
+    for _ in range(3):
+        r.tick()
+    e = r.rho[..., r.apost] @ r.Mcnt.T / cfg.n_ae
+    assert np.allclose(r.prk, e) and (r.prk >= 0).all() and (r.prk > r.eps_r).all()
+    assert not np.allclose(r.prk, r.rho @ r.lay.Ma.T) and np.allclose(r.surrogate(r.prk), r.p)
+    assert (r.race_factor(r.prk) > 0).all()  # the credit active on every column
+    beta, rec = ex.calibrate_race(dataclasses.replace(cfg, race_beta=0.0))
+    fit = ex.race_fit(rec)
+    assert fit <= ex.RACE_FIT_GATE and beta > 3 and rec["beta"] == beta
+    p = ex.CKRunner(dataclasses.replace(cfg, adam=False, sgd=False, block=ex.MS, race_beta=0.0), rng_seed=ex.CAL_SEED,
+                    frozen=True)
+    p.MaE = p.lay.Ma  # today's surrogate of the net rate, on the same probe runner
+    beta_net, rec_net = ex._race_probe(p, 8, 2e-3)
+    assert ex.race_fit(rec_net) > fit and beta_net < beta and ex.race_fit(rec_net) > ex.RACE_FIT_GATE
+    q = ex.CKRunner(dataclasses.replace(cfg, race_beta=beta), rng_seed=ex.CAL_SEED, frozen=True)
+    q.probe = q.hold = True
+    for _ in range(3):
+        q.tick()
+    assert q.rn > 0 and (q.rsum / q.rn >= 0).all() and np.allclose(q.rsum / q.rn, q.prk.sum(0) / q.H, atol=1e-2)
+
+
+def test_race_credit_e_rows(monkeypatch):
+    """The policy credit goes to the E rows only under the race (016 §21): the learner's c and kap (the entropy term)
+    are zero on the I actor rows of a LunarLander race runner and non-zero on E rows; the softmax path still credits
+    the I rows (with the sign flip)."""
+    cap, orig = [], ex.td.block_learn_ck_fast
+
+    def spy(z, q, P, X, d, c, kap, *a):
+        cap.append((np.array(c), np.array(kap)))
+        return orig(z, q, P, X, d, c, kap, *a)
+    monkeypatch.setattr(ex.td, "block_learn_ck_fast", spy)
+    r = ex.CKRunner(ex.preset("LunarLander", readout="race", race_beta=4.0, **_LL))
+    ai, ae = r.lay.sign[r.lay.n_crit:] < 0, r.lay.ae
+    assert ai.any() and ai.sum() == ae.sum() and r.cfg.c_e > 0 and r.c_t == 0
+    for _ in range(3):
+        r.tick()
+    c, kap = cap[-1]
+    assert not c[..., ai].any() and not kap[..., ai].any() and c[..., ae].any() and kap[..., ae].any()
+    assert not np.signbit(c[..., ai]).any() and not np.signbit(kap[..., ai]).any()  # +0.0, not -0.0
+    cap.clear()
+    s = ex.CKRunner(ex.preset("LunarLander", **_LL))
+    for _ in range(3):
+        s.tick()
+    c, kap = cap[-1]
+    assert c[..., ai].any() and kap[..., ai].any()
+
+
+def test_race_e_rate_invariance_n_ai0():
+    """Where n_ai = 0 (CartPole, Acrobot) the fix is a no-op: MaE is Ma itself (bit-identical products, so the race
+    studies on those tasks are unchanged; test_credit_default_path locks the Acrobot race fingerprint), the E rate
+    equals (R @ Mcnt.T) / n_ae up to rounding, and the E masks (lay.ae, cE) are all ones."""
+    for task, s_in in (("Acrobot", 0.16), ("CartPole", 0.16)):
+        r = ex.CKRunner(ex.preset(task, readout="race", race_beta=6.0, **dict(_LL, s_in=s_in)))
+        assert r.cfg.n_ai == 0 and np.array_equal(r.MaE, r.lay.Ma) and r.MaE.flags.c_contiguous
+        assert r.lay.ae.all() and (r.cE == 1).all() and len(r.lay.ae) == len(r.cE)
+        R = np.random.default_rng(1).uniform(0, 0.1, (5, 2, r.lay.n_post))
+        assert np.array_equal(R @ r.MaE.T, R @ r.lay.Ma.T)
+        assert np.allclose(R @ r.MaE.T, R[..., r.apost] @ r.Mcnt.T / r.cfg.n_ae)

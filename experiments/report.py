@@ -279,6 +279,29 @@ def _race_acrobot():
 
 
 STUDIES["race-acrobot"] = _race_acrobot()
+
+
+def _race_lunarlander():
+    """race-lunarlander (iteration 016 §21; draft, to pre-register after the full-length pilot): the race on LunarLander
+    at the backbone's control rate. Every arm --eta-cal (the preset's Adam steps). Reference: CK's softmax at the
+    start (hybrid-columns-3-ck's arm, rerun on this study's seeds). Race arms: --readout race with the band (--rate-cost
+    5e-4 --rate-floor 0.5), theta 26 from the 20-ms rule, the preset's 40-ms freeze (the decision held 2 env steps, the
+    backbone's own control rate), the surrogate on the E column rate, no re-probe; on no columns and the three regimes.
+    Settings selected on dev seeds 20-29 (016 §21). Primary last-100 (TD_PAIR_METRICS). Seeds 7200-7219, fresh."""
+    t, seeds = "LunarLander", range(7200, 7220)
+    common = ["--rate-target", "40", "--block", "20", "--fast", "--rate-match-rec", "--eta-cal"]
+    race = ["--readout", "race", "--rate-cost", "5e-4", "--rate-floor", "0.5", "--race-theta", "26"]
+    arms = {"base_ck": ["--ent-match-rec"], "base_race_e": race,
+            **{f"{a}_race_e": [*race, *f] for a, f in _HC3_ARMS.items()}}
+    groups = {f"{t}_{a}": dict(task=t, engine="nlif", seeds=seeds, flags=[*common, *f]) for a, f in arms.items()}
+    pairs = [(f"{t}_{a}_race_e", f"{t}_base_ck") for a in ("base", *_HC3_ARMS)]
+    pairs += [(f"{t}_{a}_race_e", f"{t}_{b}_race_e", "secondary") for a, b in
+              (("cols_sealed", "base"), ("cols_on", "base"), ("cols_sealed", "cols_lam0"), ("cols_on", "cols_lam0"))]
+    return dict(title="The race readout at the backbone's control rate on LunarLander against the published backbone",
+                groups=groups, pairs=pairs, reference={t: f"{t}_base_ck"}, gates={})
+
+
+STUDIES["race-lunarlander"] = _race_lunarlander()
 COLUMNS = ["group", "task", "engine", "flags", "n_declared", "n", "solved", "T_f_mean", "T_f_sd", "T_f_n", "T_s_mean",
            "T_s_sd", "T_s_median", "T_m_mean", "T_m_sd", "T_m_n", "ret_mean", "ret_sd", "ret_ge_M", "ms_per_frame",
            "resumes", "mw_ref", "mw_T_f", "mw_T_s", "mw_ret", "gate_min_solved", "gate_pass"]
